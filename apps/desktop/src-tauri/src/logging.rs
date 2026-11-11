@@ -483,6 +483,10 @@ pub struct WindowServerPortDeadDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreviousSessionVanishedDiagnostic {
     pub crash_report: VanishedSessionCrashReportTag,
+    /// Whether the previous session ran this same build. `different` marks
+    /// an update-relaunch candidate (PETAL-DESKTOP-22). A closed tag, not a
+    /// version string: the diagnostic tag schema is a fixed allowlist.
+    pub previous_build: PreviousBuildTag,
 }
 
 /// Emitted once at startup when the highest `CGWindowID` this session has
@@ -542,6 +546,7 @@ diagnostic_enum!(InstallDestinationClassTag { Applications => "applications", Us
 // `Unverified` (#105): a `desktop-*.ips` exists in the scan window but
 // could NOT be attributed to the dead session. Distinct from `Found` on
 // purpose -- it must never read as an explanation.
+diagnostic_enum!(PreviousBuildTag { Same => "same", Different => "different", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(VanishedSessionCrashReportTag { Found => "found", NotFound => "not_found", Unverified => "unverified", NotApplicable => "not_applicable" });
 diagnostic_enum!(PressureLevelTag { Warn => "warn", Critical => "critical", NotApplicable => "not_applicable" });
 // #106: WHICH allocation owner held the most dirty bytes when a
@@ -848,6 +853,7 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "held_native_surfaces",
     "recovery_burst",
     "concurrent_shares",
+    "previous_build",
     "capture_occlusion",
     "occluded_by_petal",
     "dedup_count_bucket",
@@ -1329,6 +1335,7 @@ pub(crate) fn build_sentry_diagnostic_event(
         "held_native_surfaces",
         "recovery_burst",
         "concurrent_shares",
+        "previous_build",
         "capture_occlusion",
         "occluded_by_petal",
     ] {
@@ -1719,6 +1726,7 @@ pub(crate) fn build_sentry_diagnostic_event(
             insert("install_destination_class", "not_applicable");
             insert("overlay_clear_reason", "not_applicable");
             insert("crash_report_status", value.crash_report.tag());
+            insert("previous_build", value.previous_build.tag());
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
@@ -2987,6 +2995,37 @@ fn sentry_logger_chain<L: log::Log>(
     )
 }
 
+/// The formatted, filtered dispatch every sink hangs off. Split out of
+/// `init()` so tests can drive the real filter without installing a logger.
+fn log_dispatch(filter: env_filter::Filter, max_level: log::LevelFilter) -> fern::Dispatch {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            let message = redact_room_credentials(&message.to_string());
+            out.finish(format_args!(
+                "{} [{}] [{}] {}",
+                chrono_like_timestamp(),
+                record.level(),
+                record.target(),
+                message
+            ))
+        })
+        // fern's own base level is left at the same ceiling as the real
+        // filter (`max_level`, `env_filter::Filter::filter()`'s max across
+        // every directive) so it never filters out anything the closure
+        // below would otherwise allow. ALL real filtering -- the global
+        // default, per-module `RUST_LOG` directives, and the noisy-third-
+        // party-crate denylist -- happens in `.filter(...)`'s
+        // `env_filter::Filter`, kept as the single source of truth instead
+        // of two competing per-target systems (see `resolve_log_filter`'s
+        // doc comment for why that split bit us before).
+        .level(max_level)
+        // The shutdown marker bypasses `RUST_LOG` (PETAL-DESKTOP-22).
+        .level_for(SHUTDOWN_MARKER_TARGET, log::LevelFilter::Info)
+        .filter(move |metadata| {
+            metadata.target() == SHUTDOWN_MARKER_TARGET || filter.enabled(metadata)
+        })
+}
+
 /// Install the file-based logging sink + panic hook. Must be called exactly
 /// once, as the very first thing in `run()`, before any other startup code
 /// (including `dotenvy::from_path`) so that even a failure in that early
@@ -3079,28 +3118,7 @@ pub fn init() -> PathBuf {
     // second (cheap, append-mode) open of the same file, not a conflict.
     let file_open_check = OpenOptions::new().create(true).append(true).open(&log_path);
 
-    let mut dispatch = fern::Dispatch::new()
-        .format(|out, message, record| {
-            let message = redact_room_credentials(&message.to_string());
-            out.finish(format_args!(
-                "{} [{}] [{}] {}",
-                chrono_like_timestamp(),
-                record.level(),
-                record.target(),
-                message
-            ))
-        })
-        // fern's own base level is left at the same ceiling as the real
-        // filter (`max_level`, `env_filter::Filter::filter()`'s max across
-        // every directive) so it never filters out anything the closure
-        // below would otherwise allow. ALL real filtering -- the global
-        // default, per-module `RUST_LOG` directives, and the noisy-third-
-        // party-crate denylist -- happens in `.filter(...)`'s
-        // `env_filter::Filter`, kept as the single source of truth instead
-        // of two competing per-target systems (see `resolve_log_filter`'s
-        // doc comment for why that split bit us before).
-        .level(max_level)
-        .filter(move |metadata| filter.enabled(metadata))
+    let mut dispatch = log_dispatch(filter, max_level)
         // Always echo to stdout too -- still useful for `cargo run`/`tauri dev`
         // where a terminal IS attached; this is additive, not a replacement.
         .chain(std::io::stdout());
@@ -4537,6 +4555,9 @@ struct PreviousSessionReport {
     /// from an in-use crash -- say so rather than picking one.
     display_slept: bool,
     rebooted_at: Option<std::time::SystemTime>,
+    /// Build version the previous session recorded in `last-session.json`.
+    /// Local log text and the `previous_build` tag only; never sent raw.
+    previous_version: Option<String>,
 }
 
 /// What the previous session recorded about ITSELF, assembled from its own
@@ -4567,6 +4588,10 @@ struct SessionIdentityRecord {
     /// which initializes far later in `setup()`.
     #[serde(default)]
     boot_time_epoch: Option<i64>,
+    /// The build that wrote this record, so the next launch can tell an
+    /// update relaunch (version changed) from a same-build death.
+    #[serde(default)]
+    build_version: Option<String>,
 }
 
 const SESSION_IDENTITY_FILE: &str = "last-session.json";
@@ -4610,6 +4635,7 @@ fn current_session_identity() -> SessionIdentityRecord {
             .ok()
             .map(|d| d.as_secs()),
         boot_time_epoch: current_boot_time_epoch(),
+        build_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     }
 }
 
@@ -5445,8 +5471,65 @@ fn machine_rebooted_into_this_session(
     within_window.then_some(boot_at)
 }
 
-const VANISHED_SESSION_SHUTDOWN_MARKERS: &[&str] =
-    &["left room", "quit: quit_app", "event journal loop stopped"];
+/// Written synchronously by `lib.rs`'s run-event handler on every ORDERLY
+/// process exit that is not `quit_app`: Cmd-Q, Dock/app-menu Quit, logout,
+/// and `RunEvent::Exit` after an in-app update relaunch. Do NOT log these
+/// from any path a crash can reach: a kill/abort must still read as
+/// VANISHED (PETAL-DESKTOP-22).
+pub(crate) const QUIT_APP_EXIT_MARKER: &str = "quit: app exit";
+pub(crate) const QUIT_RESTART_MARKER: &str = "quit: restart";
+
+/// The shutdown line for a run event, or `None` when the event is not an
+/// orderly exit. `ExitRequested` only counts for the restart code (update
+/// relaunch / `restart_app`); other exit requests are followed by `Exit`.
+pub(crate) fn run_event_shutdown_line(event: &tauri::RunEvent) -> Option<&'static str> {
+    match event {
+        tauri::RunEvent::Exit => Some("quit: app exit (RunEvent::Exit)"),
+        tauri::RunEvent::ExitRequested { code, .. } => exit_requested_shutdown_line(*code),
+        _ => None,
+    }
+}
+
+pub(crate) fn exit_requested_shutdown_line(code: Option<i32>) -> Option<&'static str> {
+    (code == Some(tauri::RESTART_EXIT_CODE))
+        .then_some("quit: restart requested (RunEvent::ExitRequested)")
+}
+
+/// Log the run event's shutdown line (if any) and flush, so it is on disk
+/// before the process exits. The file sink is an unbuffered `File`; the
+/// explicit flush covers any wrapper that buffers (PETAL-DESKTOP-22).
+pub(crate) fn log_run_event_shutdown(event: &tauri::RunEvent) {
+    if let Some(line) = run_event_shutdown_line(event) {
+        write_shutdown_marker(log::logger(), line);
+    }
+}
+
+/// Target the shutdown marker is logged under. `log_dispatch` admits it
+/// whatever `RUST_LOG` says: a filtered-out marker (e.g.
+/// `RUST_LOG=info,desktop_lib::logging=warn`) makes a Cmd-Q read as VANISHED.
+pub(crate) const SHUTDOWN_MARKER_TARGET: &str = "petal::shutdown";
+
+/// Hands the marker straight to `logger`, NOT via `log::info!`: the macro
+/// drops the record against `log::max_level()` (e.g. `RUST_LOG=warn`)
+/// before any logger sees it (PETAL-DESKTOP-22).
+pub(crate) fn write_shutdown_marker(logger: &dyn log::Log, line: &str) {
+    logger.log(
+        &log::Record::builder()
+            .args(format_args!("{line}"))
+            .level(log::Level::Info)
+            .target(SHUTDOWN_MARKER_TARGET)
+            .build(),
+    );
+    logger.flush();
+}
+
+const VANISHED_SESSION_SHUTDOWN_MARKERS: &[&str] = &[
+    "left room",
+    "quit: quit_app",
+    QUIT_APP_EXIT_MARKER,
+    QUIT_RESTART_MARKER,
+    "event journal loop stopped",
+];
 
 /// Lines that only appear while a meeting is (or was moments ago) live.
 /// The join line alone is NOT sufficient evidence (#882 review): the tail
@@ -5492,20 +5575,29 @@ fn classify_previous_session(
             crash,
             display_slept: false,
             rebooted_at: None,
+            previous_version: None,
         };
     };
     let after = &segment[last_activity_index + 1..];
-    let shut_down = after.iter().any(|line| {
-        VANISHED_SESSION_SHUTDOWN_MARKERS
-            .iter()
-            .any(|marker| line.contains(marker))
+    // The run-event markers are TERMINAL anywhere in the segment: the exit
+    // happens in-room, so periodic writers ("compositor feed:") log after
+    // them and must not re-arm the vanish (PETAL-DESKTOP-22). Exit is final.
+    let terminal_exit = segment.iter().any(|line| {
+        line.contains(QUIT_APP_EXIT_MARKER) || line.contains(QUIT_RESTART_MARKER)
     });
+    let shut_down = terminal_exit
+        || after.iter().any(|line| {
+            VANISHED_SESSION_SHUTDOWN_MARKERS
+                .iter()
+                .any(|marker| line.contains(marker))
+        });
     if shut_down {
         return PreviousSessionReport {
             outcome: PreviousSessionOutcome::CleanShutdown,
             crash,
             display_slept: false,
             rebooted_at: None,
+            previous_version: None,
         };
     }
     let display_slept = match after
@@ -5527,6 +5619,7 @@ fn classify_previous_session(
         crash,
         display_slept,
         rebooted_at,
+        previous_version: None,
     }
 }
 
@@ -5612,7 +5705,22 @@ fn analyze_previous_session(inputs: &PreviousSessionInputs<'_>) -> PreviousSessi
         last_log_line,
     );
 
-    classify_previous_session(segment, crash, rebooted_at)
+    let mut report = classify_previous_session(segment, crash, rebooted_at);
+    report.previous_version = inputs
+        .recorded_identity
+        .as_ref()
+        .and_then(|record| record.build_version.clone());
+    report
+}
+
+/// Same build / different build / nothing recorded. A `different` vanish
+/// is an update-relaunch candidate (PETAL-DESKTOP-22).
+fn previous_build_tag(previous: Option<&str>, current: &str) -> PreviousBuildTag {
+    match previous {
+        None => PreviousBuildTag::Unknown,
+        Some(version) if version == current => PreviousBuildTag::Same,
+        Some(_) => PreviousBuildTag::Different,
+    }
 }
 
 /// The crash-report statement, or `None` when there is nothing to say.
@@ -5665,6 +5773,10 @@ fn previous_session_log_line(report: &PreviousSessionReport) -> Option<(log::Lev
     } else {
         ""
     };
+    let build_note = match report.previous_version.as_deref() {
+        Some(previous) => format!(" (previous build {previous}, this build {})", env!("CARGO_PKG_VERSION")),
+        None => String::new(),
+    };
     match report.outcome {
         PreviousSessionOutcome::CleanShutdown => None,
         PreviousSessionOutcome::WentDownWithTheMachine => Some((
@@ -5688,19 +5800,19 @@ fn previous_session_log_line(report: &PreviousSessionReport) -> Option<(log::Lev
             CrashAttribution::Unattributed { .. } => Some((
                 log::Level::Warn,
                 format!(
-                    "previous session VANISHED mid-meeting (no shutdown marker; a crash report exists but is NOT attributable to this session, so it explains nothing){sleep_note} -- see #878/#105"
+                    "previous session VANISHED mid-meeting (no shutdown marker; a crash report exists but is NOT attributable to this session, so it explains nothing){sleep_note}{build_note} -- see #878/#105"
                 ),
             )),
             CrashAttribution::NoReport => Some((
                 log::Level::Warn,
                 format!(
-                    "previous session VANISHED mid-meeting (no shutdown marker, no crash report){sleep_note} -- see #878"
+                    "previous session VANISHED mid-meeting (no shutdown marker, no crash report){sleep_note}{build_note} -- see #878"
                 ),
             )),
             CrashAttribution::NotScanned => Some((
                 log::Level::Warn,
                 format!(
-                    "previous session VANISHED mid-meeting (no shutdown marker; no crash report was scanned for -- nothing on record identifies the previous session){sleep_note} -- see #878"
+                    "previous session VANISHED mid-meeting (no shutdown marker; no crash report was scanned for -- nothing on record identifies the previous session){sleep_note}{build_note} -- see #878"
                 ),
             )),
         },
@@ -5721,7 +5833,13 @@ fn previous_session_sentry_event(report: &PreviousSessionReport) -> Option<Sentr
         CrashAttribution::NotScanned => VanishedSessionCrashReportTag::NotApplicable,
     };
     Some(SentryDiagnosticEvent::PreviousSessionVanished(
-        PreviousSessionVanishedDiagnostic { crash_report },
+        PreviousSessionVanishedDiagnostic {
+            crash_report,
+            previous_build: previous_build_tag(
+                report.previous_version.as_deref(),
+                env!("CARGO_PKG_VERSION"),
+            ),
+        },
     ))
 }
 
@@ -6224,6 +6342,7 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
             value,
             "found" | "not_found" | "unverified" | "not_applicable"
         ),
+        "previous_build" => matches!(value, "same" | "different" | "unknown" | "not_applicable"),
         "pressure_level" => matches!(value, "warn" | "critical" | "not_applicable"),
         // #106: the closed set mirrored from `platform::mem::VmOwner`. Kept a
         // hand-written `matches!` rather than a loop over `MemoryOwnerTag` so
@@ -7211,6 +7330,7 @@ mod tests {
             executable: Some(FIELD_EXECUTABLE.to_string()),
             started_unix: None,
             boot_time_epoch: Some(1_787_686_278),
+            build_version: None,
         }
     }
 
@@ -7783,6 +7903,7 @@ mod tests {
             Some(SentryDiagnosticEvent::PreviousSessionVanished(
                 PreviousSessionVanishedDiagnostic {
                     crash_report: VanishedSessionCrashReportTag::Unverified,
+                    previous_build: PreviousBuildTag::Unknown,
                 }
             ))
         );
@@ -7883,6 +8004,7 @@ mod tests {
             Some(SentryDiagnosticEvent::PreviousSessionVanished(
                 PreviousSessionVanishedDiagnostic {
                     crash_report: VanishedSessionCrashReportTag::NotFound,
+                    previous_build: PreviousBuildTag::Unknown,
                 }
             ))
         );
@@ -8094,6 +8216,226 @@ mod tests {
             classify(&["session: joined room ops", "quit: quit_app invoked"]),
             PreviousSessionOutcome::CleanShutdown
         );
+    }
+
+    // PETAL-DESKTOP-22: orderly exits that skip `quit_app` (update relaunch,
+    // Cmd-Q, logout) must leave a shutdown line; a kill must not.
+    #[test]
+    fn run_event_exit_and_restart_lines_count_as_shutdown() {
+        let exit = run_event_shutdown_line(&tauri::RunEvent::Exit).expect("Exit logs a line");
+        let restart = exit_requested_shutdown_line(Some(tauri::RESTART_EXIT_CODE))
+            .expect("restart request logs a line");
+        assert!(exit.contains(QUIT_APP_EXIT_MARKER), "{exit}");
+        assert!(restart.contains(QUIT_RESTART_MARKER), "{restart}");
+        assert_ne!(exit, restart, "log reader must tell a quit from a restart");
+        for line in [exit, restart] {
+            assert_eq!(
+                classify(&["session: joined room ops", "camera publish health -- ok", line]),
+                PreviousSessionOutcome::CleanShutdown,
+                "{line}"
+            );
+        }
+        // A plain exit request (code None / 0) is followed by `Exit`; only
+        // the restart code gets its own line.
+        assert_eq!(exit_requested_shutdown_line(None), None);
+        assert_eq!(exit_requested_shutdown_line(Some(0)), None);
+    }
+
+    #[test]
+    fn run_event_markers_are_terminal_even_with_later_activity() {
+        assert_eq!(
+            classify(&[
+                "session: joined room ops",
+                "quit: app exit (RunEvent::Exit)",
+                "compositor feed: ok",
+            ]),
+            PreviousSessionOutcome::CleanShutdown
+        );
+        assert_eq!(
+            classify(&[
+                "session: joined room ops",
+                "quit: restart requested (RunEvent::ExitRequested)",
+                "camera publish health -- ok",
+            ]),
+            PreviousSessionOutcome::CleanShutdown
+        );
+        // "left room" stays position-sensitive.
+        assert_eq!(
+            classify(&[
+                "session: joined room ops",
+                "session: left room ops",
+                "session: joined room ops",
+                "compositor feed: ok",
+            ]),
+            PreviousSessionOutcome::Vanished
+        );
+        assert_eq!(
+            classify(&["session: joined room ops", "compositor feed: ok"]),
+            PreviousSessionOutcome::Vanished
+        );
+    }
+
+    #[test]
+    fn crash_like_tails_still_read_as_vanished() {
+        for tail in [
+            &["session: joined room ops", "compositor feed: ok"][..],
+            // The marker must not be matched by near-miss lines.
+            &["session: joined room ops", "quit: requested by user, not yet exiting"][..],
+            &["session: joined room ops", "updater: installed; relaunching"][..],
+        ] {
+            assert_eq!(classify(tail), PreviousSessionOutcome::Vanished, "{tail:?}");
+        }
+    }
+
+    /// Drives the real file sink with the line the real run-event helper
+    /// produces, then classifies what was read back off disk.
+    #[test]
+    fn run_event_exit_line_reaches_the_log_file_and_classifies_clean() {
+        let dir = temp_dir("run-event-exit-marker");
+        let sink = DailyLogSink::new(dir.clone());
+        let write = |msg: &str| {
+            log::Log::log(
+                &sink,
+                &log::Record::builder()
+                    .args(format_args!("{msg}"))
+                    .level(log::Level::Info)
+                    .target("test")
+                    .build(),
+            )
+        };
+        write("session: joined room ops");
+        write(run_event_shutdown_line(&tauri::RunEvent::Exit).unwrap());
+        log::Log::flush(&sink);
+        let path = dir.join(daily_log_file_name(&today_utc_string()));
+        let lines: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            classify_previous_session(&lines, CrashAttribution::NoReport, None).outcome,
+            PreviousSessionOutcome::CleanShutdown
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The marker must survive a `RUST_LOG` that still admits meeting
+    /// activity but filters the module the marker is logged from. Drives
+    /// the real `resolve_log_filter` + `log_dispatch` + file sink chain.
+    #[test]
+    fn shutdown_marker_survives_rust_log_filtering() {
+        for spec in ["info,desktop_lib::logging=warn", "warn,desktop_lib::session=info", "error"] {
+            let dir = temp_dir("shutdown-marker-filtered");
+            let resolved = resolve_log_filter(Some(spec));
+            assert!(resolved.parse_warning.is_none(), "{spec}");
+            let (_, dispatch) = log_dispatch(resolved.filter, resolved.max_level)
+                .chain(Box::new(DailyLogSink::new(dir.clone())) as Box<dyn log::Log>)
+                .into_log();
+            let logger = RepeatSuppressingLog::new(dispatch);
+            let info = |target: &str, msg: &str| {
+                log::Log::log(
+                    &logger,
+                    &log::Record::builder()
+                        .args(format_args!("{msg}"))
+                        .level(log::Level::Info)
+                        .target(target)
+                        .build(),
+                )
+            };
+            info("desktop_lib::session", "session: joined room ops");
+            info("desktop_lib::logging", "logging: filtered probe");
+            write_shutdown_marker(&logger, run_event_shutdown_line(&tauri::RunEvent::Exit).unwrap());
+            let path = dir.join(daily_log_file_name(&today_utc_string()));
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(!text.contains("logging: filtered probe"), "{spec}: filter not applied\n{text}");
+            assert!(text.contains(QUIT_APP_EXIT_MARKER), "{spec}: marker dropped\n{text}");
+            if spec.starts_with("info,") {
+                assert!(text.contains("session: joined room ops"), "{spec}\n{text}");
+                let lines: Vec<String> = text.lines().map(str::to_string).collect();
+                assert_eq!(
+                    classify_previous_session(&lines, CrashAttribution::NoReport, None).outcome,
+                    PreviousSessionOutcome::CleanShutdown,
+                    "{spec}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// `tauri::RunEvent::ExitRequested` cannot be constructed outside tauri
+    /// (its `api` field is private), so pin the wiring by source: the
+    /// `.run(...)` callback is `handle_run_event`, whose first statement
+    /// logs through the helper tested above.
+    #[test]
+    fn the_run_callback_logs_the_shutdown_line_first() {
+        let lib = include_str!("lib.rs");
+        assert!(lib.contains(".run(handle_run_event);"), "run closure not wired");
+        let body = lib
+            .split("#[cfg(target_os = \"macos\")]\nfn handle_run_event(")
+            .nth(1)
+            .expect("macOS handle_run_event exists");
+        let stmts: Vec<&str> = body
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .take(3)
+            .collect();
+        let at = stmts
+            .iter()
+            .position(|l| *l == "logging::log_run_event_shutdown(&event);")
+            .expect("marker call within the first statements");
+        assert!(at == 0 || !stmts[at - 1].starts_with("#[cfg"), "{stmts:?}");
+        let helper = include_str!("logging.rs")
+            .split("pub(crate) fn log_run_event_shutdown(")
+            .nth(1)
+            .expect("helper exists");
+        let helper = &helper[..helper.find("\n}\n").unwrap()];
+        assert!(helper.contains("write_shutdown_marker(log::logger(), line)"), "{helper}");
+    }
+
+    #[test]
+    fn previous_build_tag_distinguishes_update_relaunch() {
+        assert_eq!(previous_build_tag(None, "0.9.37"), PreviousBuildTag::Unknown);
+        assert_eq!(previous_build_tag(Some("0.9.37"), "0.9.37"), PreviousBuildTag::Same);
+        assert_eq!(previous_build_tag(Some("0.9.36"), "0.9.37"), PreviousBuildTag::Different);
+    }
+
+    #[test]
+    fn vanish_event_carries_the_previous_build_tag_and_passes_the_allowlist() {
+        let mut identity = field_identity(4242);
+        identity.build_version = Some("0.0.1-previous".to_string());
+        let report = analyze_fixture(
+            &["session: joined room ops", "compositor feed: ok"],
+            Some(identity),
+            None,
+            None,
+        );
+        assert_eq!(report.previous_version.as_deref(), Some("0.0.1-previous"));
+        let Some(SentryDiagnosticEvent::PreviousSessionVanished(diag)) =
+            previous_session_sentry_event(&report)
+        else {
+            panic!("a vanish must produce the diagnostic");
+        };
+        assert_eq!(diag.previous_build, PreviousBuildTag::Different);
+        let event = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::PreviousSessionVanished(diag),
+            "1",
+        );
+        assert_eq!(event.tags.get("previous_build").map(String::as_str), Some("different"));
+        assert!(valid_sentry_diagnostic_event(&event));
+        let (_, message) = previous_session_log_line(&report).unwrap();
+        assert!(message.contains("previous build 0.0.1-previous"), "{message}");
+    }
+
+    #[test]
+    fn session_identity_records_the_build_and_old_files_still_load() {
+        assert_eq!(
+            current_session_identity().build_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        let old: SessionIdentityRecord = serde_json::from_str(r#"{"pid":7}"#).unwrap();
+        assert_eq!(old.build_version, None);
     }
 
     #[test]
