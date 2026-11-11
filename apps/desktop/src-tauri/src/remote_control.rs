@@ -1996,8 +1996,9 @@ pub(crate) fn revoke_all(app: &AppHandle) {
     remote_control_engine().clear_controller_grants();
     #[cfg(target_os = "windows")]
     crate::windows_remote_control::clear_all_pending_controller_operations();
-    // Epochs first: a replay already in flight is then rejected instead of
-    // posting a session-tap Down whose record the release/clear would miss.
+    // Epochs first: a queued replay that has not started is then rejected.
+    // A Down already mid-injection can still post after the release/clear;
+    // the `drain_all_pressed` synthetic Up below releases it (same shard).
     bump_all_replay_epochs("all control revoked");
     clear_all_control_caches();
     // #365: drain + grant removal under the fence -- see `input_authority_fence`.
@@ -20620,9 +20621,132 @@ pub(crate) mod input {
             assert_eq!(ax_gesture_count_for_tests(), 0);
         }
 
+        /// Runs the revoke-all release + clear from inside the Down's target
+        /// preparation (`raise`), i.e. after the Down passed its epoch check
+        /// but before it posts.
+        struct RevokeDuringRaise<'a> {
+            inner: &'a RecordingSessionTap,
+            fired: std::sync::atomic::AtomicBool,
+        }
+
+        impl SessionTapBackend for RevokeDuringRaise<'_> {
+            fn post_mouse(
+                &self,
+                point: super::super::GlobalPoint,
+                button: RemoteControlButton,
+                kind: MouseKind,
+                click_state: u32,
+            ) -> Result<(), String> {
+                self.inner.post_mouse(point, button, kind, click_state)
+            }
+            fn post_scroll(
+                &self,
+                point: super::super::GlobalPoint,
+                delta_y: i32,
+                delta_x: i32,
+                flags: u64,
+            ) -> Result<(), String> {
+                self.inner.post_scroll(point, delta_y, delta_x, flags)
+            }
+            fn post_key(
+                &self,
+                keycode: u16,
+                down: bool,
+                flags: u64,
+                unicode: Option<&str>,
+            ) -> Result<(), String> {
+                self.inner.post_key(keycode, down, flags, unicode)
+            }
+            fn cursor_position(&self) -> Option<super::super::GlobalPoint> {
+                self.inner.cursor_position()
+            }
+            fn move_cursor(&self, point: super::super::GlobalPoint) -> Result<(), String> {
+                self.inner.move_cursor(point)
+            }
+            fn raise(&self, pid: i32, window_id: u32) -> bool {
+                let raised = self.inner.raise(pid, window_id);
+                if !self.fired.swap(true, Ordering::SeqCst) {
+                    super::super::clear_all_control_caches_with(self.inner);
+                }
+                raised
+            }
+            fn onscreen_stack(&self) -> Option<Vec<StackWindow>> {
+                self.inner.onscreen_stack()
+            }
+            fn is_trusted(&self) -> bool {
+                self.inner.is_trusted()
+            }
+            fn petal_click_through_window_ids(&self) -> Vec<u32> {
+                self.inner.petal_click_through_window_ids()
+            }
+        }
+
+        /// Review question on #522: a Down already past its epoch check can
+        /// pause in target preparation while `revoke_all` releases (nothing
+        /// held yet) and clears, then post its Down. The button must still end
+        /// up released: `revoke_all` drains `pressed_inputs` (tracked at
+        /// enqueue, before the Down ran) into a synthetic Up on the same
+        /// serial per-pid shard, which runs after the Down and finds the
+        /// gesture the late Down recorded.
+        #[test]
+        fn a_down_that_posts_after_revoke_all_is_released_by_the_drained_synthetic_up() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let inner = RecordingSessionTap::trusted();
+            let tap = RevokeDuringRaise {
+                inner: &inner,
+                fired: std::sync::atomic::AtomicBool::new(false),
+            };
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            // What `track_pressed_input` stores at enqueue and
+            // `drain_all_pressed` hands back to `revoke_all`.
+            let drained_release = super::super::release_pointer_task(&down, frame, Some(1234));
+
+            replay_with_backends(&down, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).unwrap();
+            assert!(tap.fired.load(Ordering::SeqCst), "the revoke never interleaved");
+            assert_eq!(
+                inner.mouse_kinds(),
+                vec![MouseKind::LeftDown],
+                "the late Down posted after the revoke-all release/clear"
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 1);
+
+            {
+                let _synthetic = super::super::SyntheticReleaseForTests::set();
+                replay_with_backends(
+                    &drained_release.message,
+                    frame,
+                    Some(1234),
+                    &sink,
+                    &ax,
+                    &sl,
+                    &pb,
+                    &inner,
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                inner.mouse_kinds(),
+                vec![MouseKind::LeftDown, MouseKind::LeftUp],
+                "the drained synthetic Up must release a Down that posted after revoke_all"
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
         /// Source guard: `revoke_all` must reach the release through
         /// `clear_all_control_caches`, which must use the PRODUCTION backend,
-        /// and epochs must be bumped before the release so in-flight replays
+        /// and epochs must be bumped before the release so queued replays
         /// are rejected. A no-op'd wiring leaves every behavioural test green.
         #[test]
         fn revoke_all_wiring_uses_the_production_release_after_bumping_epochs() {
