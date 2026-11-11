@@ -462,15 +462,17 @@ impl Default for SessionState {
 }
 
 impl SessionState {
-    /// Begin a join of `room_id`: bumps the room generation and opens the
-    /// deferred-camera window in one step. Returns the attempt and whether a
-    /// camera deferred to a different room was dropped.
+    /// Begin a join of `room_id` (requested by the route as `room_name`):
+    /// bumps the room generation and opens the deferred-camera window in one
+    /// step. Returns the attempt and whether a camera deferred to a different
+    /// room was dropped.
     pub(crate) fn begin_join(
         &self,
         room_id: &str,
+        room_name: &str,
     ) -> (crate::room_generation::JoinAttempt<'_>, bool) {
         self.deferred_camera
-            .begin_join(room_id, || self.begin_room_generation())
+            .begin_join(room_id, room_name, || self.begin_room_generation())
     }
 
     pub(crate) fn deferred_camera(&self) -> &crate::room_generation::DeferredCamera {

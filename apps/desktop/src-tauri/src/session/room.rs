@@ -654,9 +654,14 @@ pub async fn join_room(
     // The generation bump also opens the deferred-camera window: a camera
     // turned on from here is kept for this join and published at its commit
     // (`room_generation::DeferredCamera`, PR #503).
-    let (mut join_attempt, dropped_camera) = state.begin_join(&room_record.id);
-    crate::camera_session::announce_dropped_deferred_camera(app, state, dropped_camera);
+    let (mut join_attempt, dropped_camera) = state.begin_join(&room_record.id, &room_name);
     let room_generation = join_attempt.generation().clone();
+    // Tagged older than this join: its route must not take the drop as its own.
+    crate::camera_session::announce_dropped_deferred_camera(
+        app,
+        room_generation.value() - 1,
+        dropped_camera,
+    );
     let join_budget = JoinBudget::start();
 
     // #787: enable speaker playout BEFORE connecting. The native subscription

@@ -80,6 +80,9 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
     const action = cameraStateAction(event, boundGeneration);
     if (action === 'ignore') return;
     boundGeneration = Math.max(boundGeneration, event.generation);
+    // An authoritative OFF ends the request: a start still returning (or
+    // whose held outcome this is) must not turn it back ON or re-toast.
+    if (action !== 'on') cancel();
     apply(action);
   }
 
@@ -133,6 +136,8 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
       }
       return;
     }
+    // Turned off, or an OFF for this request arrived, while it was in flight.
+    if (id !== request) return;
     if (result.published === false) {
       // While connecting, native holds it for the join's commit and reports
       // the outcome as camera-publish-state: nothing to show yet.

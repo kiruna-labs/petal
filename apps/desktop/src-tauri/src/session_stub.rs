@@ -512,15 +512,17 @@ impl SessionState {
         self.next_audio_share_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Begin a join of `room_id`: bumps the room generation and opens the
-    /// deferred-camera window in one step. Returns the attempt and whether a
-    /// camera deferred to a different room was dropped.
+    /// Begin a join of `room_id` (requested by the route as `room_name`):
+    /// bumps the room generation and opens the deferred-camera window in one
+    /// step. Returns the attempt and whether a camera deferred to a different
+    /// room was dropped.
     pub(crate) fn begin_join(
         &self,
         room_id: &str,
+        room_name: &str,
     ) -> (crate::room_generation::JoinAttempt<'_>, bool) {
         self.deferred_camera
-            .begin_join(room_id, || self.begin_room_generation())
+            .begin_join(room_id, room_name, || self.begin_room_generation())
     }
 
     pub(crate) fn deferred_camera(&self) -> &crate::room_generation::DeferredCamera {
@@ -3236,9 +3238,14 @@ pub async fn join_room_command(
 
     // Opens the deferred-camera window with the generation bump (see
     // `room_generation::DeferredCamera`, PR #503).
-    let (mut join_attempt, dropped_camera) = state.begin_join(&room_record.id);
-    crate::camera_session::announce_dropped_deferred_camera(&app, &state, dropped_camera);
+    let (mut join_attempt, dropped_camera) = state.begin_join(&room_record.id, &room_name);
     let generation = join_attempt.generation().clone();
+    // Tagged older than this join: its route must not take the drop as its own.
+    crate::camera_session::announce_dropped_deferred_camera(
+        &app,
+        generation.value() - 1,
+        dropped_camera,
+    );
     let connected = match crate::meeting_core::connect_room(
         &rooms,
         room_record,

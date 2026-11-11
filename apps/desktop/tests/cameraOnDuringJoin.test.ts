@@ -248,7 +248,27 @@ test('an outcome for the request itself that lands mid-start is applied after it
   camera.receive({ publishing: false, error: 'no frames', generation: 7 }, (a) => log.push(a));
   resolveStart({ published: false, generation: 7 });
   await pending;
-  assert.deepEqual(log, ['failed', 'retrying']);
+  assert.deepEqual(log, ['failed'], 'the failure stands: no "still connecting" over its Retry');
+});
+
+// Round-1 review: turning the camera off while a start was in flight held
+// its OFF, then the start's `published: true` turned the toggle back ON.
+test('a camera turned off while its start is in flight stays off', async () => {
+  let resolveStart!: (result: StartCameraPublishResult) => void;
+  const log: string[] = [];
+  const camera = createCameraJoinPublish({
+    startPublish: () => new Promise((resolve) => (resolveStart = resolve)),
+    meetingPhase: () => 'connected',
+    onPublished: () => log.push('published'),
+    onRetrying: () => log.push('retrying'),
+    onFailed: () => log.push('failed')
+  });
+  const pending = camera.publish();
+  camera.cancel(); // the Video toggle turned off
+  camera.receive({ publishing: false, error: null, generation: 2 }, (a) => log.push(a));
+  resolveStart({ published: true, generation: 2 });
+  await pending;
+  assert.deepEqual(log, ['off']);
 });
 
 // PR #503 F4: the deferred camera is published at the room commit, before
@@ -272,7 +292,14 @@ test('disposing the meeting route abandons its pending join natively', () => {
     'utf8'
   );
   const dispose = meetingSession.match(/function dispose\(\) \{[\s\S]*?\n  \}/)?.[0] ?? '';
-  assert.match(dispose, /invoke\(COMMANDS\.abandonPendingJoin\)/);
+  assert.match(dispose, /abandonPendingJoin\(\);/);
+  assert.match(meetingSession, /invoke\(COMMANDS\.abandonPendingJoin, \{ roomName \}\)/);
+  // A join still in flight at dispose (first join, Try again, recovery)
+  // abandons again once it settles: native may only begin it after dispose.
+  const joinThis = meetingSession.match(/async function joinThisRoom\([\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.match(joinThis, /finally \{\s*if \(disposed\) abandonPendingJoin\(\);/);
+  assert.equal(meetingSession.match(/await joinRoom\(/g)?.length, 1, 'every join goes through it');
+  assert.equal(meetingSession.match(/await joinThisRoom\(/g)?.length, 2);
   const ipc = readFileSync(fileURLToPath(new URL('../src/lib/ipc.ts', import.meta.url)), 'utf8');
   assert.match(ipc, /abandonPendingJoin: 'abandon_pending_join'/);
 });

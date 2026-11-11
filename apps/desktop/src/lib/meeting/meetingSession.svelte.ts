@@ -484,13 +484,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
       // Real join (SPEC.md §4.6): idempotent on the Rust side, so a reload
       // of this route never duplicates membership.
       const remoteControlPolicy = session.remoteControlPolicy;
-      joinedRoom = await joinRoom(
-        roomName,
-        session.participantId,
-        session.name || 'Guest',
-        remoteControlPolicy,
-        paletteIndexForIdentityColor(session.identity)
-      );
+      joinedRoom = await joinThisRoom(remoteControlPolicy);
       if (joinedRoom.name !== roomName) {
         await goto(`/meeting/${encodeURIComponent(joinedRoom.name)}`, { replace: true });
         return true;
@@ -613,13 +607,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     showResilienceToast({ kind: 'reconnecting' });
     const outcome = await runBoundedRejoin({
       join: async () => {
-        joinedRoom = await joinRoom(
-          roomName,
-          session.participantId,
-          session.name || 'Guest',
-          session.remoteControlPolicy,
-          paletteIndexForIdentityColor(session.identity)
-        );
+        joinedRoom = await joinThisRoom(session.remoteControlPolicy);
       },
       // Room-scoped: never tear down a different room the user joined since.
       leave: async () => {
@@ -689,11 +677,30 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     goto('/main');
   }
 
+  // A failed join this route abandons must not keep a camera waiting for it:
+  // native ends this room's pending meeting unless it committed (PR #503).
+  // Also sent when a join that was still in flight at dispose settles.
+  function abandonPendingJoin() {
+    if (hasTauri) void invoke(COMMANDS.abandonPendingJoin, { roomName }).catch(() => {});
+  }
+
+  async function joinThisRoom(remoteControlPolicy: typeof session.remoteControlPolicy) {
+    try {
+      return await joinRoom(
+        roomName,
+        session.participantId,
+        session.name || 'Guest',
+        remoteControlPolicy,
+        paletteIndexForIdentityColor(session.identity)
+      );
+    } finally {
+      if (disposed) abandonPendingJoin();
+    }
+  }
+
   function dispose() {
     disposed = true;
-    // A failed join this route abandons must not keep a camera waiting for
-    // it; native ends the pending meeting unless it committed (PR #503).
-    if (hasTauri) void invoke(COMMANDS.abandonPendingJoin).catch(() => {});
+    abandonPendingJoin();
     unlistenPresence?.();
     unlistenRoomLeft?.();
     clearMeetingRouteRoom(roomName);
