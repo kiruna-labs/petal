@@ -4638,10 +4638,8 @@ mod tests {
                 .expect("joined integration session")
                 .media
                 .shares[0];
-            (
-                share.shared.published.lock_unpoisoned().clone(),
-                share.share_instance_id.clone(),
-            )
+            let published = share.shared.published.lock_unpoisoned().clone();
+            (published, share.share_instance_id.clone())
         };
         assert!(
             recover_wedged_windows_share(
