@@ -24,6 +24,10 @@
 # one required context name, and the two path lists were kept in step only by a
 # comment. One list, here, in the `filter` step.
 #
+# Rust sources and the Tauri config are listed too: about 50 files under
+# apps/desktop/tests read src-tauri/ as source pins. A Rust-only PR used to
+# skip them, so #538 merged green and broke two of them on main (#541).
+#
 # #269: it also runs after every merge to main. Two PRs that are each green on
 # their own can still clash once both land, and nothing else runs the frontend
 # suite on main. With no PR number, gate-paths-changed.sh runs every job for
@@ -78,6 +82,9 @@ jobs:
           apps/desktop/svelte.config.js
           apps/desktop/vite.config.js
           apps/desktop/tsconfig.json
+          apps/desktop/src-tauri/src/**
+          apps/desktop/src-tauri/tauri.conf.json
+          apps/desktop/src-tauri/tauri.release.conf.json
           shared/**
           web-harness/**
           plugins/**
