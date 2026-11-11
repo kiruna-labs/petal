@@ -353,6 +353,13 @@ impl InjectionCancelledForTests {
         INJECTION_CANCELLED.with(|cell| *cell.borrow_mut() = Some(Arc::new(AtomicBool::new(true))));
         Self
     }
+
+    /// #537: install a live flag the test flips mid-injection, as an
+    /// abandoning deadline waiter does.
+    pub(crate) fn with_flag(flag: Arc<AtomicBool>) -> Self {
+        INJECTION_CANCELLED.with(|cell| *cell.borrow_mut() = Some(flag));
+        Self
+    }
 }
 
 #[cfg(test)]
@@ -12348,9 +12355,11 @@ pub(crate) mod input {
         // Fable-review fix (#369): same reasoning as the middle-click branch
         // above -- check-and-insert while holding the lock so a concurrent
         // Up's `remove()` can't interleave between the check and the insert.
-        {
+        let abandoned = {
             let mut gestures = ax_pointer_gestures().lock_unpoisoned();
-            if !super::injection_was_cancelled() {
+            if super::injection_was_cancelled() {
+                Some(mode)
+            } else {
                 gestures.insert(
                     (window_id, controller_id.to_string()),
                     PointerGestureState {
@@ -12361,9 +12370,69 @@ pub(crate) mod input {
                         click_count,
                     },
                 );
+                None
             }
+        };
+        if let Some(mode) = abandoned {
+            release_abandoned_down(window_id, pid, point, button, &mode, sl, tap);
         }
         Ok(outcome)
+    }
+
+    /// #537: the takeover is per window, so keep it while another
+    /// controller's session-tap gesture is open there.
+    fn end_cursor_takeover_unless_window_busy(window_id: u32, tap: &dyn SessionTapBackend) {
+        let window_busy = ax_pointer_gestures().lock_unpoisoned().iter().any(
+            |((stored_window_id, _), state)| {
+                *stored_window_id == window_id && matches!(state.mode, GestureMode::SessionTap)
+            },
+        );
+        if !window_busy {
+            end_cursor_takeover(window_id, tap);
+        }
+    }
+
+    /// #537: a cancelled Down is never recorded (#369). If it already posted
+    /// a real Down (SlDrag / SessionTap) the button is physically held and
+    /// nothing will release it -- the controller's Up already failed on the
+    /// busy shard -- so post the matching release now.
+    #[allow(clippy::too_many_arguments)]
+    fn release_abandoned_down(
+        window_id: u32,
+        pid: i32,
+        point: super::GlobalPoint,
+        button: RemoteControlButton,
+        mode: &GestureMode,
+        sl: &dyn SlClickBackend,
+        tap: &dyn SessionTapBackend,
+    ) {
+        let released = match mode {
+            GestureMode::SessionTap => {
+                let kind = match button {
+                    RemoteControlButton::Left => MouseKind::LeftUp,
+                    RemoteControlButton::Right => MouseKind::RightUp,
+                    RemoteControlButton::Middle => MouseKind::OtherUp,
+                };
+                let posted = tap.post_mouse(point, button, kind, 1);
+                end_cursor_takeover_unless_window_busy(window_id, tap);
+                posted
+            }
+            GestureMode::SlDrag => {
+                post_sl_release_with_retry(pid, point, button, sl).map_err(|error| match error {
+                    SlClickError::Unavailable => "SkyLight unavailable".to_string(),
+                    SlClickError::Failed(error) => error,
+                })
+            }
+            _ => return,
+        };
+        match released {
+            Ok(()) => log::info!(
+                "remote-control: pointer down released window_id={window_id} button={button:?} reason=down-cancelled-after-post"
+            ),
+            Err(error) => log::warn!(
+                "remote-control: pointer down release failed window_id={window_id} reason=down-cancelled-after-post: {error} -- button may remain held"
+            ),
+        }
     }
 
     /// Open a session-tap gesture: raise the target, warp into it, post the
@@ -12381,6 +12450,16 @@ pub(crate) mod input {
             log::info!(
                 "remote-control: session-tap pointer down unavailable window_id={window_id}: {error}"
             );
+            return GestureMode::PassThrough;
+        }
+        // #537: preparation (raise, hit test, warp) can outlive the replay
+        // deadline. The waiter has then abandoned this Down and the next task
+        // on the shard already failed, so a Down posted now is never released.
+        if super::injection_was_cancelled() {
+            log::info!(
+                "remote-control: session-tap pointer down skipped window_id={window_id} reason=down-cancelled-after-prepare"
+            );
+            end_cursor_takeover_unless_window_busy(window_id, tap);
             return GestureMode::PassThrough;
         }
         let kind = match button {
@@ -12440,17 +12519,26 @@ pub(crate) mod input {
             mode
         };
         let is_sl_drag = matches!(&mode, GestureMode::SlDrag | GestureMode::SessionTap);
-        if !super::injection_was_cancelled() {
-            ax_pointer_gestures().lock_unpoisoned().insert(
-                (window_id, controller_id.to_string()),
-                PointerGestureState {
-                    mode,
-                    down_point: point,
-                    last_point: point,
-                    button,
-                    click_count,
-                },
-            );
+        let abandoned = {
+            let mut gestures = ax_pointer_gestures().lock_unpoisoned();
+            if super::injection_was_cancelled() {
+                Some(mode)
+            } else {
+                gestures.insert(
+                    (window_id, controller_id.to_string()),
+                    PointerGestureState {
+                        mode,
+                        down_point: point,
+                        last_point: point,
+                        button,
+                        click_count,
+                    },
+                );
+                None
+            }
+        };
+        if let Some(mode) = abandoned {
+            release_abandoned_down(window_id, pid, point, button, &mode, sl, tap);
         }
         Ok(if is_sl_drag {
             AxReplayOutcome::Handled
@@ -20796,6 +20884,199 @@ pub(crate) mod input {
                 "the drained synthetic Up must release a Down that posted after revoke_all"
             );
             assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
+        /// #537: where in a session-tap Down the replay deadline fires.
+        #[derive(Clone, Copy)]
+        enum CancelAt {
+            /// Inside target preparation (`raise`), before the post.
+            Preparation,
+            /// Right after the Down reached the injection seam.
+            AfterPost,
+        }
+
+        /// #537: flips the injection-cancelled flag the way an abandoning
+        /// `run_replay_with_deadline_tracked` waiter does, at a chosen point.
+        struct CancellingTap<'a> {
+            inner: &'a RecordingSessionTap,
+            flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            at: CancelAt,
+        }
+
+        impl SessionTapBackend for CancellingTap<'_> {
+            fn post_mouse(
+                &self,
+                point: super::super::GlobalPoint,
+                button: RemoteControlButton,
+                kind: MouseKind,
+                click_state: u32,
+            ) -> Result<(), String> {
+                let result = self.inner.post_mouse(point, button, kind, click_state);
+                if matches!(self.at, CancelAt::AfterPost)
+                    && matches!(
+                        kind,
+                        MouseKind::LeftDown | MouseKind::RightDown | MouseKind::OtherDown
+                    )
+                {
+                    self.flag.store(true, Ordering::Release);
+                }
+                result
+            }
+            fn post_scroll(
+                &self,
+                point: super::super::GlobalPoint,
+                delta_y: i32,
+                delta_x: i32,
+                flags: u64,
+            ) -> Result<(), String> {
+                self.inner.post_scroll(point, delta_y, delta_x, flags)
+            }
+            fn post_key(
+                &self,
+                keycode: u16,
+                down: bool,
+                flags: u64,
+                unicode: Option<&str>,
+            ) -> Result<(), String> {
+                self.inner.post_key(keycode, down, flags, unicode)
+            }
+            fn cursor_position(&self) -> Option<super::super::GlobalPoint> {
+                self.inner.cursor_position()
+            }
+            fn move_cursor(&self, point: super::super::GlobalPoint) -> Result<(), String> {
+                self.inner.move_cursor(point)
+            }
+            fn raise(&self, pid: i32, window_id: u32) -> bool {
+                let raised = self.inner.raise(pid, window_id);
+                if matches!(self.at, CancelAt::Preparation) {
+                    self.flag.store(true, Ordering::Release);
+                }
+                raised
+            }
+            fn onscreen_stack(&self) -> Option<Vec<StackWindow>> {
+                self.inner.onscreen_stack()
+            }
+            fn is_trusted(&self) -> bool {
+                self.inner.is_trusted()
+            }
+            fn petal_click_through_window_ids(&self) -> Vec<u32> {
+                self.inner.petal_click_through_window_ids()
+            }
+        }
+
+        /// #537: run one Down through the real dispatcher on an injection
+        /// thread whose deadline fires at `at`. Left takes `ax_pointer_down`,
+        /// Middle takes `pass_through_pointer_down`.
+        fn replay_down_cancelled_at(
+            inner: &RecordingSessionTap,
+            button: RemoteControlButton,
+            at: CancelAt,
+        ) {
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let tap = CancellingTap {
+                inner,
+                flag: std::sync::Arc::clone(&flag),
+                at,
+            };
+            let down = pointer_message(RemoteControlAction::Down, 0.10, 0.10, button, 0);
+            {
+                let _cancelled = super::super::InjectionCancelledForTests::with_flag(
+                    std::sync::Arc::clone(&flag),
+                );
+                let _ = replay_with_backends(&down, unit_frame(), Some(1234), &sink, &ax, &sl, &pb, &tap);
+            }
+            assert!(flag.load(Ordering::Acquire), "the deadline never fired");
+        }
+
+        /// #537 step 1: the deadline fires while the target is being
+        /// prepared. The waiter has given up and the controller's Up already
+        /// failed, so posting the Down now would hold a button forever.
+        #[test]
+        fn a_session_tap_down_cancelled_during_preparation_posts_nothing() {
+            for button in [RemoteControlButton::Left, RemoteControlButton::Middle] {
+                let _guard = ax_test_lock();
+                clear_all_ax_control_state();
+                let inner = RecordingSessionTap::trusted();
+
+                replay_down_cancelled_at(&inner, button, CancelAt::Preparation);
+
+                assert_eq!(
+                    inner.mouse_kinds(),
+                    Vec::<MouseKind>::new(),
+                    "{button:?}: a Down abandoned during preparation must not post"
+                );
+                assert_eq!(ax_gesture_count_for_tests(), 0, "{button:?}");
+            }
+        }
+
+        /// #537 step 2: the deadline fires after the Down was posted. The
+        /// button is physically held and the controller's Up already failed
+        /// on the busy shard, so the abandoned Down must release it itself,
+        /// leaving no record for a later Down to overwrite.
+        #[test]
+        fn a_session_tap_down_cancelled_after_its_post_releases_the_button() {
+            for (button, down, up) in [
+                (RemoteControlButton::Left, MouseKind::LeftDown, MouseKind::LeftUp),
+                (RemoteControlButton::Middle, MouseKind::OtherDown, MouseKind::OtherUp),
+            ] {
+                let _guard = ax_test_lock();
+                clear_all_ax_control_state();
+                let inner = RecordingSessionTap::trusted();
+
+                replay_down_cancelled_at(&inner, button, CancelAt::AfterPost);
+
+                assert_eq!(
+                    inner.mouse_kinds(),
+                    vec![down, up],
+                    "{button:?}: an abandoned posted Down must be released"
+                );
+                assert_eq!(ax_gesture_count_for_tests(), 0, "{button:?}");
+            }
+        }
+
+        /// #537: both Down insert sites must hand a cancelled, already-posted
+        /// Down to the release. The SlDrag route is opt-in (env), so its
+        /// dispatch cannot be driven here; a dropped call would stay green.
+        #[test]
+        fn both_pointer_down_insert_sites_release_an_abandoned_down() {
+            let src = include_str!("remote_control.rs");
+            let call = "release_abandoned_down(window_id, pid, point, button, &mode, sl, tap);";
+            for name in ["fn ax_pointer_down(", "fn pass_through_pointer_down("] {
+                let start = src.find(name).unwrap_or_else(|| panic!("missing {name}"));
+                let end = start + src[start..].find("\n    }\n").expect("fn end");
+                assert!(src[start..end].contains(call), "{name} lost the #537 release");
+            }
+        }
+
+        /// #537 step 2, SkyLight drag: the same rule for an abandoned SlDrag
+        /// Down (that route is opt-in, so drive the release directly).
+        #[test]
+        fn an_abandoned_sl_drag_down_posts_its_release() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let sl = RecordingSlClickBackend::available();
+            let tap = RecordingSessionTap::trusted();
+
+            release_abandoned_down(
+                42,
+                1234,
+                super::super::GlobalPoint { x: 10.0, y: 10.0 },
+                RemoteControlButton::Left,
+                &GestureMode::SlDrag,
+                &sl,
+                &tap,
+            );
+
+            assert!(
+                sl.events().contains(&SlMouseEvent::Up),
+                "an abandoned SlDrag Down must get its SL release, got {:?}",
+                sl.events()
+            );
+            assert_eq!(tap.mouse_kinds(), Vec::<MouseKind>::new());
         }
 
         /// Source guard: `revoke_all` must reach the release through
