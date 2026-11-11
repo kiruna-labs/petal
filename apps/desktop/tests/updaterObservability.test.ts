@@ -134,6 +134,11 @@ test('a macOS install failure reaches the user as something they can act on (#87
       'update endpoint did not respond with a successful status code',
       'The update server had a problem — try again later',
     ],
+    // A real transport failure, as reqwest reports it (offline, DNS, TLS).
+    [
+      'update check failed: error sending request for url (https://app.petal.live/api/updater)',
+      "Couldn't reach the update server — check your connection",
+    ],
   ];
 
   for (const [raw, expected] of cases) {
