@@ -12925,7 +12925,8 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             2.0,
             CaptureResolution::Auto,
             Some(2560),
-        );
+        )
+        .expect("a non-degenerate source always sizes");
         assert_eq!(
             (from_frame.0, from_frame.1),
             (2556, 1652),
@@ -12941,7 +12942,8 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             2.0,
             CaptureResolution::Auto,
             Some(2560),
-        );
+        )
+        .expect("a non-degenerate source always sizes");
         assert_eq!((from_source.0, from_source.1), (2560, 1654));
         assert_ne!((from_frame.0, from_frame.1), (from_source.0, from_source.1));
 
@@ -12952,7 +12954,8 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             2.0,
             CaptureResolution::P1080,
             None,
-        );
+        )
+        .expect("a non-degenerate source always sizes");
         assert_eq!((capped.0, capped.1), (1920, 1080));
     }
 
