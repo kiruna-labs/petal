@@ -4285,7 +4285,7 @@ mod tests {
             .map(|(_, rest)| &rest[..rest.find("\n}\n").expect("action end")])
             .expect("wedge_recovery_for_windows_share");
         let driver = action
-            .find("drive_wedge_recovery_step(step,")
+            .find("drive_wedge_recovery_step(")
             .expect("the retrying driver");
         let attempt = action
             .find("recover_wedged_windows_share(")
