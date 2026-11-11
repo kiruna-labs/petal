@@ -60,6 +60,9 @@ export function updateFailureCategory(raw: string): UpdateFailureCategory {
   }
   if (
     lower.includes('network') ||
+    // reqwest's Display for any connect/DNS/TLS/timeout failure: what an
+    // offline check or download actually reports.
+    lower.includes('error sending request') ||
     lower.includes('fetch') ||
     lower.includes('dns') ||
     lower.includes('timeout') ||
