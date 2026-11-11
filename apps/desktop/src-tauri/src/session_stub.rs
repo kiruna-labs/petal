@@ -322,6 +322,10 @@ use crate::transport::audio::audio_is_disabled;
 /// iteration, so the swap is visible without restarting the pump.
 struct SharePumpShared {
     published: Mutex<Arc<crate::transport::publisher::PublishedTrack>>,
+    /// #525: wedge-recovery steps this SHARE has spent, i.e. the budget the
+    /// publication in `published` was created with. Sticky across recovery
+    /// republishes; a request from any other publication is stale.
+    wedge_steps_used: std::sync::atomic::AtomicU32,
 }
 
 /// Window token -> instant until which the frame pump runs in remote-input
@@ -2011,6 +2015,15 @@ pub(crate) async fn start_share_token(
             // hover tab or Petal View. The publisher caps it to the geometry
             // and `cadence_fps()` below reports the capped value.
             crate::share_capture_options::pending(token),
+            // #525: a wedged encoder is repaired, not left publishing an
+            // empty track until the user reshares.
+            Some(wedge_recovery_for_windows_share(
+                app.clone(),
+                token,
+                share_instance_id.clone(),
+                0,
+            )),
+            false,
         )
         .await
     {
@@ -2053,6 +2066,7 @@ pub(crate) async fn start_share_token(
     let published_cadence_fps = published.cadence_fps();
     let shared = Arc::new(SharePumpShared {
         published: Mutex::new(published),
+        wedge_steps_used: std::sync::atomic::AtomicU32::new(0),
     });
     let url_refresh = (kind == SharedSourceKind::Window).then(|| {
         start_share_url_refresh(
@@ -2194,6 +2208,177 @@ pub(crate) async fn start_share_token(
     });
     capture_options.keep();
     Ok(true)
+}
+
+/// Bound on each unpublish await in a Windows wedge recovery (the macOS
+/// republish uses the same 4s), so a stuck signal path cannot hang it.
+const WEDGE_RECOVERY_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+const WEDGE_RECOVERY_UNPUBLISH_ATTEMPTS: usize = 3;
+
+/// [#525] The wedge-recovery action a Windows share's publication reports a
+/// wedged encoder through (macOS: `session::share::wedge_recovery_for_share`).
+/// `share_instance_id` pins the action to ONE share and `steps_used` to ONE
+/// publication of it, so a superseded publication can never republish.
+fn wedge_recovery_for_windows_share(
+    app: tauri::AppHandle,
+    token: u32,
+    share_instance_id: String,
+    steps_used: u32,
+) -> crate::transport::publisher::EncoderWedgeRecovery {
+    crate::transport::publisher::EncoderWedgeRecovery::new(steps_used, move |step| {
+        let app = app.clone();
+        let share_instance_id = share_instance_id.clone();
+        tauri::async_runtime::spawn(async move {
+            recover_wedged_windows_share(app, token, share_instance_id, steps_used, step).await;
+        });
+    })
+}
+
+/// [#525] Publish the replacement for one wedge step. `publish` receives the
+/// RESOLVED encoder choice and the recovery the replacement inherits (the
+/// share's spent budget), so a test with a fake publish sees exactly what
+/// production passes.
+async fn publish_wedge_replacement<T, Fut>(
+    step: crate::transport::publisher::EncoderRecoveryStep,
+    recovery_for_replacement: impl FnOnce(u32) -> crate::transport::publisher::EncoderWedgeRecovery,
+    publish: impl FnOnce(bool, Option<crate::transport::publisher::EncoderWedgeRecovery>) -> Fut,
+) -> T
+where
+    Fut: std::future::Future<Output = T>,
+{
+    let recovery = recovery_for_replacement(step.steps_used_after());
+    publish(step.forces_software_encoder(), Some(recovery)).await
+}
+
+/// [#525] Repair a Windows share whose encoder stopped producing frames while
+/// funded. Step 1 recreates the encoder (a fresh publication at the old
+/// geometry and cadence); step 2 republishes onto the software encoder. The
+/// replacement is published BEFORE the old one is unpublished and swapped into
+/// the slot the frame pump reads, so receivers hold the last frame rather than
+/// losing the share. Returns whether the replacement became the share's track.
+async fn recover_wedged_windows_share(
+    app: tauri::AppHandle,
+    token: u32,
+    share_instance_id: String,
+    requested_by_steps: u32,
+    step: crate::transport::publisher::EncoderRecoveryStep,
+) -> bool {
+    let Some(state) = app.try_state::<SessionState>() else {
+        return false;
+    };
+    let state = state.inner();
+    let current_share = |session: &WindowsMediaSession| {
+        session
+            .media
+            .shares
+            .iter()
+            .find(|share| share.token == token && share.share_instance_id == share_instance_id)
+            .map(|share| share.shared.clone())
+    };
+    let live_share = state.joined.lock_unpoisoned().as_ref().and_then(|session| {
+        current_share(session).map(|shared| (session.room_connection.clone(), shared))
+    });
+    let live_share = live_share.filter(|(_, shared)| {
+        shared.wedge_steps_used.load(Ordering::Acquire) == requested_by_steps
+    });
+    let Some((room_connection, shared)) = live_share else {
+        log::info!(
+            "windows session: skipping wedged-encoder recovery for stale share {token} ({})",
+            step.description()
+        );
+        return false;
+    };
+    let old = shared.published.lock_unpoisoned().clone();
+    let next_app = app.clone();
+    let next_instance_id = share_instance_id.clone();
+    let published = publish_wedge_replacement(
+        step,
+        move |steps_used| {
+            wedge_recovery_for_windows_share(next_app, token, next_instance_id, steps_used)
+        },
+        |force_software_encoder, recovery| {
+            // Not wrapped in a timeout: LiveKit's publish is not cancellation
+            // safe (a dropped AddTrack can leave an unreachable publication).
+            // This runs in its own task, so a slow publish blocks only itself.
+            room_connection.publish_window_at_cadence(
+                old.width(),
+                old.height(),
+                old.quality(),
+                Some(token),
+                old.cadence_fps(),
+                recovery,
+                force_software_encoder,
+            )
+        },
+    )
+    .await;
+    let replacement = match published {
+        Ok(replacement) => Arc::new(replacement),
+        Err(error) => {
+            log::warn!(
+                "windows session: share {token} wedged-encoder recovery ({}) publish failed: {error}",
+                step.description()
+            );
+            return false;
+        }
+    };
+    // Swap under the session lock: `stop_share_token` removes the share under
+    // the same lock before it reads the slot, so either it unpublishes the
+    // replacement or we see the share gone and unpublish it ourselves. The
+    // swap is a compare-and-swap on the publication this recovery replaced,
+    // so of two overlapping recoveries only the first commits.
+    let committed = {
+        let joined = state.joined.lock_unpoisoned();
+        let live = joined.as_ref().is_some_and(|session| {
+            Arc::ptr_eq(&session.room_connection, &room_connection)
+                && current_share(session).is_some_and(|live| Arc::ptr_eq(&live, &shared))
+        });
+        let mut slot = shared.published.lock_unpoisoned();
+        let unchanged = live
+            && Arc::ptr_eq(&*slot, &old)
+            && shared.wedge_steps_used.load(Ordering::Acquire) == requested_by_steps;
+        if unchanged {
+            *slot = replacement.clone();
+            shared
+                .wedge_steps_used
+                .store(step.steps_used_after(), Ordering::Release);
+        }
+        unchanged
+    };
+    let retired = if committed { old } else { replacement };
+    unpublish_after_wedge_recovery(&retired, token).await;
+    log::warn!(
+        "windows session: share {token} wedged-encoder recovery ({}) {}",
+        step.description(),
+        if committed {
+            "republished the track"
+        } else {
+            "was superseded (share stopped or already replaced); dropped the replacement"
+        }
+    );
+    committed
+}
+
+/// Bounded retry: a failed unpublish here would otherwise drop the only handle
+/// to a track that is still published (an orphan share after a stop).
+async fn unpublish_after_wedge_recovery(
+    track: &crate::transport::publisher::PublishedTrack,
+    token: u32,
+) {
+    for attempt in 1..=WEDGE_RECOVERY_UNPUBLISH_ATTEMPTS {
+        match tokio::time::timeout(WEDGE_RECOVERY_AWAIT_TIMEOUT, track.unpublish()).await {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => log::warn!(
+                "windows session: share {token} wedged-encoder recovery unpublish attempt {attempt}/{WEDGE_RECOVERY_UNPUBLISH_ATTEMPTS} failed: {error}"
+            ),
+            Err(_) => log::warn!(
+                "windows session: share {token} wedged-encoder recovery unpublish attempt {attempt}/{WEDGE_RECOVERY_UNPUBLISH_ATTEMPTS} timed out"
+            ),
+        }
+        if attempt < WEDGE_RECOVERY_UNPUBLISH_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
 }
 
 fn start_share_url_refresh(
@@ -3911,6 +4096,73 @@ struct RoomLeftEvent {
 mod tests {
     use super::*;
 
+    /// #525: each wedge step publishes its replacement with recovery attached,
+    /// carrying the share's spent budget; step 2 is the software encoder.
+    #[tokio::test]
+    async fn wedge_replacement_attaches_recovery_and_falls_back_to_software() {
+        use crate::transport::publisher::{EncoderRecoveryStep, EncoderWedgeRecovery};
+        let mut seen = Vec::new();
+        for step in [EncoderRecoveryStep::Republish, EncoderRecoveryStep::FallBackToSoftware] {
+            let published = publish_wedge_replacement(
+                step,
+                |steps_used| EncoderWedgeRecovery::new(steps_used, |_| {}),
+                |software, recovery: Option<EncoderWedgeRecovery>| async move {
+                    (software, recovery.map(|recovery| recovery.steps_used()))
+                },
+            )
+            .await;
+            seen.push(published);
+        }
+        assert_eq!(seen, vec![(false, Some(1)), (true, Some(2))]);
+    }
+
+    /// #525: source guard for the wiring the unit test above cannot reach
+    /// without a live room. Share start attaches recovery (budget 0); the
+    /// recovery republishes through `publish_wedge_replacement`, passing its
+    /// resolved values, and swaps under the session lock before unpublishing.
+    #[test]
+    fn windows_share_publish_paths_attach_wedge_recovery() {
+        let full = include_str!("session_stub.rs");
+        let source = full
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map(|(prod, _)| prod)
+            .expect("session_stub.rs keeps one test module");
+        assert_eq!(
+            source.matches(".publish_window_at_cadence(").count(),
+            2,
+            "share start and the wedge recovery are the only Windows window publishes"
+        );
+        let start = source
+            .split_once("pub(crate) async fn start_share_token(")
+            .map(|(_, rest)| rest)
+            .expect("start_share_token");
+        let publish = &start[start.find(".publish_window_at_cadence(").expect("start publish")..];
+        let publish = &publish[..publish.find(".await").expect("start publish await")];
+        assert!(
+            publish.contains("Some(wedge_recovery_for_windows_share(")
+                && publish.contains("share_instance_id.clone(),\n                0,\n            )),\n            false,"),
+            "share start must attach recovery with a fresh budget on the default encoder"
+        );
+        let recover = source
+            .split_once("async fn recover_wedged_windows_share(")
+            .map(|(_, rest)| rest)
+            .expect("recover_wedged_windows_share");
+        let replacement = recover.find("publish_wedge_replacement(").expect("resolved publish");
+        let closure = &recover[replacement..];
+        let closure = &closure[..closure.find(".await").expect("replacement await")];
+        assert!(
+            closure.contains("recovery,\n                force_software_encoder,"),
+            "the RESOLVED values must reach the publisher"
+        );
+        let cas = recover.find("Arc::ptr_eq(&*slot, &old)").expect("compare-and-swap");
+        let swap = recover.find("*slot = replacement.clone();").expect("slot swap");
+        let unpublish = recover
+            .find("unpublish_after_wedge_recovery(&retired, token)")
+            .expect("retire the losing track");
+        assert!(cas < swap, "swap only the publication this recovery replaced");
+        assert!(replacement < swap && swap < unpublish, "publish, swap, then unpublish");
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn audio_endpoint_changes_are_reported_after_the_baseline() {
@@ -4375,33 +4627,32 @@ mod tests {
         let initial_capable_subscriptions = capable_subscriptions.load(Ordering::Acquire);
 
         // Republish the same production window name while the old publication
-        // is still live. The existing session pump reads this shared slot, so
-        // the replacement receives real WGC frames before the old SID is
-        // removed (the delayed-unpublish/republish contract).
-        let (old_published, width, height) = {
+        // is still live, through the production wedged-encoder recovery
+        // (#525). The existing session pump reads the shared slot, so the
+        // replacement receives real WGC frames before the old SID is removed
+        // (the delayed-unpublish/republish contract).
+        let (old_published, share_instance_id) = {
             let joined = state.joined.lock_unpoisoned();
             let share = &joined
                 .as_ref()
                 .expect("joined integration session")
                 .media
                 .shares[0];
-            let old = share.shared.published.lock_unpoisoned().clone();
-            let width = old.width();
-            let height = old.height();
-            (old, width, height)
+            (
+                share.shared.published.lock_unpoisoned().clone(),
+                share.share_instance_id.clone(),
+            )
         };
-        let replacement = Arc::new(
-            connection
-                .publish_window_at_cadence(
-                    width,
-                    height,
-                    crate::transport::publisher::ShareQuality::Full,
-                    Some(token),
-                    // A republish inherits this window's resolved cadence.
-                    old_published.cadence_fps(),
-                )
-                .await
-                .expect("publish the real replacement window track"),
+        assert!(
+            recover_wedged_windows_share(
+                app.clone(),
+                token,
+                share_instance_id,
+                0,
+                crate::transport::publisher::EncoderRecoveryStep::Republish,
+            )
+            .await,
+            "the wedge recovery must replace the live share's track"
         );
         {
             let joined = state.joined.lock_unpoisoned();
@@ -4410,12 +4661,10 @@ mod tests {
                 .expect("joined integration session")
                 .media
                 .shares[0];
-            *share.shared.published.lock_unpoisoned() = replacement;
+            let replacement = share.shared.published.lock_unpoisoned().clone();
+            assert!(!Arc::ptr_eq(&replacement, &old_published));
+            assert_eq!(replacement.cadence_fps(), old_published.cadence_fps());
         }
-        old_published
-            .unpublish()
-            .await
-            .expect("unpublish the superseded real window track");
 
         let republish_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while (capable_subscriptions.load(Ordering::Acquire) <= initial_capable_subscriptions

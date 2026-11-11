@@ -701,13 +701,8 @@ impl RepublishCoordinator {
     /// behind it (or racing it) already sees the spent budget and fallback.
     fn note_wedge_recovery_step(&self, step: EncoderRecoveryStep) {
         let mut state = self.encoder_recovery.lock_unpoisoned();
-        match step {
-            EncoderRecoveryStep::Republish => state.steps_used = state.steps_used.max(1),
-            EncoderRecoveryStep::FallBackToSoftware => {
-                state.software = true;
-                state.steps_used = state.steps_used.max(2);
-            }
-        }
+        state.software |= step.forces_software_encoder();
+        state.steps_used = state.steps_used.max(step.steps_used_after());
     }
 
     /// The encoder choice and recovery action for ANY republish of this share.
@@ -8996,8 +8991,8 @@ pub(crate) async fn recover_wedged_encoder_publication(
         return;
     };
 
-    let force_software_encoder = step == EncoderRecoveryStep::FallBackToSoftware;
-    let steps_used = if force_software_encoder { 2 } else { 1 };
+    let force_software_encoder = step.forces_software_encoder();
+    let steps_used = step.steps_used_after();
     republish_intent.note_wedge_recovery_step(step);
     let next_recovery = wedge_recovery_for_share(&app, window_id, started_seq, steps_used);
     let reason = format!("wedged encoder: {}", step.description());
