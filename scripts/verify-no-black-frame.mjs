@@ -104,6 +104,15 @@ const productionCss = readFileSync(resolve(repoRoot, 'web-harness/src/style.css'
 
 /** A sampled frame counts as black when nearly every pixel is near-zero. */
 const BLACK_LUMA = 12;
+// The held frame must match a live frame within this many luma levels.
+const HELD_FRAME_TOLERANCE = 6;
+const BEFORE_SAMPLES = 8;
+const BEFORE_SAMPLE_SPACING_MS = 40;
+
+/** True when `luma` lies inside the observed live range, give or take the tolerance. */
+function withinLiveRange(luma, trial) {
+  return luma >= trial.beforeMin - HELD_FRAME_TOLERANCE && luma <= trial.beforeMax + HELD_FRAME_TOLERANCE;
+}
 const GAP_SAMPLE_MS = 600;
 
 const page_html = `
@@ -128,7 +137,7 @@ const browser = await chromium.launch({
  *   zoomed     - put the tile in the zoomed state first (#248). The zoom
  *                transform and clip apply to the HOLD CANVAS too, so a wrong
  *                clip would blank the very layer that holds the frame.
- * @returns {Promise<{ beforeLuma: number, samples: number[], holdingReason: string|null }>}
+ * @returns {Promise<{ beforeLuma: number, beforeMin: number, beforeMax: number, samples: number[], holdingReason: string|null }>}
  */
 async function runGapTrial({ withHold, shippedCss, zoomed = false }) {
   const page = await browser.newPage({ viewport: { width: 640, height: 480 } });
@@ -217,7 +226,19 @@ async function runGapTrial({ withHold, shippedCss, zoomed = false }) {
     // Let the hold capture at least one copy (HOLD_REFRESH_MS is 200ms).
     await page.waitForTimeout(500);
 
-    const beforeLuma = await sampleLuma(page);
+    // Sample the live source across several animation phases. Zoomed in, the
+    // crop shows only part of the bar's travel, so one sample's luma depends
+    // on the phase it caught (134.6..159.7 measured) and a single-sample
+    // comparison flaked ~1 run in 8. The held frame is ONE of these phases,
+    // so it must fall inside the observed range, not near one sample.
+    const beforeSamples = [];
+    for (let i = 0; i < BEFORE_SAMPLES; i += 1) {
+      beforeSamples.push(await sampleLuma(page));
+      await page.waitForTimeout(BEFORE_SAMPLE_SPACING_MS);
+    }
+    const beforeLuma = beforeSamples.reduce((sum, value) => sum + value, 0) / beforeSamples.length;
+    const beforeMin = Math.min(...beforeSamples);
+    const beforeMax = Math.max(...beforeSamples);
 
     // FORCE THE GAP. An emptied srcObject is precisely the state a republish
     // leaves the element in: alive, laid out, and with no frame to present.
@@ -237,7 +258,7 @@ async function runGapTrial({ withHold, shippedCss, zoomed = false }) {
     const holdingReason = await page.evaluate(
       () => document.getElementById('probe-tile').dataset.shareHoldingFrame ?? null
     );
-    return { beforeLuma, samples, holdingReason };
+    return { beforeLuma, beforeMin, beforeMax, samples, holdingReason };
   } finally {
     await page.close();
   }
@@ -315,9 +336,10 @@ try {
   );
   check(fixedMin > BLACK_LUMA, `tile never goes black during the gap (min luma ${fixedMin.toFixed(1)} > ${BLACK_LUMA})`);
   check(
-    Math.abs(fixedMin - fixed.beforeLuma) < 6,
+    withinLiveRange(fixedMin, fixed),
     `the HELD FRAME is what is shown, not a placeholder: during=${fixedMin.toFixed(1)} ` +
-      `stays within 6 luma of before=${fixed.beforeLuma.toFixed(1)}`
+      `stays within ${HELD_FRAME_TOLERANCE} luma of the live range ` +
+      `${fixed.beforeMin.toFixed(1)}..${fixed.beforeMax.toFixed(1)}`
   );
   check(fixed.holdingReason !== null, 'tile reports it is holding a frame');
 
@@ -334,8 +356,8 @@ try {
     `transparent background alone already avoids pure black (min luma ${cssOnlyMin.toFixed(1)})`
   );
   check(
-    cssOnlyMin < cssOnly.beforeLuma - 20,
-    `but it does NOT preserve the frame (during=${cssOnlyMin.toFixed(1)} well below before=${cssOnly.beforeLuma.toFixed(1)}) ` +
+    cssOnlyMin < cssOnly.beforeMin - 20,
+    `but it does NOT preserve the frame (during=${cssOnlyMin.toFixed(1)} well below the live minimum ${cssOnly.beforeMin.toFixed(1)}) ` +
       '-- so the hold canvas is load-bearing, not decorative'
   );
 
@@ -360,9 +382,10 @@ try {
     `a zoomed tile never goes black during the gap (min luma ${zoomedMin.toFixed(1)} > ${BLACK_LUMA})`
   );
   check(
-    Math.abs(zoomedMin - zoomedTrial.beforeLuma) < 6,
+    withinLiveRange(zoomedMin, zoomedTrial),
     `the zoomed HELD FRAME is what is shown: during=${zoomedMin.toFixed(1)} ` +
-      `stays within 6 luma of before=${zoomedTrial.beforeLuma.toFixed(1)}`
+      `stays within ${HELD_FRAME_TOLERANCE} luma of the live range ` +
+      `${zoomedTrial.beforeMin.toFixed(1)}..${zoomedTrial.beforeMax.toFixed(1)}`
   );
   check(zoomedTrial.holdingReason !== null, 'zoomed tile reports it is holding a frame');
 
