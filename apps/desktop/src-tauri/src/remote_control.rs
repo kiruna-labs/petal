@@ -12814,6 +12814,25 @@ pub(crate) mod input {
             }
             return Ok(outcome);
         };
+        // #550: a host-synthesized release (held-input TTL, sequencer gap,
+        // reconnect) is a teardown, not the controller's Up. Apply the #545
+        // guard (never end the sharer's own drag) and release where the drag
+        // is, not at the Down point its copied message carries (#611).
+        let up_point = if matches!(state.mode, GestureMode::SessionTap)
+            && super::injection_is_synthetic_release()
+        {
+            if tap.host_button_is_down(state.button) {
+                log::info!(
+                    "remote-control: session-tap synthetic release skipped window_id={window_id} button={:?} reason=local-drag-in-progress",
+                    state.button
+                );
+                end_cursor_takeover_unless_window_busy(window_id, tap);
+                return Ok(AxReplayOutcome::Handled);
+            }
+            state.last_point
+        } else {
+            up_point
+        };
         // Fable-review fix (#369): the map entry is always removed above (so
         // no orphan lingers), but if THIS event's own deadline waiter already
         // gave up on it, don't perform the actual AX/SL/CGEvent action below
@@ -21168,6 +21187,162 @@ pub(crate) mod input {
 
             assert_eq!(tap.mouse_kinds(), vec![MouseKind::LeftDown]);
             assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
+        /// #550: a Down and a drag through the real dispatcher, tracked as
+        /// the resolver tracks them; the controller goes silent and the
+        /// held-input TTL's synthetic Up replays on the shard. Returns the
+        /// drag point.
+        fn drag_then_expire_held_input(tap: &RecordingSessionTap) -> (i64, i64) {
+            let frame = unit_frame();
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                1,
+            );
+            let drag = pointer_message(
+                RemoteControlAction::Move,
+                0.80,
+                0.10,
+                RemoteControlButton::Left,
+                1,
+            );
+            for message in [&down, &drag] {
+                super::super::track_pressed_input(message, frame, Some(1234));
+                replay_with_backends(message, frame, Some(1234), &sink, &ax, &sl, &pb, tap)
+                    .unwrap();
+            }
+            let dragged = tap
+                .events()
+                .into_iter()
+                .find_map(|event| match event {
+                    TapEvent::Mouse(MouseKind::LeftDragged, x, y) => Some((x, y)),
+                    _ => None,
+                })
+                .expect("the drag Move was posted");
+
+            let expired = std::time::Instant::now()
+                + super::super::HELD_INPUT_TTL
+                + std::time::Duration::from_millis(1);
+            let releases = super::super::drain_expired_pressed(expired);
+            assert_eq!(releases.len(), 1, "the TTL must synthesize one release");
+            let _synthetic = super::super::SyntheticReleaseForTests::set();
+            for task in releases {
+                replay_with_backends(
+                    &task.message,
+                    task.frame,
+                    task.target_pid,
+                    &sink,
+                    &ax,
+                    &sl,
+                    &pb,
+                    tap,
+                )
+                .unwrap();
+            }
+            dragged
+        }
+
+        /// #550: the TTL's synthetic Up must apply the #545 guard. The sharer
+        /// is physically dragging, so posting an Up would end their drag.
+        #[test]
+        fn a_held_input_ttl_release_does_not_end_the_hosts_own_physical_drag() {
+            let _guard = ax_test_lock();
+            let _pressed = super::super::pressed_input_test_lock();
+            clear_all_ax_control_state();
+            let tap = RecordingSessionTap::trusted();
+            tap.host_button_down.store(true, Ordering::SeqCst);
+
+            drag_then_expire_held_input(&tap);
+
+            assert!(
+                !tap.mouse_kinds().contains(&MouseKind::LeftUp),
+                "a synthetic release ended the sharer's own drag: {:?}",
+                tap.events()
+            );
+            assert_eq!(
+                ax_gesture_count_for_tests(),
+                0,
+                "the record must still be dropped"
+            );
+            clear_all_ax_control_state();
+        }
+
+        /// #550 + #537: a skipped synthetic release must not hand the cursor
+        /// back while another controller is still mid-drag on the window.
+        #[test]
+        fn a_skipped_ttl_release_keeps_another_controllers_cursor_takeover() {
+            let _guard = ax_test_lock();
+            let _pressed = super::super::pressed_input_test_lock();
+            clear_all_ax_control_state();
+            let tap = RecordingSessionTap::trusted();
+            let mut other = pointer_message(
+                RemoteControlAction::Down,
+                0.50,
+                0.50,
+                RemoteControlButton::Left,
+                1,
+            );
+            other.controller_id = "viewer-b-550".to_string();
+            replay_with_backends(
+                &other,
+                unit_frame(),
+                Some(1234),
+                &RecordingSink::default(),
+                &ax_hostile_backend(),
+                &RecordingSlClickBackend::unavailable(),
+                &RecordingPasteboard::default(),
+                &tap,
+            )
+            .unwrap();
+            tap.host_button_down.store(true, Ordering::SeqCst);
+
+            drag_then_expire_held_input(&tap);
+
+            assert_eq!(ax_gesture_count_for_tests(), 1, "only the expired record goes");
+            assert!(
+                !matches!(tap.events().last(), Some(TapEvent::MoveCursor(..))),
+                "the cursor was handed back mid-drag for the other controller: {:?}",
+                tap.events()
+            );
+            tap.host_button_down.store(false, Ordering::SeqCst);
+            release_session_tap_gestures_with_backend(other.window_id, None, &tap);
+            clear_all_ax_control_state();
+        }
+
+        /// #550: the TTL's synthetic Up copies the Down message, so it carried
+        /// the drag origin. It must release where the drag is (#611).
+        #[test]
+        fn a_held_input_ttl_release_lands_at_the_last_drag_point() {
+            let _guard = ax_test_lock();
+            let _pressed = super::super::pressed_input_test_lock();
+            clear_all_ax_control_state();
+            let tap = RecordingSessionTap::trusted();
+
+            let dragged = drag_then_expire_held_input(&tap);
+
+            let ups: Vec<(i64, i64)> = tap
+                .events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    TapEvent::Mouse(MouseKind::LeftUp, x, y) => Some((x, y)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                ups,
+                vec![dragged],
+                "one LeftUp, at the last drag point: {:?}",
+                tap.events()
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+            clear_all_ax_control_state();
         }
 
         /// Source guard: `revoke_all` must reach the release through
