@@ -261,6 +261,30 @@ pub enum SentryDiagnosticEvent {
     CaptureRawStalled(CaptureRawStalledDiagnostic),
     EncoderWedged(EncoderWedgeDiagnostic),
     EncoderWedgeExhausted(EncoderWedgeDiagnostic),
+    DegenerateFrameSkipped(DegenerateFrameDiagnostic),
+}
+
+/// A frame too small for libwebrtc's adapter to size without hitting a fatal
+/// RTC_CHECK was skipped before `capture_frame` (PETAL-DESKTOP-4Y). Only
+/// closed size buckets leave the device, never raw dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DegenerateFrameDiagnostic {
+    pub frame_geometry: GeometryBucket,
+    pub published_geometry: GeometryBucket,
+    /// Which edge was below the floor: size buckets cannot tell thin from small.
+    pub axis: DegenerateAxisTag,
+}
+
+impl DegenerateFrameDiagnostic {
+    /// Closed-bucket text for the skip's WARN line (a Sentry breadcrumb).
+    pub(crate) fn closed_summary(self) -> String {
+        format!(
+            "frame {}, published {}, axis {}",
+            self.frame_geometry.tag(),
+            self.published_geometry.tag(),
+            self.axis.tag()
+        )
+    }
 }
 
 /// A funded window-share encoder produced zero frames for the whole #427
@@ -523,6 +547,7 @@ diagnostic_enum!(PixelFormatClass { Bgra => "bgra", Nv12 => "nv12", OtherSupport
 diagnostic_enum!(ScaleBucket { OneX => "1x", TwoX => "2x", Fractional => "fractional", Other => "other", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(EncoderImplementationClass { Hardware => "hardware", Software => "software", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(CaptureLayoutStage { Validation => "validation", Reconfiguration => "reconfiguration", FirstFrame => "first_frame", Publish => "publish", Unknown => "unknown" });
+diagnostic_enum!(DegenerateAxisTag { Width => "width", Height => "height", Both => "both", NotApplicable => "not_applicable" });
 diagnostic_enum!(CameraDirection { Publish => "publish", Receive => "receive" });
 diagnostic_enum!(OverlayClearReasonTag { NoPublication => "no_publication", Retired => "retired", HidePending => "hide_pending" });
 diagnostic_enum!(CadenceBucket { Healthy => "healthy", Reduced => "reduced", Severe => "severe", Stalled => "stalled", Unknown => "unknown", NotApplicable => "not_applicable" });
@@ -782,7 +807,7 @@ diagnostic_enum!(SinceLastFrameBucketTag {
 
 const SENTRY_DIAGNOSTIC_SCHEMA_VERSION: &str = "1";
 const SENTRY_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
-const DIAGNOSTIC_EVENT_NAMES: [&str; 22] = [
+const DIAGNOSTIC_EVENT_NAMES: [&str; 23] = [
     "capture-layout-invalid",
     "camera-health",
     "camera-size-mismatch-recovery",
@@ -805,6 +830,7 @@ const DIAGNOSTIC_EVENT_NAMES: [&str; 22] = [
     "capture-raw-stalled",
     "encoder-wedged",
     "encoder-wedge-exhausted",
+    "degenerate-frame-skipped",
 ];
 const DIAGNOSTIC_TAGS: &[&str] = &[
     "event_name",
@@ -853,6 +879,7 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "held_native_surfaces",
     "recovery_burst",
     "concurrent_shares",
+    "degenerate_axis",
     "previous_build",
     "capture_occlusion",
     "occluded_by_petal",
@@ -906,6 +933,8 @@ const CAPTURE_RAW_STALLED_MESSAGE_TAGS: &[&str] = &[
     "occluded_by_petal",
 ];
 const ENCODER_WEDGE_MESSAGE_TAGS: &[&str] = &["session_role", "recovery_action"];
+const DEGENERATE_FRAME_MESSAGE_TAGS: &[&str] =
+    &["session_role", "capture_geometry", "configured_geometry", "degenerate_axis"];
 const CAMERA_SIZE_MISMATCH_MESSAGE_TAGS: &[&str] = &[
     "session_role",
     "camera_direction",
@@ -951,6 +980,7 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "remote-video-stalled" => Some(REMOTE_VIDEO_STALLED_MESSAGE_TAGS),
         "capture-raw-stalled" => Some(CAPTURE_RAW_STALLED_MESSAGE_TAGS),
         "encoder-wedged" | "encoder-wedge-exhausted" => Some(ENCODER_WEDGE_MESSAGE_TAGS),
+        "degenerate-frame-skipped" => Some(DEGENERATE_FRAME_MESSAGE_TAGS),
         _ => None,
     }
 }
@@ -1302,6 +1332,7 @@ impl SentryDiagnosticEvent {
             Self::CaptureRawStalled(_) => "capture-raw-stalled",
             Self::EncoderWedged(_) => "encoder-wedged",
             Self::EncoderWedgeExhausted(_) => "encoder-wedge-exhausted",
+            Self::DegenerateFrameSkipped(_) => "degenerate-frame-skipped",
         }
     }
 }
@@ -1335,6 +1366,7 @@ pub(crate) fn build_sentry_diagnostic_event(
         "held_native_surfaces",
         "recovery_burst",
         "concurrent_shares",
+        "degenerate_axis",
         "previous_build",
         "capture_occlusion",
         "occluded_by_petal",
@@ -2104,6 +2136,36 @@ pub(crate) fn build_sentry_diagnostic_event(
                 }
             }
             insert("recovery_action", value.action.tag());
+        }
+        SentryDiagnosticEvent::DegenerateFrameSkipped(value) => {
+            for key in DIAGNOSTIC_TAGS {
+                if !matches!(
+                    *key,
+                    "event_name"
+                        | "schema_version"
+                        | "build_version"
+                        | "os_version"
+                        | "architecture"
+                        | "session_role"
+                        | "capture_geometry"
+                        | "configured_geometry"
+                        | "degenerate_axis"
+                        | "raw_capture_action"
+                        | "raw_silence_cause"
+                        | "snapshot_content"
+                        | "stream_updates_since_frame"
+                        | "held_native_surfaces"
+                        | "recovery_burst"
+                        | "concurrent_shares"
+                        | "dedup_count_bucket"
+                ) {
+                    insert(*key, "not_applicable");
+                }
+            }
+            insert("session_role", "sharer");
+            insert("capture_geometry", value.frame_geometry.tag());
+            insert("configured_geometry", value.published_geometry.tag());
+            insert("degenerate_axis", value.axis.tag());
         }
     }
     insert("dedup_count_bucket", dedup_count_bucket);
@@ -6425,6 +6487,7 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
         | "held_native_surfaces"
         | "recovery_burst"
         | "concurrent_shares" => matches!(value, "0" | "1" | "2" | "3_plus" | "not_applicable"),
+        "degenerate_axis" => matches!(value, "width" | "height" | "both" | "not_applicable"),
         "capture_occlusion" => matches!(
             value,
             "none" | "partial" | "mostly" | "full" | "unknown" | "not_applicable"
@@ -10970,6 +11033,50 @@ mod tests {
             assert!(valid_sentry_diagnostic_event(&event), "{name} must pass before_send");
             assert!(scrub_event_for_sentry(event).is_some());
         }
+    }
+
+    #[test]
+    fn degenerate_frame_skipped_is_a_registered_valid_diagnostic_event() {
+        assert!(DIAGNOSTIC_EVENT_NAMES.contains(&"degenerate-frame-skipped"));
+        assert_eq!(
+            diagnostic_message_tags("degenerate-frame-skipped"),
+            Some(DEGENERATE_FRAME_MESSAGE_TAGS)
+        );
+        let event = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::DegenerateFrameSkipped(DegenerateFrameDiagnostic {
+                frame_geometry: GeometryBucket::Tiny,
+                published_geometry: GeometryBucket::Large,
+                axis: DegenerateAxisTag::Height,
+            }),
+            "1",
+        );
+        assert_eq!(
+            event.message.as_deref(),
+            Some("diagnostic: degenerate-frame-skipped session_role=sharer capture_geometry=tiny configured_geometry=large degenerate_axis=height")
+        );
+        assert_eq!(event.tags.len(), DIAGNOSTIC_TAGS.len());
+        assert!(valid_sentry_diagnostic_event(&event));
+        assert!(scrub_event_for_sentry(event).is_some());
+        for axis in [DegenerateAxisTag::Width, DegenerateAxisTag::Height, DegenerateAxisTag::Both] {
+            let event = build_sentry_diagnostic_event(
+                SentryDiagnosticEvent::DegenerateFrameSkipped(DegenerateFrameDiagnostic {
+                    frame_geometry: GeometryBucket::Tiny,
+                    published_geometry: GeometryBucket::Tiny,
+                    axis,
+                }),
+                "1",
+            );
+            assert_eq!(event.tags.get("degenerate_axis").map(String::as_str), Some(axis.tag()));
+            assert!(valid_sentry_diagnostic_event(&event), "{axis:?}");
+        }
+        // Every other event reports the new tag as not_applicable.
+        let other = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::DescriptorPressure(DescriptorPressureDiagnostic {
+                stage: DescriptorPressureStageTag::Exhausted,
+            }),
+            "1",
+        );
+        assert_eq!(other.tags.get("degenerate_axis").map(String::as_str), Some("not_applicable"));
     }
 
     #[test]

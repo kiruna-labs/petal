@@ -419,3 +419,34 @@ sets the key. If a bump stops requesting the key, the test fails on its
 `low_latency_requested` assertion; at that point, delete the override, its
 bridge and the test. Also drop the patch if upstream exposes the encoder
 specification as a setting.
+
+## Patch 8: drop frames the adapter sizes to zero (PETAL-DESKTOP-4Y)
+
+`VideoTrackSource::InternalSource::on_captured_frame` calls `AdaptFrame` and,
+when the adapted size differs from the frame, `CropAndScale(crop_x, crop_y,
+crop_w, crop_h, adapted_w, adapted_h)`. The prebuilt libwebrtc's
+`I420Buffer::Create` RTC_CHECKs positive dimensions, so a zero adapted or crop
+size aborted the process (SIGABRT on a tokio worker, 0.9.35, symbolicated
+`CheckValidDimensions` <- `I420Buffer::Create` <- `CropAndScale` <-
+`on_captured_frame`).
+
+Why the adapter yields zero: `InternalSource` is constructed as
+`AdaptedVideoTrackSource(4)`, a `source_resolution_alignment` of 4 combined
+with the sink's alignment (`video_adapter.h`). The adapter rounds the crop to a
+multiple of `scale.denominator * alignment`, never past the input. So at scale
+1/1 (screencast, maintain-resolution) with no sink alignment, ANY edge below 4
+px gives crop 0 and adapted 0, then `CropAndScale(..., 0, 0)`. No simulcast or
+downscale is involved. Capture sizes are even (`even_capture_dimension(..)
+.unwrap_or(2)` turns degenerate dimensions into 2), so the crashing edge is in
+practice exactly 2 px. (From the headers and upstream behaviour: the prebuilt
+`video_adapter.cc` is not in the tree.)
+
+The fix returns `false` (frame dropped, the receiver holds its last frame)
+when any of the four sizes is `<= 0`, with a rate-limited WARNING. The warning
+names only a closed reason (`adapted` or `crop` size zero), never raw sizes:
+native WebRTC lines become Sentry breadcrumbs and the scrubber does not redact
+dimensions. The Linux-only `capture_dmabuf_frame` also refuses a non-positive
+width/height before building its buffer. Guarded by
+`vendored_on_captured_frame_drops_non_positive_sizes_before_crop_and_scale`
+and `vendored_degenerate_frame_warning_logs_no_raw_sizes` in the desktop
+crate. Keep this on any webrtc-sys bump.

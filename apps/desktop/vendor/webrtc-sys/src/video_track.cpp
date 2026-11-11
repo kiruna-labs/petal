@@ -17,6 +17,7 @@
 #include "livekit/video_track.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -169,6 +170,23 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
     return false;
   }
 
+  // PETAL-DESKTOP-4Y: a non-positive adapted/crop size makes CropAndScale
+  // abort the process (I420Buffer::Create RTC_CHECK). Drop the frame; the
+  // receiver holds its last good frame.
+  if (adapted_width <= 0 || adapted_height <= 0 || crop_width <= 0 ||
+      crop_height <= 0) {
+    static std::atomic<uint32_t> dropped{0};
+    if (dropped.fetch_add(1) % 300 == 0) {  // 1st, then every 10s at 30fps
+      // Closed reason only: this line becomes a Sentry breadcrumb, and raw
+      // sizes are not exported (the patch's closed-bucket contract).
+      const char* which =
+          (adapted_width <= 0 || adapted_height <= 0) ? "adapted" : "crop";
+      RTC_LOG(LS_WARNING) << "VideoTrackSource: dropping degenerate frame ("
+                          << which << " size zero)";
+    }
+    return false;
+  }
+
   if (adapted_width != frame.width() || adapted_height != frame.height()) {
     buffer = buffer->CropAndScale(crop_x, crop_y, crop_width, crop_height,
                                   adapted_width, adapted_height);
@@ -224,6 +242,9 @@ bool VideoTrackSource::capture_dmabuf_frame(int dmabuf_fd,
                                             int pixel_format,
                                             int64_t timestamp_us,
                                             const FrameMetadata& frame_metadata) const {
+  if (width <= 0 || height <= 0) {
+    return false;  // ToI420 would RTC_CHECK on a non-positive size.
+  }
   auto dmabuf_pixel_format =
       static_cast<livekit::DmaBufPixelFormat>(pixel_format);
   auto buffer = webrtc::make_ref_counted<livekit::DmaBufVideoFrameBuffer>(
