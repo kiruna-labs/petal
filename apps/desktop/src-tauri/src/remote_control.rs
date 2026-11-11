@@ -7916,11 +7916,12 @@ pub(crate) mod input {
     }
 
     thread_local! {
-        /// Set by `ax_pointer_up` for an Up with no recorded press that no
-        /// route delivered. `replay_with_backends` still returns the failure
-        /// to the controller but skips the release-failure report: nothing
-        /// was held (PETAL-DESKTOP-3B/3A).
-        static ORPHAN_UP_UNDELIVERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// Set by `ax_pointer_up` for an Up with no recorded press (an
+        /// orphan). `replay_with_backends` consumes it before EVERY
+        /// release-failure report, the cancellation return included (#530):
+        /// nothing was held (PETAL-DESKTOP-3B/3A). The controller still gets
+        /// its failure.
+        static ORPHAN_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11408,7 +11409,7 @@ pub(crate) mod input {
         pb: &dyn PasteboardBackend,
         tap: &dyn SessionTapBackend,
     ) -> Result<(), String> {
-        ORPHAN_UP_UNDELIVERED.with(|flag| flag.set(false));
+        ORPHAN_UP.with(|flag| flag.set(false));
         if target_pid.is_some_and(is_display_target)
             && matches!(
                 message.message_type,
@@ -11482,7 +11483,12 @@ pub(crate) mod input {
             // #134: this returns SUCCESS for an event that was never posted. For
             // an Up that means a phantom held button on the host, reported to
             // the controller as released.
-            note_pointer_release_not_injected(message, PointerReleaseFailure::InjectionCancelled);
+            if !ORPHAN_UP.with(|flag| flag.replace(false)) {
+                note_pointer_release_not_injected(
+                    message,
+                    PointerReleaseFailure::InjectionCancelled,
+                );
+            }
             return Ok(());
         }
         // #404: an AX-serviced shortcut (Cmd+A/C/V) is a delivered key-down.
@@ -11544,7 +11550,7 @@ pub(crate) mod input {
             invalidate_ax_resolution_after_mutation(message.window_id);
         }
         if let Err(error) = &result {
-            if ORPHAN_UP_UNDELIVERED.with(|flag| flag.replace(false)) {
+            if ORPHAN_UP.with(|flag| flag.replace(false)) {
                 return result;
             }
             note_pointer_release_not_injected(
@@ -12680,6 +12686,7 @@ pub(crate) mod input {
             // #368: but never for a host-synthesized release. With no gesture
             // nothing is held, and its Down was dropped by the revoke that
             // queued it, so a click here acts after control is gone.
+            ORPHAN_UP.with(|flag| flag.set(true));
             if super::injection_is_synthetic_release() {
                 log::info!(
                     "remote-control: AX pointer up window_id={window_id} controller='{controller_id}' mode=<none> synthetic release, nothing held; no click"
@@ -12695,12 +12702,11 @@ pub(crate) mod input {
             // cannot be delivered is an orphan Up (lost Down, TTL/gap release),
             // not a stuck button. Never report it as a failed release.
             // The controller still gets its failure; only the Sentry report is
-            // suppressed (see `ORPHAN_UP_UNDELIVERED`).
+            // suppressed (see `ORPHAN_UP`).
             if matches!(outcome, AxReplayOutcome::PassThrough) {
                 log::info!(
                     "remote-control: orphan Up not delivered, nothing held reason=orphan-up window_id={window_id} controller='{controller_id}'"
                 );
-                ORPHAN_UP_UNDELIVERED.with(|flag| flag.set(true));
             }
             return Ok(outcome);
         };
@@ -18332,7 +18338,8 @@ pub(crate) mod input {
 
         /// #134: the cancelled path returns `Ok(())` without injecting -- the
         /// exact shape of "the controller is told the button came up and it
-        /// never did". Success upstream must still report the release failure.
+        /// never did". Success upstream must still report the release failure
+        /// for an Up whose press WAS recorded.
         #[test]
         fn a_cancelled_release_reports_even_though_the_replay_returns_ok() {
             let _guard = ax_test_lock();
@@ -18346,6 +18353,15 @@ pub(crate) mod input {
             let sink = RecordingSink::default();
             let tap = RecordingSessionTap::untrusted();
             let pb = RecordingPasteboard::default();
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.20,
+                0.10,
+                RemoteControlButton::Right,
+                0,
+            );
+            let _ = replay_with_backends(&down, frame, Some(1234), &sink, &ax, &sl, &pb, &tap);
+            assert_eq!(ax_gesture_count_for_tests(), 1, "the press must be recorded");
             let up = pointer_message(
                 RemoteControlAction::Up,
                 0.20,
@@ -18363,6 +18379,44 @@ pub(crate) mod input {
                     PointerReleaseFailure::InjectionCancelled
                 )],
             );
+        }
+
+        /// #530: a cancelled Up with no recorded press is an orphan too. The
+        /// cancellation early return used to report it as
+        /// `InjectionCancelled` before the orphan marker was read, sending a
+        /// false phantom-button event. Covers a controller's orphan Up and a
+        /// host-synthesized one.
+        #[test]
+        fn a_cancelled_orphan_pointer_up_is_not_reported_as_a_failed_release() {
+            let _guard = ax_test_lock();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(80);
+            ax.set_capabilities(80, AxCapabilities::default());
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let tap = RecordingSessionTap::untrusted();
+            let pb = RecordingPasteboard::default();
+            let up = pointer_message(
+                RemoteControlAction::Up,
+                0.20,
+                0.10,
+                RemoteControlButton::Right,
+                0,
+            );
+            for synthetic in [false, true] {
+                clear_all_ax_control_state();
+                let _ = take_release_failure_reports();
+                let _synthetic = synthetic.then(super::super::SyntheticReleaseForTests::set);
+                let _cancelled = super::super::InjectionCancelledForTests::set();
+                let result =
+                    replay_with_backends(&up, frame, Some(1234), &sink, &ax, &sl, &pb, &tap);
+                assert!(result.is_ok(), "synthetic={synthetic}: cancelled path returns Ok");
+                assert!(
+                    take_release_failure_reports().is_empty(),
+                    "synthetic={synthetic}: a cancelled Up with no recorded press is an orphan, not a failed release"
+                );
+            }
         }
 
         #[test]
