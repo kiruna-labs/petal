@@ -11385,6 +11385,9 @@ enum StallTickCheck {
     Held { frozen: u16, last: Option<u16> },
     /// No freeze capture showed the calibrated pattern.
     FreezeUncalibrated { best_matches: u8, capture: Option<String> },
+    /// The tail decoded a counter that is neither the frozen value nor a
+    /// plausible advance from it: another calibrated pattern on screen.
+    Foreign { frozen: u16, counter: u16 },
     /// The freeze did, but none of the last resume captures did.
     ResumeUncalibrated { best_matches: u8, capture: Option<String> },
 }
@@ -11438,11 +11441,24 @@ fn stall_tick_check(evidence: &StallEvidence) -> StallTickCheck {
             capture: resume_capture,
         };
     }
-    let last = evidence.resume.iter().rev().find_map(|sample| match sample.tick {
-        Some(PatternTick::Decoded { counter }) => Some(counter),
-        _ => None,
-    });
-    StallTickCheck::Held { frozen, last }
+    let tail: Vec<u16> = evidence.resume[tail_start..]
+        .iter()
+        .filter_map(|sample| match sample.tick {
+            Some(PatternTick::Decoded { counter }) => Some(counter),
+            _ => None,
+        })
+        .collect();
+    // Held means the decoded counter IS the frozen one (or a little behind).
+    // A calibrated counter far from it is some other pattern on screen.
+    let last = tail
+        .iter()
+        .rev()
+        .copied()
+        .find(|counter| frozen.wrapping_sub(*counter) <= STALL_TICK_SLACK_FRAMES);
+    match last {
+        Some(_) => StallTickCheck::Held { frozen, last },
+        None => StallTickCheck::Foreign { frozen, counter: tail.last().copied().unwrap_or(frozen) },
+    }
 }
 
 impl StallTickCheck {
@@ -11455,6 +11471,9 @@ impl StallTickCheck {
             Self::Held { frozen, last } => format!(
                 "decoded frame counter never advanced past the frozen {frozen} in the resume window ({} samples, last decoded {last:?}): the share did not resume on screen",
                 evidence.resume.len()
+            ),
+            Self::Foreign { frozen, counter } => format!(
+                "OCCLUDED: the region decoded counter {counter}, neither the frozen {frozen} nor an advance a 60fps source could draw -- another calibrated pattern window is over the receiver's panel"
             ),
             Self::FreezeUncalibrated { best_matches, capture } => format!(
                 "OCCLUDED: no freeze-phase capture showed the sharer's calibrated pattern (best {best_matches}/{corners} corner squares) -- another window covers the receiver's panel or the panel is off-screen; see {}",
@@ -11551,7 +11570,9 @@ fn stall_verdict(evidence: &StallEvidence) -> StallVerdict {
     let tick = stall_tick_check(evidence);
     let tick_unverifiable = matches!(
         tick,
-        StallTickCheck::FreezeUncalibrated { .. } | StallTickCheck::ResumeUncalibrated { .. }
+        StallTickCheck::FreezeUncalibrated { .. }
+            | StallTickCheck::ResumeUncalibrated { .. }
+            | StallTickCheck::Foreign { .. }
     );
     assertions.push(AssertionOutcome {
         name: "stall-resumed-tick".to_string(),
@@ -11816,10 +11837,13 @@ impl HiddenTestPatternSource {
     /// SAME calibrated pattern, so a sampler aimed through it could decode
     /// its counter as the share's. The scenario cannot run then.
     fn hide(app: &AppHandle) -> Result<Self, String> {
-        let window = app
-            .get_webview_window(crate::dev_test_pattern::TEST_PATTERN_DEV_LABEL)
-            .filter(|window| window.is_visible().unwrap_or(false));
-        match window {
+        let Some(window) =
+            app.get_webview_window(crate::dev_test_pattern::TEST_PATTERN_DEV_LABEL)
+        else {
+            return Ok(Self(None));
+        };
+        let visible = window.is_visible().map_err(|error| error.to_string())?;
+        match visible.then_some(window) {
             Some(window) => window
                 .hide()
                 .map(|()| Self(Some(window)))
@@ -13858,6 +13882,18 @@ mod tests {
         let verdict = stall_verdict(&evidence);
         assert_eq!(verdict.verdict, ScenarioVerdict::InfraFail, "{}", verdict.summary);
         assert!(verdict.summary.contains("OCCLUDED"), "{}", verdict.summary);
+    }
+
+    #[test]
+    fn stall_verdict_is_infra_when_the_resume_tail_decodes_a_foreign_counter() {
+        let mut evidence = healthy_stall_evidence();
+        evidence.resume[1].tick = Some(PatternTick::Decoded { counter: 2376 });
+        evidence.resume[0].tick = Some(PatternTick::Uncalibrated { matches: 3 });
+        evidence.resumed_tick_offset_ms = None;
+        evidence.resumed_tick = None;
+        let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::InfraFail, "{}", verdict.summary);
+        assert!(verdict.summary.contains("2376"), "{}", verdict.summary);
     }
 
     /// The frozen reference falls back to the last decoded freeze counter
