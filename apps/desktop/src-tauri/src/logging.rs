@@ -5501,6 +5501,7 @@ pub(crate) const UPDATER_HANDOFF_SHUTDOWN_LINE: &str =
 /// `UPDATER_HANDOFF_SHUTDOWN_LINE`, so a later crash still reads as VANISHED.
 /// Must NOT contain `QUIT_RESTART_MARKER` / `QUIT_APP_EXIT_MARKER` (#526).
 pub(crate) const SHUTDOWN_MARKER_REVOKED: &str = "shutdown marker revoked";
+#[cfg_attr(target_os = "macos", allow(dead_code))] // written by the non-macOS install path
 pub(crate) const UPDATER_HANDOFF_FAILED_LINE: &str =
     "shutdown marker revoked -- the installer hand-off failed; this session continues";
 
