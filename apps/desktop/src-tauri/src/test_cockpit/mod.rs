@@ -11078,14 +11078,43 @@ const STALL_PANEL_HEADER_POINTS: f64 = 44.0;
 /// Let the raise land before the screen is read. The raise hops to the main
 /// thread, so the capture can otherwise outrun the window-server change.
 const STALL_RAISE_SETTLE: Duration = Duration::from_millis(150);
-/// Fraction of the sampled lattice that must change, against the last
-/// frozen capture, before the on-screen content counts as resumed. The web
-/// peer's telepointer keeps moving over a held frame (first runner run: the
-/// "Guest" pointer touched 1-2 of 576 cells per sample, which changed a
-/// whole-region hash every time); the animated pattern moves dozens.
-const STALL_CONTENT_CHANGE_FRACTION: f64 = 0.05;
 const STALL_LATTICE_COLS: u32 = 32;
 const STALL_LATTICE_ROWS: u32 = 18;
+/// Red proof only (#498): `1` skips `pattern-animate`, so the source never
+/// resumes and the scenario must TEST-FAIL on `stall-resumed-tick`.
+const STALL_RED_NO_RESUME_ENV: &str = "PETAL_COCKPIT_STALL_RED_NO_RESUME";
+
+// The web sharer's test pattern carries its frame counter as a calibrated
+// 16-bit Gray code (web-harness/src/testPattern.ts). "Resumed" is decided by
+// DECODING that counter from the receiver's region capture, not by how much
+// of the region changed: a held frame and a resumed one changed overlapping
+// fractions of the region on the runner (#234, #498). The geometry and
+// thresholds are pinned for both languages by `testPatternCounter` in
+// contracts/petal-contracts.json.
+const STALL_TICK_PATTERN_WIDTH: f64 = 960.0;
+const STALL_TICK_PATTERN_HEIGHT: f64 = 600.0;
+/// `[x, y, w, h]` in pattern pixels, and the square's colour.
+const STALL_TICK_CORNERS: [([f64; 4], [u8; 3]); 4] = [
+    ([16.0, 16.0, 24.0, 24.0], [0xff, 0x2d, 0x55]),
+    ([920.0, 16.0, 24.0, 24.0], [0x00, 0xff, 0x88]),
+    ([16.0, 560.0, 24.0, 24.0], [0x2d, 0x7d, 0xff]),
+    ([920.0, 560.0, 24.0, 24.0], [0xff, 0xd4, 0x00]),
+];
+const STALL_TICK_BITS: usize = 16;
+/// The first (most significant) Gray-code block; the rest follow at
+/// `STALL_TICK_BLOCK[2]` pitch.
+const STALL_TICK_BLOCK: [f64; 4] = [160.0, 88.0, 40.0, 30.0];
+const STALL_TICK_SAMPLE_INSET: f64 = 0.25;
+const STALL_TICK_ZERO_MAX_LUMA: f64 = 96.0;
+const STALL_TICK_ONE_MIN_LUMA: f64 = 159.0;
+const STALL_TICK_CALIBRATION_TOLERANCE: f64 = 100.0;
+/// The pattern redraws at most this often (testPattern.ts `TARGET_DRAW_FPS`),
+/// so a decoded advance larger than the time since the animate ack allows
+/// is some OTHER calibrated pattern on screen, not the sharer resuming.
+const STALL_TICK_MAX_DRAW_FPS: u64 = 60;
+/// Frames of slack on the resume budget: the source starts drawing before
+/// its animate ack arrives, and samples are taken late in a 2s interval.
+const STALL_TICK_SLACK_FRAMES: u16 = 120;
 
 /// Parse a phase length from its env var (milliseconds), bounded to
 /// `STALL_PHASE_MIN..=STALL_PHASE_MAX`; anything unparsable is the default.
@@ -11143,21 +11172,19 @@ struct StallSample {
     window_present: bool,
     mean_luma: Option<f64>,
     content_hash: Option<u64>,
-    /// Resume phase only: fraction of lattice cells changed against the last
-    /// frozen capture (`STALL_CONTENT_CHANGE_FRACTION` is the bar).
-    changed_vs_frozen: Option<f64>,
+    /// The sharer's frame counter as decoded from this capture (#498); `None`
+    /// when no capture succeeded.
+    tick: Option<PatternTick>,
     capture_path: Option<String>,
     capture_error: Option<String>,
     /// The screen region this sample actually captured, in global top-left
-    /// points: `[x, y, width, height]`. Without it a low
-    /// `changed_vs_frozen` cannot be told apart from a region that was
-    /// pointed somewhere other than the share (#234).
+    /// points: `[x, y, width, height]`. Without it an uncalibrated
+    /// decode cannot be told apart from a region that was pointed somewhere
+    /// other than the share (#234).
     capture_region: Option<[i64; 4]>,
     /// What that region was derived FROM: the panel's physical outer
     /// `[x, y, width, height]` and the scale factor divided out of it.
     raw_panel_frame: Option<[f64; 5]>,
-    #[serde(skip)]
-    cells: Option<Vec<u8>>,
 }
 
 /// A "media" journal entry (the receiver's own stall/recovery transitions,
@@ -11185,17 +11212,123 @@ struct StallEvidence {
     frames_decoded_at_animate: u32,
     animate_ack_offset_ms: u64,
     resumed_frames_offset_ms: Option<u64>,
-    resumed_content_offset_ms: Option<u64>,
+    /// The counter the sharer froze on (its `pattern-frozen` ack); `None`
+    /// from a sharer that does not report it.
+    frozen_tick: Option<u16>,
+    /// First resume sample whose decoded counter advanced past `frozen_tick`.
+    resumed_tick_offset_ms: Option<u64>,
+    resumed_tick: Option<u16>,
 }
 
-/// What one capture of the content region looks like: mean luma, a coarse
-/// hash (for the record), and the per-cell quantised luma of a 32x18
-/// lattice (for change measurement). Pure over the image so both directions
-/// are unit-tested.
+/// What one capture of the content region looks like: mean luma and a
+/// coarse hash (for the record) over a 32x18 lattice. Pure over the image so
+/// both directions are unit-tested.
 struct RegionSignature {
     mean_luma: f64,
     hash: u64,
-    cells: Vec<u8>,
+}
+
+/// One decode of the sharer's calibrated frame counter from a region capture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum PatternTick {
+    Decoded { counter: u16 },
+    /// Fewer than all four corner squares matched: the region is not showing
+    /// the sharer's pattern (covered, off-screen, or not the share at all).
+    Uncalibrated { matches: u8 },
+    /// Calibrated, but a counter block read between the black and white bars.
+    Ambiguous,
+}
+
+/// Mean RGB of `rect` (pattern pixels, inset by `STALL_TICK_SAMPLE_INSET`)
+/// after aspect-fitting the 960x600 pattern into the image, the way the
+/// compositor's `resizeAspect` layer letterboxes it.
+fn stall_tick_sample_rect(image: &image::RgbImage, rect: [f64; 4]) -> Option<[f64; 3]> {
+    let (width, height) = (image.width() as f64, image.height() as f64);
+    if width < 1.0 || height < 1.0 {
+        return None;
+    }
+    let scale = (width / STALL_TICK_PATTERN_WIDTH).min(height / STALL_TICK_PATTERN_HEIGHT);
+    let origin_x = (width - STALL_TICK_PATTERN_WIDTH * scale) / 2.0;
+    let origin_y = (height - STALL_TICK_PATTERN_HEIGHT * scale) / 2.0;
+    let [x, y, w, h] = rect;
+    let left = (origin_x + (x + w * STALL_TICK_SAMPLE_INSET) * scale).floor().max(0.0);
+    let top = (origin_y + (y + h * STALL_TICK_SAMPLE_INSET) * scale).floor().max(0.0);
+    let right = (origin_x + (x + w * (1.0 - STALL_TICK_SAMPLE_INSET)) * scale)
+        .ceil()
+        .min(width);
+    let bottom = (origin_y + (y + h * (1.0 - STALL_TICK_SAMPLE_INSET)) * scale)
+        .ceil()
+        .min(height);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    let mut sum = [0.0f64; 3];
+    let mut pixels = 0.0;
+    for py in top as u32..bottom as u32 {
+        for px in left as u32..right as u32 {
+            let [r, g, b] = image.get_pixel(px, py).0;
+            sum[0] += r as f64;
+            sum[1] += g as f64;
+            sum[2] += b as f64;
+            pixels += 1.0;
+        }
+    }
+    Some([sum[0] / pixels, sum[1] / pixels, sum[2] / pixels])
+}
+
+/// Decode the sharer's frame counter. Calibration is mandatory: all four
+/// corner squares must match, so a covered or misaimed region can never
+/// read as a counter (#498).
+fn decode_pattern_tick(image: &image::RgbImage) -> PatternTick {
+    let mut matches = 0u8;
+    for (rect, color) in STALL_TICK_CORNERS {
+        let Some(rgb) = stall_tick_sample_rect(image, rect) else {
+            return PatternTick::Uncalibrated { matches: 0 };
+        };
+        let distance = (0..3)
+            .map(|i| (rgb[i] - color[i] as f64).abs())
+            .fold(0.0, f64::max);
+        if distance <= STALL_TICK_CALIBRATION_TOLERANCE {
+            matches += 1;
+        }
+    }
+    if matches as usize != STALL_TICK_CORNERS.len() {
+        return PatternTick::Uncalibrated { matches };
+    }
+    let mut gray: u16 = 0;
+    for bit in 0..STALL_TICK_BITS {
+        let [x, y, w, h] = STALL_TICK_BLOCK;
+        let Some([r, g, b]) = stall_tick_sample_rect(image, [x + bit as f64 * w, y, w, h]) else {
+            return PatternTick::Ambiguous;
+        };
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let one = if luma <= STALL_TICK_ZERO_MAX_LUMA {
+            false
+        } else if luma >= STALL_TICK_ONE_MIN_LUMA {
+            true
+        } else {
+            return PatternTick::Ambiguous;
+        };
+        gray = (gray << 1) | u16::from(one);
+    }
+    let mut counter = gray;
+    let mut shift = 1;
+    while shift < STALL_TICK_BITS {
+        counter ^= counter >> shift;
+        shift <<= 1;
+    }
+    PatternTick::Decoded { counter }
+}
+
+/// The decoded counter advanced past `frozen`, by no more than the source
+/// could have drawn in `since_animate_ms` (plus slack). Wrapping arithmetic:
+/// the counter is 16-bit.
+fn pattern_tick_resumed(frozen: u16, decoded: u16, since_animate_ms: u64) -> bool {
+    let advance = u64::from(decoded.wrapping_sub(frozen));
+    let budget =
+        since_animate_ms * STALL_TICK_MAX_DRAW_FPS / 1000 + u64::from(STALL_TICK_SLACK_FRAMES);
+    advance >= 1 && advance <= budget
 }
 
 fn region_signature(image: &image::RgbImage) -> Option<RegionSignature> {
@@ -11205,17 +11338,12 @@ fn region_signature(image: &image::RgbImage) -> Option<RegionSignature> {
     }
     let mut luma_sum = 0.0;
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut cells = Vec::with_capacity((STALL_LATTICE_COLS * STALL_LATTICE_ROWS) as usize);
     for gy in 0..STALL_LATTICE_ROWS {
         for gx in 0..STALL_LATTICE_COLS {
             let x = (((gx as f64 + 0.5) / STALL_LATTICE_COLS as f64) * width as f64) as u32;
             let y = (((gy as f64 + 0.5) / STALL_LATTICE_ROWS as f64) * height as f64) as u32;
             let [r, g, b] = image.get_pixel(x.min(width - 1), y.min(height - 1)).0;
-            let luma = 0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64;
-            luma_sum += luma;
-            // Quantise to 16 levels so encoder noise on a held frame does
-            // not read as new content.
-            cells.push((luma / 16.0) as u8);
+            luma_sum += 0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64;
             for channel in [r, g, b] {
                 hash ^= (channel >> 4) as u64;
                 hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
@@ -11225,22 +11353,7 @@ fn region_signature(image: &image::RgbImage) -> Option<RegionSignature> {
     Some(RegionSignature {
         mean_luma: luma_sum / (STALL_LATTICE_COLS * STALL_LATTICE_ROWS) as f64,
         hash,
-        cells,
     })
-}
-
-/// Fraction of lattice cells whose quantised luma moved by two or more
-/// levels between two captures (one level is encoder/scaler noise).
-fn changed_cell_fraction(before: &[u8], after: &[u8]) -> f64 {
-    if before.is_empty() || before.len() != after.len() {
-        return 0.0;
-    }
-    let changed = before
-        .iter()
-        .zip(after)
-        .filter(|(a, b)| a.abs_diff(**b) >= 2)
-        .count();
-    changed as f64 / before.len() as f64
 }
 
 #[derive(Debug)]
@@ -11250,10 +11363,108 @@ struct StallVerdict {
     assertions: Vec<AssertionOutcome>,
 }
 
+/// The counter the receiver should be HOLDING: the sharer's own freeze ack,
+/// else the last counter decoded during the freeze.
+fn stall_frozen_reference(evidence: &StallEvidence) -> Option<u16> {
+    evidence.frozen_tick.or_else(|| {
+        evidence.freeze.iter().rev().find_map(|sample| match sample.tick {
+            Some(PatternTick::Decoded { counter }) => Some(counter),
+            _ => None,
+        })
+    })
+}
+
+/// What the decoded counter says about the resume (#498).
+#[derive(Debug, PartialEq)]
+enum StallTickCheck {
+    Resumed { frozen: u16, counter: u16, after_ms: u64 },
+    /// Calibrated captures in both phases, and the counter never advanced.
+    Held { frozen: u16, last: Option<u16> },
+    /// No freeze capture showed the calibrated pattern.
+    FreezeUncalibrated { best_matches: u8, capture: Option<String> },
+    /// The freeze did, but no resume capture did.
+    ResumeUncalibrated { best_matches: u8, capture: Option<String> },
+}
+
+fn stall_tick_evidence(samples: &[StallSample]) -> (bool, u8, Option<String>) {
+    let decoded = samples
+        .iter()
+        .any(|sample| matches!(sample.tick, Some(PatternTick::Decoded { .. })));
+    let best_matches = samples
+        .iter()
+        .filter_map(|sample| match sample.tick {
+            Some(PatternTick::Uncalibrated { matches }) => Some(matches),
+            Some(PatternTick::Decoded { .. } | PatternTick::Ambiguous) => {
+                Some(STALL_TICK_CORNERS.len() as u8)
+            }
+            None => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let capture = samples.iter().find_map(|sample| sample.capture_path.clone());
+    (decoded, best_matches, capture)
+}
+
+fn stall_tick_check(evidence: &StallEvidence) -> StallTickCheck {
+    let (freeze_decoded, freeze_best, freeze_capture) = stall_tick_evidence(&evidence.freeze);
+    let frozen = match (freeze_decoded, stall_frozen_reference(evidence)) {
+        (true, Some(frozen)) => frozen,
+        _ => {
+            return StallTickCheck::FreezeUncalibrated {
+                best_matches: freeze_best,
+                capture: freeze_capture,
+            }
+        }
+    };
+    if let (Some(at), Some(counter)) = (evidence.resumed_tick_offset_ms, evidence.resumed_tick) {
+        return StallTickCheck::Resumed {
+            frozen,
+            counter,
+            after_ms: at.saturating_sub(evidence.animate_ack_offset_ms),
+        };
+    }
+    let (resume_decoded, resume_best, resume_capture) = stall_tick_evidence(&evidence.resume);
+    if !resume_decoded {
+        return StallTickCheck::ResumeUncalibrated {
+            best_matches: resume_best,
+            capture: resume_capture,
+        };
+    }
+    let last = evidence.resume.iter().rev().find_map(|sample| match sample.tick {
+        Some(PatternTick::Decoded { counter }) => Some(counter),
+        _ => None,
+    });
+    StallTickCheck::Held { frozen, last }
+}
+
+impl StallTickCheck {
+    fn detail(&self, evidence: &StallEvidence) -> String {
+        let corners = STALL_TICK_CORNERS.len();
+        match self {
+            Self::Resumed { frozen, counter, after_ms } => format!(
+                "decoded frame counter advanced {frozen} -> {counter} within {after_ms}ms of the animate ack"
+            ),
+            Self::Held { frozen, last } => format!(
+                "decoded frame counter never advanced past the frozen {frozen} in the resume window ({} samples, last decoded {last:?}): the share did not resume on screen",
+                evidence.resume.len()
+            ),
+            Self::FreezeUncalibrated { best_matches, capture } => format!(
+                "OCCLUDED: no freeze-phase capture showed the sharer's calibrated pattern (best {best_matches}/{corners} corner squares) -- another window covers the receiver's panel or the panel is off-screen; see {}",
+                capture.as_deref().unwrap_or("(no capture)")
+            ),
+            Self::ResumeUncalibrated { best_matches, capture } => format!(
+                "OCCLUDED: no resume-phase capture showed the sharer's calibrated pattern (best {best_matches}/{corners} corner squares) -- the panel was covered or moved after the freeze; see {}",
+                capture.as_deref().unwrap_or("(no capture)")
+            ),
+        }
+    }
+}
+
 /// Pure verdict over the evidence. Product failures (the window vanished,
-/// the content went black, decoding or pixels never resumed) are TEST-FAIL;
-/// a run in which no region capture ever succeeded cannot check the
-/// never-black rule and is INFRA-FAIL, never a pass.
+/// the content went black, decoding or the on-screen frame counter never
+/// resumed) are TEST-FAIL; a run in which no region capture ever succeeded,
+/// or no capture showed the sharer's calibrated pattern (occluded), cannot
+/// judge the share and is INFRA-FAIL, never a pass.
 fn stall_verdict(evidence: &StallEvidence) -> StallVerdict {
     let all: Vec<&StallSample> = evidence.freeze.iter().chain(evidence.resume.iter()).collect();
     let mut assertions = Vec::new();
@@ -11324,46 +11535,29 @@ fn stall_verdict(evidence: &StallEvidence) -> StallVerdict {
         },
     });
 
-    let content_check_possible = evidence.freeze.iter().any(|s| s.content_hash.is_some())
-        && evidence.resume.iter().any(|s| s.content_hash.is_some());
-    let content_resumed = evidence.resumed_content_offset_ms.is_some();
-    // ADVISORY, not gating (#234). Measured on one unoccluded run, the change
-    // fraction of a HELD frame (0.7-2.8%, median 1.6%) OVERLAPS that of the
-    // resumed, animating share (1.7-3.3%, median 2.8%): the held frame's
-    // maximum exceeds the resumed minimum, so no threshold separates the two
-    // states this assertion exists to tell apart. It only ever "passed"
-    // because the region was photographing the web peer's own window, whose
-    // full-window animation cleared 5% easily.
-    //
-    // It stays recorded -- a run that never changes a pixel is still worth
-    // seeing -- but it cannot fail the gate while it cannot discriminate.
-    // Gating returns when the sampler measures something that separates the
-    // states (a finer lattice, or the frame counter region alone), with the
-    // bar set from measured separation. The other assertions here are
-    // unaffected and still gate: the window surviving, never going black, and
-    // decoding resuming are what the no-black-frame rule actually asks for.
+    // #498: "resumed" is a DECODED frame counter that moved past the value
+    // the sharer froze on. The region must show the sharer's calibrated
+    // pattern in BOTH phases; when it does not, the capture photographed
+    // something else (a covering window, an off-screen panel) and the run
+    // cannot judge resume at all -- infrastructure, not a product failure.
+    let tick = stall_tick_check(evidence);
+    let tick_unverifiable = matches!(
+        tick,
+        StallTickCheck::FreezeUncalibrated { .. } | StallTickCheck::ResumeUncalibrated { .. }
+    );
     assertions.push(AssertionOutcome {
-        name: "stall-resumed-pixels (advisory, #234)".to_string(),
-        passed: !content_check_possible || content_resumed,
-        detail: match (content_check_possible, evidence.resumed_content_offset_ms) {
-            (false, _) => "not checked: no captures on one side of the resume".to_string(),
-            (true, Some(at)) => format!(
-                "on-screen content changed within {}ms of the animate ack",
-                at.saturating_sub(evidence.animate_ack_offset_ms)
-            ),
-            (true, None) => {
-                "on-screen content never changed after the source resumed -- ADVISORY: this check cannot currently separate a held frame from a resumed one (#234)"
-                    .to_string()
-            }
-        },
+        name: "stall-resumed-tick".to_string(),
+        passed: matches!(tick, StallTickCheck::Resumed { .. }),
+        detail: tick.detail(evidence),
     });
 
-    // `content_resumed` is deliberately absent: see the advisory note above.
-    let product_failure =
-        !window_survived || (captures_available && !never_black) || !resumed;
+    let product_failure = !window_survived
+        || (captures_available && !never_black)
+        || !resumed
+        || matches!(tick, StallTickCheck::Held { .. });
     let verdict = if product_failure {
         ScenarioVerdict::TestFail
-    } else if !captures_available {
+    } else if !captures_available || tick_unverifiable {
         ScenarioVerdict::InfraFail
     } else {
         ScenarioVerdict::Pass
@@ -11375,7 +11569,7 @@ fn stall_verdict(evidence: &StallEvidence) -> StallVerdict {
         .collect();
     let summary = match verdict {
         ScenarioVerdict::Pass => format!(
-            "window held through a {}s source freeze (min luma {min_luma:.1}, {} transitions), decoding resumed {}ms after the source did",
+            "window held through a {}s source freeze (min luma {min_luma:.1}, {} transitions), decoding resumed {}ms after the source did; {}",
             evidence
                 .freeze
                 .last()
@@ -11385,11 +11579,16 @@ fn stall_verdict(evidence: &StallEvidence) -> StallVerdict {
             evidence
                 .resumed_frames_offset_ms
                 .unwrap_or(0)
-                .saturating_sub(evidence.animate_ack_offset_ms)
+                .saturating_sub(evidence.animate_ack_offset_ms),
+            tick.detail(evidence)
         ),
-        ScenarioVerdict::InfraFail => {
+        ScenarioVerdict::InfraFail if !captures_available => {
             "no screen-region capture succeeded, so the never-black rule is unverified".to_string()
         }
+        ScenarioVerdict::InfraFail => format!(
+            "the receiver's region capture did not show the sharer's pattern, so resume cannot be judged: {}",
+            tick.detail(evidence)
+        ),
         _ => format!("failed assertions {failed:?}"),
     };
     StallVerdict {
@@ -11460,12 +11659,11 @@ fn stall_take_sample(
         window_present: false,
         mean_luma: None,
         content_hash: None,
-        changed_vs_frozen: None,
+        tick: None,
         capture_path: None,
         capture_error: None,
         capture_region: None,
         raw_panel_frame: None,
-        cells: None,
     };
     if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
         let snapshot = diagnostics.snapshot();
@@ -11528,13 +11726,14 @@ fn stall_take_sample(
         let captured = crate::test_cockpit_bridge::capture_screen_region_png(
             x, y, width, height, &path,
         )
-        .and_then(|()| image::open(&path).map_err(|error| error.to_string()));
+        .and_then(|()| image::open(&path).map_err(|error| error.to_string()))
+        .map(|image| image.to_rgb8());
         match captured {
-            Ok(image) => match region_signature(&image.to_rgb8()) {
+            Ok(rgb) => match region_signature(&rgb) {
                 Some(signature) => {
                     sample.mean_luma = Some(signature.mean_luma);
                     sample.content_hash = Some(signature.hash);
-                    sample.cells = Some(signature.cells);
+                    sample.tick = Some(decode_pattern_tick(&rgb));
                     sample.capture_path = Some(relative.display().to_string());
                     sample.capture_error = None;
                     if signature.mean_luma >= STALL_BLACK_LUMA {
@@ -11598,6 +11797,42 @@ fn write_stall_timeline(
             "note": note,
         }),
     );
+}
+
+/// Hides the native test-pattern source window while it lives and shows it
+/// again on drop, so the next native-share scenario finds it as it was.
+struct HiddenTestPatternSource(Option<tauri::WebviewWindow>);
+
+impl HiddenTestPatternSource {
+    fn hide(app: &AppHandle) -> Self {
+        let window = app
+            .get_webview_window(crate::dev_test_pattern::TEST_PATTERN_DEV_LABEL)
+            .filter(|window| window.is_visible().unwrap_or(false));
+        match window {
+            Some(window) => match window.hide() {
+                Ok(()) => Self(Some(window)),
+                Err(error) => {
+                    log::warn!("stall: could not hide the native test-pattern source: {error}");
+                    Self(None)
+                }
+            },
+            None => Self(None),
+        }
+    }
+
+    fn is_hiding(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+impl Drop for HiddenTestPatternSource {
+    fn drop(&mut self) {
+        if let Some(window) = self.0.take() {
+            if let Err(error) = window.show() {
+                log::warn!("stall: could not re-show the native test-pattern source: {error}");
+            }
+        }
+    }
 }
 
 async fn run_web_share_stall_scenario(
@@ -11682,6 +11917,16 @@ async fn run_web_share_stall_scenario(
     );
     let mut assertions = baseline.assertions;
 
+    // The native test-pattern source an earlier scenario left up is
+    // always-on-top and sat over this panel on every runner capture (#498).
+    // Hide it for the sampling, and put it back however this returns.
+    let occluder = HiddenTestPatternSource::hide(app);
+    let _ = writer.write(
+        "stall-occluder",
+        Some(scenario.id),
+        serde_json::json!({ "nativeTestPatternHidden": occluder.is_hiding() }),
+    );
+
     // Freeze the source and wait for the sharer to say it did.
     let freeze_sent_ms = crate::time_util::now_ms();
     if let Err(error) = publish_cockpit_command(app, &owner, "pattern-freeze").await {
@@ -11701,6 +11946,11 @@ async fn run_web_share_stall_scenario(
     let freeze_ack_at = Instant::now();
     let mut evidence = StallEvidence {
         frames_decoded_at_freeze: stall_current_frames_decoded(app),
+        frozen_tick: freeze_ack
+            .payload
+            .get("patternFrameCount")
+            .and_then(serde_json::Value::as_u64)
+            .map(|count| (count & 0xffff) as u16),
         ..StallEvidence::default()
     };
     let _ = writer.write(
@@ -11715,23 +11965,11 @@ async fn run_web_share_stall_scenario(
 
     let mut seen = HashSet::new();
     let mut index = 0usize;
-    let mut first_frozen_cells: Option<Vec<u8>> = None;
     let freeze_deadline = freeze_ack_at + config.freeze();
     loop {
         let offset_ms = freeze_ack_at.elapsed().as_millis() as u64;
-        let mut sample = stall_take_sample(app, scenario, writer, &owner, "freeze", offset_ms, index);
+        let sample = stall_take_sample(app, scenario, writer, &owner, "freeze", offset_ms, index);
         index += 1;
-        // The resume bar is only meaningful against the change a HELD frame
-        // still shows (the web peer's telepointer keeps moving over it). Record
-        // it rather than assume it: `STALL_CONTENT_CHANGE_FRACTION`'s 5% was
-        // never checked against an unoccluded capture of either phase (#234).
-        if let (Some(cells), Some(first)) = (sample.cells.as_deref(), first_frozen_cells.as_deref())
-        {
-            sample.changed_vs_frozen = Some(changed_cell_fraction(first, cells));
-        }
-        if first_frozen_cells.is_none() {
-            first_frozen_cells = sample.cells.clone();
-        }
         let _ = writer.write("stall-sample", Some(scenario.id), &sample);
         evidence.freeze.push(sample);
         for transition in stall_collect_transitions(app, freeze_sent_ms, freeze_ack_ms, &mut seen) {
@@ -11746,36 +11984,45 @@ async fn run_web_share_stall_scenario(
     }
 
     // Animate again and wait for the ack; then the receiver must resume.
+    // The red proof (#498) skips the animate, so the source never resumes.
+    let red_no_resume = env::var(STALL_RED_NO_RESUME_ENV).is_ok_and(|value| value.trim() == "1");
     let animate_sent_ms = crate::time_util::now_ms();
-    if let Err(error) = publish_cockpit_command(app, &owner, "pattern-animate").await {
-        #[cfg(target_os = "macos")]
-        crate::compositor::release_capture_hold_for_participant(app, &owner);
-        write_stall_timeline(writer, scenario, config, &owner, &evidence, None, "animate command failed");
-        return infra_fail_outcome(scenario, error);
-    }
-    let Some((animate_ack, _)) =
-        await_web_step(app, scenario, "pattern-animated", animate_sent_ms, STALL_ACK_TIMEOUT).await
-    else {
-        #[cfg(target_os = "macos")]
-        crate::compositor::release_capture_hold_for_participant(app, &owner);
-        write_stall_timeline(writer, scenario, config, &owner, &evidence, None, "no animate ack");
-        return infra_fail_outcome(
-            scenario,
-            format!(
-                "the web sharer '{owner}' never acknowledged pattern-animate within {:?}",
-                STALL_ACK_TIMEOUT
-            ),
-        );
+    let animate_ack = if red_no_resume {
+        log::warn!("stall: {STALL_RED_NO_RESUME_ENV}=1 -- pattern-animate NOT sent (red proof only)");
+        serde_json::json!({ "redProof": STALL_RED_NO_RESUME_ENV, "sent": false })
+    } else {
+        if let Err(error) = publish_cockpit_command(app, &owner, "pattern-animate").await {
+            #[cfg(target_os = "macos")]
+            crate::compositor::release_capture_hold_for_participant(app, &owner);
+            write_stall_timeline(writer, scenario, config, &owner, &evidence, None, "animate command failed");
+            return infra_fail_outcome(scenario, error);
+        }
+        let Some((animate_ack, _)) =
+            await_web_step(app, scenario, "pattern-animated", animate_sent_ms, STALL_ACK_TIMEOUT)
+                .await
+        else {
+            #[cfg(target_os = "macos")]
+            crate::compositor::release_capture_hold_for_participant(app, &owner);
+            write_stall_timeline(writer, scenario, config, &owner, &evidence, None, "no animate ack");
+            return infra_fail_outcome(
+                scenario,
+                format!(
+                    "the web sharer '{owner}' never acknowledged pattern-animate within {:?}",
+                    STALL_ACK_TIMEOUT
+                ),
+            );
+        };
+        animate_ack.payload
     };
     evidence.animate_ack_offset_ms = freeze_ack_at.elapsed().as_millis() as u64;
     evidence.frames_decoded_at_animate = stall_current_frames_decoded(app);
-    let frozen_cells: Option<Vec<u8>> =
-        evidence.freeze.iter().rev().find_map(|sample| sample.cells.clone());
+    let frozen_tick = stall_frozen_reference(&evidence);
     let _ = writer.write(
         "stall-animate",
         Some(scenario.id),
         serde_json::json!({
-            "ack": animate_ack.payload,
+            "ack": animate_ack,
+            "frozenTick": frozen_tick,
             "offsetMs": evidence.animate_ack_offset_ms,
             "framesDecoded": evidence.frames_decoded_at_animate,
         }),
@@ -11785,7 +12032,7 @@ async fn run_web_share_stall_scenario(
     index = 0;
     loop {
         let offset_ms = freeze_ack_at.elapsed().as_millis() as u64;
-        let mut sample =
+        let sample =
             stall_take_sample(app, scenario, writer, &owner, "resume", offset_ms, index);
         index += 1;
         if evidence.resumed_frames_offset_ms.is_none()
@@ -11794,13 +12041,13 @@ async fn run_web_share_stall_scenario(
         {
             evidence.resumed_frames_offset_ms = Some(sample.offset_ms);
         }
-        if let (Some(cells), Some(frozen)) = (sample.cells.as_deref(), frozen_cells.as_deref()) {
-            let changed = changed_cell_fraction(frozen, cells);
-            sample.changed_vs_frozen = Some(changed);
-            if evidence.resumed_content_offset_ms.is_none()
-                && changed >= STALL_CONTENT_CHANGE_FRACTION
-            {
-                evidence.resumed_content_offset_ms = Some(sample.offset_ms);
+        if let (None, Some(frozen), Some(PatternTick::Decoded { counter })) =
+            (evidence.resumed_tick_offset_ms, frozen_tick, sample.tick)
+        {
+            let since_animate = sample.offset_ms.saturating_sub(evidence.animate_ack_offset_ms);
+            if pattern_tick_resumed(frozen, counter, since_animate) {
+                evidence.resumed_tick_offset_ms = Some(sample.offset_ms);
+                evidence.resumed_tick = Some(counter);
             }
         }
         let _ = writer.write("stall-sample", Some(scenario.id), &sample);
@@ -11810,7 +12057,7 @@ async fn run_web_share_stall_scenario(
             evidence.transitions.push(transition);
         }
         let settled = evidence.resumed_frames_offset_ms.is_some()
-            && (frozen_cells.is_none() || evidence.resumed_content_offset_ms.is_some());
+            && evidence.resumed_tick_offset_ms.is_some();
         let now = Instant::now();
         if settled || now >= resume_deadline {
             break;
@@ -13251,7 +13498,7 @@ mod tests {
 
     // ---- SHARE-W2N-STALL (#202) ----
 
-    fn stall_sample(phase: &'static str, offset_ms: u64, frames: u32, luma: Option<f64>, hash: Option<u64>, present: bool) -> StallSample {
+    fn stall_sample(phase: &'static str, offset_ms: u64, frames: u32, luma: Option<f64>, counter: Option<u16>, present: bool) -> StallSample {
         StallSample {
             phase,
             offset_ms,
@@ -13261,33 +13508,37 @@ mod tests {
             stream_state: "active".to_string(),
             window_present: present,
             mean_luma: luma,
-            content_hash: hash,
-            changed_vs_frozen: None,
-            capture_path: None,
+            content_hash: luma.map(|_| 1),
+            tick: luma.map(|_| match counter {
+                Some(counter) => PatternTick::Decoded { counter },
+                None => PatternTick::Uncalibrated { matches: 1 },
+            }),
+            capture_path: luma.map(|_| format!("stall/{phase}-{offset_ms}.png")),
             capture_error: None,
             capture_region: None,
             raw_panel_frame: None,
-            cells: None,
         }
     }
 
     fn healthy_stall_evidence() -> StallEvidence {
         StallEvidence {
             freeze: vec![
-                stall_sample("freeze", 0, 900, Some(120.0), Some(1), true),
-                stall_sample("freeze", 5_000, 900, Some(118.0), Some(1), true),
-                stall_sample("freeze", 10_000, 900, Some(118.0), Some(1), true),
+                stall_sample("freeze", 0, 900, Some(120.0), Some(397), true),
+                stall_sample("freeze", 5_000, 900, Some(118.0), Some(397), true),
+                stall_sample("freeze", 10_000, 900, Some(118.0), Some(397), true),
             ],
             resume: vec![
-                stall_sample("resume", 10_500, 900, Some(118.0), Some(1), true),
-                stall_sample("resume", 12_500, 960, Some(121.0), Some(2), true),
+                stall_sample("resume", 10_500, 900, Some(118.0), Some(397), true),
+                stall_sample("resume", 12_500, 960, Some(121.0), Some(520), true),
             ],
             transitions: vec![],
             frames_decoded_at_freeze: 900,
             frames_decoded_at_animate: 900,
             animate_ack_offset_ms: 10_200,
             resumed_frames_offset_ms: Some(12_500),
-            resumed_content_offset_ms: Some(12_500),
+            frozen_tick: Some(397),
+            resumed_tick_offset_ms: Some(12_500),
+            resumed_tick: Some(520),
         }
     }
 
@@ -13319,53 +13570,159 @@ mod tests {
         let pattern = region_signature(&pattern).unwrap();
         assert!(pattern.mean_luma > STALL_BLACK_LUMA, "pattern luma {}", pattern.mean_luma);
         assert_ne!(pattern.hash, black.hash);
-        assert_eq!(pattern.cells.len(), (STALL_LATTICE_COLS * STALL_LATTICE_ROWS) as usize);
-
         let same = image::RgbImage::from_fn(64, 36, |x, y| {
             image::Rgb([(x * 4) as u8, (y * 7) as u8, 200])
         });
-        let same = region_signature(&same).unwrap();
-        assert_eq!(same.hash, pattern.hash, "hash is deterministic");
-        assert_eq!(changed_cell_fraction(&pattern.cells, &same.cells), 0.0);
-
-        let shifted = image::RgbImage::from_fn(64, 36, |x, y| {
-            image::Rgb([(x * 4 + 64) as u8, (y * 7) as u8, 200])
-        });
-        let shifted = region_signature(&shifted).unwrap();
-        assert_ne!(shifted.hash, pattern.hash, "moved content re-hashes");
-        assert!(
-            changed_cell_fraction(&pattern.cells, &shifted.cells) > STALL_CONTENT_CHANGE_FRACTION,
-            "a moved pattern changes most cells"
-        );
+        assert_eq!(region_signature(&same).unwrap().hash, pattern.hash, "hash is deterministic");
         assert!(region_signature(&image::RgbImage::new(0, 0)).is_none());
     }
 
-    #[test]
-    fn a_telepointer_sized_change_over_a_held_frame_is_not_resumed_content() {
-        // 960x600 like the real panel: a held frame with the pointer + name
-        // chip (~40x20 px) moving touches at most a couple of lattice cells,
-        // which a whole-region hash flagged as "new content" on the runner.
-        let held = image::RgbImage::from_fn(960, 600, |x, y| {
-            let v = if (x / 40 + y / 40) % 2 == 0 { 200 } else { 40 };
-            image::Rgb([v, v, v])
-        });
-        let mut pointed = held.clone();
-        for x in 300..340 {
-            for y in 200..220 {
-                pointed.put_pixel(x, y, image::Rgb([255, 255, 255]));
+    // ---- #498: the decoded frame-counter tick ----
+
+    fn fill(image: &mut image::RgbImage, rect: [f64; 4], scale: f64, origin: (f64, f64), rgb: [u8; 3]) {
+        let [x, y, w, h] = rect;
+        let x0 = (origin.0 + x * scale).round() as u32;
+        let y0 = (origin.1 + y * scale).round() as u32;
+        let x1 = ((origin.0 + (x + w) * scale).round() as u32).min(image.width());
+        let y1 = ((origin.1 + (y + h) * scale).round() as u32).min(image.height());
+        for py in y0..y1 {
+            for px in x0..x1 {
+                image.put_pixel(px, py, image::Rgb(rgb));
             }
         }
-        let held = region_signature(&held).unwrap();
-        let pointed = region_signature(&pointed).unwrap();
-        assert_ne!(held.hash, pointed.hash, "the hash does move");
-        let fraction = changed_cell_fraction(&held.cells, &pointed.cells);
-        assert!(
-            fraction < STALL_CONTENT_CHANGE_FRACTION,
-            "pointer-sized change {fraction} must stay under the bar"
+    }
+
+    /// The web test pattern (testPattern.ts) drawn at `scale`, aspect-fitted
+    /// into a `width` x `height` region the way the receiver letterboxes it.
+    fn render_tick_pattern(counter: u16, width: u32, height: u32) -> image::RgbImage {
+        let scale = (width as f64 / STALL_TICK_PATTERN_WIDTH).min(height as f64 / STALL_TICK_PATTERN_HEIGHT);
+        let origin = (
+            (width as f64 - STALL_TICK_PATTERN_WIDTH * scale) / 2.0,
+            (height as f64 - STALL_TICK_PATTERN_HEIGHT * scale) / 2.0,
         );
-        // Mismatched or empty lattices never count as change.
-        assert_eq!(changed_cell_fraction(&held.cells, &held.cells[..10]), 0.0);
-        assert_eq!(changed_cell_fraction(&[], &[]), 0.0);
+        let mut image = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
+        fill(&mut image, [0.0, 0.0, STALL_TICK_PATTERN_WIDTH, STALL_TICK_PATTERN_HEIGHT], scale, origin, [0x1b, 0x10, 0x33]);
+        for (rect, color) in STALL_TICK_CORNERS {
+            fill(&mut image, rect, scale, origin, color);
+        }
+        let gray = counter ^ (counter >> 1);
+        let [x, y, w, h] = STALL_TICK_BLOCK;
+        for bit in 0..STALL_TICK_BITS {
+            let one = (gray >> (STALL_TICK_BITS - 1 - bit)) & 1 == 1;
+            let value = if one { 255 } else { 0 };
+            fill(&mut image, [x + bit as f64 * w, y, w, h], scale, origin, [value; 3]);
+        }
+        image
+    }
+
+    #[test]
+    fn decoder_round_trips_counters_at_real_capture_sizes() {
+        for (width, height) in [(960, 600), (480, 300), (1920, 1200), (960, 700), (1100, 600)] {
+            for counter in [0u16, 1, 397, 398, 2376, 32768, 65535] {
+                assert_eq!(
+                    decode_pattern_tick(&render_tick_pattern(counter, width, height)),
+                    PatternTick::Decoded { counter },
+                    "{counter} at {width}x{height}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decoder_refuses_a_region_that_does_not_show_the_calibrated_pattern() {
+        // #498: the runner's captures showed the panel's left part with the
+        // native test-pattern window covering the rest (top-right corner
+        // gone). A covered corner must never decode as a counter.
+        let mut covered = render_tick_pattern(397, 960, 600);
+        fill(&mut covered, [294.0, 0.0, 666.0, 558.0], 1.0, (0.0, 0.0), [0x1b, 0x10, 0x33]);
+        assert_eq!(decode_pattern_tick(&covered), PatternTick::Uncalibrated { matches: 3 });
+        let black = image::RgbImage::from_pixel(960, 600, image::Rgb([0, 0, 0]));
+        assert_eq!(decode_pattern_tick(&black), PatternTick::Uncalibrated { matches: 0 });
+        assert_eq!(
+            decode_pattern_tick(&image::RgbImage::new(0, 0)),
+            PatternTick::Uncalibrated { matches: 0 }
+        );
+        // Calibrated, but a counter block mid-grey: refuse rather than guess.
+        let mut smeared = render_tick_pattern(397, 960, 600);
+        fill(&mut smeared, [200.0, 88.0, 40.0, 30.0], 1.0, (0.0, 0.0), [128, 128, 128]);
+        assert_eq!(decode_pattern_tick(&smeared), PatternTick::Ambiguous);
+    }
+
+    /// Real runner captures (fixtures/stall-tick/README.md), not synthetic
+    /// renders: the decoder reads an on-screen pattern at full and half scale
+    /// and refuses the occluded capture every pre-#498 run actually took.
+    #[test]
+    fn decoder_reads_real_runner_captures() {
+        let fixture = |name: &str| {
+            image::open(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("fixtures/stall-tick")
+                    .join(name),
+            )
+            .unwrap()
+            .to_rgb8()
+        };
+        let pattern = fixture("runner-pattern-frame-2376.png");
+        assert_eq!(decode_pattern_tick(&pattern), PatternTick::Decoded { counter: 2376 });
+        let half = image::imageops::resize(&pattern, 480, 300, image::imageops::FilterType::Triangle);
+        assert_eq!(decode_pattern_tick(&half), PatternTick::Decoded { counter: 2376 });
+        assert_eq!(
+            decode_pattern_tick(&fixture("runner-occluded-freeze.png")),
+            PatternTick::Uncalibrated { matches: 3 }
+        );
+    }
+
+    #[test]
+    fn frozen_versus_advanced_counter() {
+        // Held: same value, or a frame or two behind the one the sharer froze on.
+        assert!(!pattern_tick_resumed(397, 397, 10_000));
+        assert!(!pattern_tick_resumed(397, 395, 10_000));
+        // Advanced, within what a 60fps source could draw since the ack.
+        assert!(pattern_tick_resumed(397, 398, 0));
+        assert!(pattern_tick_resumed(397, 397 + 60 * 5, 5_000));
+        // Wraps through the 16-bit modulus.
+        assert!(pattern_tick_resumed(65_530, 4, 1_000));
+        // Further than the source could have drawn: another pattern on screen.
+        assert!(!pattern_tick_resumed(397, 2376, 2_000));
+    }
+
+    /// Both languages read the pattern from the same pinned geometry.
+    #[test]
+    fn tick_geometry_matches_the_shared_contract() {
+        let contracts: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../contracts/petal-contracts.json")).unwrap();
+        let c = &contracts["testPatternCounter"];
+        let rect = |value: &serde_json::Value| -> Vec<f64> {
+            value.as_array().unwrap().iter().map(|n| n.as_f64().unwrap()).collect()
+        };
+        assert_eq!(c["width"], STALL_TICK_PATTERN_WIDTH);
+        assert_eq!(c["height"], STALL_TICK_PATTERN_HEIGHT);
+        assert_eq!(c["bits"], STALL_TICK_BITS);
+        assert_eq!(rect(&c["firstBlock"]), STALL_TICK_BLOCK.to_vec());
+        assert_eq!(c["sampleInset"], STALL_TICK_SAMPLE_INSET);
+        assert_eq!(c["zeroMaxLuma"], STALL_TICK_ZERO_MAX_LUMA);
+        assert_eq!(c["oneMinLuma"], STALL_TICK_ONE_MIN_LUMA);
+        assert_eq!(c["calibrationTolerance"], STALL_TICK_CALIBRATION_TOLERANCE);
+        assert_eq!(c["maxDrawFps"], STALL_TICK_MAX_DRAW_FPS);
+        let corners = c["corners"].as_array().unwrap();
+        assert_eq!(corners.len(), STALL_TICK_CORNERS.len());
+        let rect_of = rect;
+        for (pinned, (rect, color)) in corners.iter().zip(STALL_TICK_CORNERS) {
+            assert_eq!(rect_of(&pinned["rect"]), rect.to_vec());
+            let hex = format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]);
+            assert_eq!(pinned["color"], hex);
+        }
+        for vector in c["grayVectors"].as_array().unwrap() {
+            let counter = vector["counter"].as_u64().unwrap() as u16;
+            let bits: String = (0..STALL_TICK_BITS)
+                .map(|bit| if ((counter ^ (counter >> 1)) >> (STALL_TICK_BITS - 1 - bit)) & 1 == 1 { '1' } else { '0' })
+                .collect();
+            assert_eq!(vector["blocks"], bits, "{counter}");
+            assert_eq!(
+                decode_pattern_tick(&render_tick_pattern(counter, 960, 600)),
+                PatternTick::Decoded { counter }
+            );
+        }
     }
 
     #[test]
@@ -13402,7 +13759,6 @@ mod tests {
     fn stall_verdict_fails_when_decoding_never_resumes() {
         let mut evidence = healthy_stall_evidence();
         evidence.resumed_frames_offset_ms = None;
-        evidence.resumed_content_offset_ms = None;
         let verdict = stall_verdict(&evidence);
         assert_eq!(verdict.verdict, ScenarioVerdict::TestFail);
         let names: Vec<&str> = verdict
@@ -13411,48 +13767,88 @@ mod tests {
             .filter(|a| !a.passed)
             .map(|a| a.name.as_str())
             .collect();
-        assert_eq!(
-            names,
-            vec!["stall-resumed-decoding", "stall-resumed-pixels (advisory, #234)"]
-        );
+        assert_eq!(names, vec!["stall-resumed-decoding"]);
     }
 
-    /// #234: the pixel check is ADVISORY. Measured on an unoccluded run, a held
-    /// frame changes 0.7-2.8% of the lattice and a resumed one 1.7-3.3% -- the
-    /// ranges overlap, so it cannot separate the two states and must not fail
-    /// the gate. It is still reported.
+    /// #498: the on-screen counter now GATES. A share whose decoded counter
+    /// stays at the frozen value through the resume window is a TEST-FAIL,
+    /// even though framesDecoded advanced (a static source can still trickle
+    /// frames: the runner's held frame went 80 -> 107 during the freeze).
     #[test]
-    fn stall_verdict_reports_but_does_not_fail_when_pixels_never_change() {
+    fn stall_verdict_fails_when_the_on_screen_counter_never_advances() {
         let mut evidence = healthy_stall_evidence();
-        evidence.resumed_content_offset_ms = None;
+        evidence.resume[1].tick = Some(PatternTick::Decoded { counter: 397 });
+        evidence.resumed_tick_offset_ms = None;
+        evidence.resumed_tick = None;
         let verdict = stall_verdict(&evidence);
-        assert_eq!(verdict.verdict, ScenarioVerdict::Pass, "{}", verdict.summary);
-        let pixels = verdict
+        assert_eq!(verdict.verdict, ScenarioVerdict::TestFail, "{}", verdict.summary);
+        let tick = verdict
             .assertions
             .iter()
-            .find(|a| a.name == "stall-resumed-pixels (advisory, #234)")
+            .find(|a| a.name == "stall-resumed-tick")
             .unwrap();
-        assert!(!pixels.passed, "the advisory check must still REPORT the failure");
-        assert!(pixels.detail.contains("ADVISORY"));
+        assert!(!tick.passed);
+        assert!(tick.detail.contains("frozen 397"), "{}", tick.detail);
+    }
+
+    /// #498: a region that never shows the calibrated pattern during the
+    /// freeze is OCCLUDED -- infrastructure, named as such, never TEST-FAIL.
+    #[test]
+    fn stall_verdict_reports_an_occluded_freeze_capture_as_infra() {
+        let mut evidence = healthy_stall_evidence();
+        for sample in evidence.freeze.iter_mut() {
+            sample.tick = Some(PatternTick::Uncalibrated { matches: 3 });
+        }
+        evidence.resumed_tick_offset_ms = None;
+        evidence.resumed_tick = None;
+        let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::InfraFail, "{}", verdict.summary);
+        assert!(verdict.summary.contains("OCCLUDED"), "{}", verdict.summary);
+        assert!(verdict.summary.contains("3/4"), "{}", verdict.summary);
+        assert!(verdict.summary.contains("stall/freeze-0.png"), "{}", verdict.summary);
+    }
+
+    #[test]
+    fn stall_verdict_reports_an_occluded_resume_capture_as_infra() {
+        let mut evidence = healthy_stall_evidence();
+        for sample in evidence.resume.iter_mut() {
+            sample.tick = Some(PatternTick::Uncalibrated { matches: 2 });
+        }
+        evidence.resumed_tick_offset_ms = None;
+        evidence.resumed_tick = None;
+        let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::InfraFail, "{}", verdict.summary);
+        assert!(verdict.summary.contains("resume-phase"), "{}", verdict.summary);
+    }
+
+    /// The frozen reference falls back to the last decoded freeze counter
+    /// for a sharer whose ack carries none.
+    #[test]
+    fn stall_frozen_reference_falls_back_to_the_last_freeze_decode() {
+        let mut evidence = healthy_stall_evidence();
+        evidence.frozen_tick = None;
+        evidence.freeze[2].tick = Some(PatternTick::Decoded { counter: 400 });
+        assert_eq!(stall_frozen_reference(&evidence), Some(400));
+        assert_eq!(stall_verdict(&evidence).verdict, ScenarioVerdict::Pass);
     }
 
     /// The gating half of the same scenario must be untouched: a window that
-    /// vanishes or goes black is still a product failure.
+    /// vanishes or goes black is still a product failure -- even when the
+    /// region is also uncalibrated (black fails calibration too).
     #[test]
     fn stall_verdict_still_fails_on_the_gating_assertions() {
         let mut evidence = healthy_stall_evidence();
-        evidence.resumed_content_offset_ms = None;
         if let Some(sample) = evidence.resume.last_mut() {
             sample.window_present = false;
         }
-        let verdict = stall_verdict(&evidence);
-        assert_eq!(verdict.verdict, ScenarioVerdict::TestFail);
+        assert_eq!(stall_verdict(&evidence).verdict, ScenarioVerdict::TestFail);
 
         let mut black = healthy_stall_evidence();
-        black.resumed_content_offset_ms = None;
-        if let Some(sample) = black.resume.last_mut() {
+        for sample in black.freeze.iter_mut().chain(black.resume.iter_mut()) {
             sample.mean_luma = Some(0.0);
+            sample.tick = Some(PatternTick::Uncalibrated { matches: 0 });
         }
+        black.resumed_tick_offset_ms = None;
         assert_eq!(stall_verdict(&black).verdict, ScenarioVerdict::TestFail);
     }
 
@@ -13462,25 +13858,20 @@ mod tests {
         for sample in evidence.freeze.iter_mut().chain(evidence.resume.iter_mut()) {
             sample.mean_luma = None;
             sample.content_hash = None;
+            sample.tick = None;
+            sample.capture_path = None;
             sample.capture_error = Some("screencapture failed".to_string());
         }
-        evidence.resumed_content_offset_ms = None;
+        evidence.resumed_tick_offset_ms = None;
         let verdict = stall_verdict(&evidence);
         assert_eq!(verdict.verdict, ScenarioVerdict::InfraFail, "{}", verdict.summary);
+        assert!(verdict.summary.contains("never-black"), "{}", verdict.summary);
         let never_black = verdict
             .assertions
             .iter()
             .find(|a| a.name == "stall-never-black")
             .unwrap();
         assert!(!never_black.passed);
-        // The pixel-resume check is honestly "not checked", not failed.
-        let pixels = verdict
-            .assertions
-            .iter()
-            .find(|a| a.name == "stall-resumed-pixels (advisory, #234)")
-            .unwrap();
-        assert!(pixels.passed);
-        assert!(pixels.detail.contains("not checked"));
     }
 
     #[test]
@@ -13489,8 +13880,9 @@ mod tests {
         for sample in evidence.freeze.iter_mut().chain(evidence.resume.iter_mut()) {
             sample.mean_luma = None;
             sample.content_hash = None;
+            sample.tick = None;
         }
-        evidence.resumed_content_offset_ms = None;
+        evidence.resumed_tick_offset_ms = None;
         evidence.resumed_frames_offset_ms = None;
         assert_eq!(stall_verdict(&evidence).verdict, ScenarioVerdict::TestFail);
     }

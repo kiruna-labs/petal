@@ -3498,5 +3498,31 @@
       "history entries are a peer's claim; the store marks them relayed unless the relayer attributes them to itself, and they never count as unread",
       "a plugin's message is its own type, post, always carrying via {id, name} as the POSTING client stamped it; history relays posts in a separate history-posts packet, so a client that predates plugin posts drops them instead of showing a plugin's text as the person's own"
     ]
+  },
+  "testPatternCounter": {
+    "description": "The web sharer's test pattern (web-harness/src/testPattern.ts) carries its frame counter as a 16-bit Gray code between four colour calibration squares. The native Test Cockpit decodes it from a receiver's screen-region capture (test_cockpit/mod.rs decode_pattern_tick, SHARE-W2N-STALL #498); the web side decodes the same code from video (remoteControlPhoton.ts). Rects are pattern pixels [x, y, w, h]; blocks are most-significant bit first, '1' = white.",
+    "width": 960,
+    "height": 600,
+    "bits": 16,
+    "firstBlock": [160, 88, 40, 30],
+    "corners": [
+      { "name": "topLeft", "rect": [16, 16, 24, 24], "color": "#ff2d55" },
+      { "name": "topRight", "rect": [920, 16, 24, 24], "color": "#00ff88" },
+      { "name": "bottomLeft", "rect": [16, 560, 24, 24], "color": "#2d7dff" },
+      { "name": "bottomRight", "rect": [920, 560, 24, 24], "color": "#ffd400" }
+    ],
+    "sampleInset": 0.25,
+    "zeroMaxLuma": 96,
+    "oneMinLuma": 159,
+    "calibrationTolerance": 100,
+    "maxDrawFps": 60,
+    "grayVectors": [
+      { "counter": 0, "blocks": "0000000000000000" },
+      { "counter": 1, "blocks": "0000000000000001" },
+      { "counter": 397, "blocks": "0000000101001011" },
+      { "counter": 2376, "blocks": "0000110111101100" },
+      { "counter": 32768, "blocks": "1100000000000000" },
+      { "counter": 65535, "blocks": "1000000000000000" }
+    ]
   }
 }
