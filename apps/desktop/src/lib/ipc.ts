@@ -6,6 +6,7 @@ import {
 } from '@petal/shared/logic/remoteWindowTitle';
 
 export const COMMANDS = {
+  abandonPendingJoin: 'abandon_pending_join',
   aiChatControlApprove: 'ai_chat_control_approve',
   aiChatControlReject: 'ai_chat_control_reject',
   aiChatControlResume: 'ai_chat_control_resume',

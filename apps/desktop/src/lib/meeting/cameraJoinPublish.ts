@@ -12,8 +12,9 @@
 // Native keeps a camera turned on while a join is in flight and publishes it
 // at the commit (`room_generation::DeferredCamera`); that start returns
 // `published: false` and needs no toast while connecting. Outcomes carry the
-// room generation, and one older than this controller's request is stale
-// (PR #503).
+// room generation, and one older than this controller's request is stale:
+// an outcome that lands while a start is in flight is held until the start
+// says which generation it belongs to (PR #503).
 
 import type { CameraPublishState, StartCameraPublishResult } from '#lib/ipc.js';
 import type { MeetingPhase } from './meetingSession.svelte';
@@ -41,8 +42,8 @@ export interface CameraJoinPublish {
   meetingConnected: () => Promise<void>;
   /** The camera was turned off or released: drop a deferred publish. */
   cancel: () => void;
-  /** A `camera-publish-state` event: `apply` runs with what it means, or
-   * never if it is stale. */
+  /** A `camera-publish-state` event: `apply` runs with what it means, now
+   * or once an in-flight start returns, or never if it is stale. */
   receive: (event: CameraPublishState, apply: (action: CameraStateAction) => void) => void;
   /** True while a "not in room" refusal waits for the next connected edge. */
   readonly deferred: boolean;
@@ -72,6 +73,8 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
   // user turned the camera off (or after a newer attempt) can't re-arm it.
   let request = 0;
   let boundGeneration = 0;
+  let inFlight = 0;
+  let held: Array<[CameraPublishState, (action: CameraStateAction) => void]> = [];
 
   function deliver(event: CameraPublishState, apply: (action: CameraStateAction) => void) {
     const action = cameraStateAction(event, boundGeneration);
@@ -80,12 +83,25 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
     apply(action);
   }
 
-  const receive = deliver;
+  function receive(event: CameraPublishState, apply: (action: CameraStateAction) => void) {
+    if (inFlight > 0) held.push([event, apply]);
+    else deliver(event, apply);
+  }
 
   async function start(): Promise<StartCameraPublishResult> {
-    const result = await seams.startPublish();
-    boundGeneration = Math.max(boundGeneration, result.generation);
-    return result;
+    inFlight += 1;
+    try {
+      const result = await seams.startPublish();
+      boundGeneration = Math.max(boundGeneration, result.generation);
+      return result;
+    } finally {
+      inFlight -= 1;
+      if (inFlight === 0) {
+        const ready = held;
+        held = [];
+        for (const [event, apply] of ready) deliver(event, apply);
+      }
+    }
   }
 
   async function publish(): Promise<void> {

@@ -691,6 +691,9 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
 
   function dispose() {
     disposed = true;
+    // A failed join this route abandons must not keep a camera waiting for
+    // it; native ends the pending meeting unless it committed (PR #503).
+    if (hasTauri) void invoke(COMMANDS.abandonPendingJoin).catch(() => {});
     unlistenPresence?.();
     unlistenRoomLeft?.();
     clearMeetingRouteRoom(roomName);

@@ -6,7 +6,8 @@ import {
   cameraStateAction,
   createCameraJoinPublish,
   isNotInRoomRefusal,
-  type CameraJoinPublishSeams
+  type CameraJoinPublishSeams,
+  type CameraStateAction
 } from '../src/lib/meeting/cameraJoinPublish.ts';
 import type { MeetingPhase } from '../src/lib/meeting/meetingSession.svelte.ts';
 import type { CameraPublishState, StartCameraPublishResult } from '../src/lib/ipc.ts';
@@ -201,6 +202,55 @@ test('camera-publish-state from an older room generation is ignored', () => {
   assert.equal(cameraStateAction(at(true, null, 6), 5), 'on');
 });
 
+// PR #503 round 2, item 4: an OFF from an older generation could land while
+// the new start was still in flight, before the route knew which generation
+// its request belonged to, and set the toggle OFF.
+test('a stale OFF that lands while the start is in flight is dropped', async () => {
+  let resolveStart!: (result: StartCameraPublishResult) => void;
+  const camera = createCameraJoinPublish({
+    startPublish: () => new Promise((resolve) => (resolveStart = resolve)),
+    meetingPhase: () => 'connecting',
+    onPublished: () => {},
+    onRetrying: () => {},
+    onFailed: () => {}
+  });
+  const applied: CameraStateAction[] = [];
+  const apply = (action: CameraStateAction) => applied.push(action);
+  camera.receive({ publishing: true, error: null, generation: 3 }, apply);
+  assert.deepEqual(applied, ['on'], 'nothing in flight: delivered at once');
+
+  const pending = camera.publish();
+  // The previous room's teardown (generation 3) lands before start returns.
+  camera.receive({ publishing: false, error: null, generation: 3 }, apply);
+  camera.receive({ publishing: false, error: 'stale heal', generation: 3 }, apply);
+  assert.deepEqual(applied, ['on'], 'held while the start is in flight');
+  resolveStart({ published: false, generation: 4 });
+  await pending;
+  assert.deepEqual(applied, ['on'], 'older than the request: dropped');
+
+  camera.receive({ publishing: false, error: null, generation: 3 }, apply);
+  camera.receive({ publishing: true, error: null, generation: 4 }, apply);
+  camera.receive({ publishing: false, error: 'capture failed', generation: 4 }, apply);
+  assert.deepEqual(applied, ['on', 'on', 'failed'], "the request's own outcomes still apply");
+});
+
+test('an outcome for the request itself that lands mid-start is applied after it', async () => {
+  let resolveStart!: (result: StartCameraPublishResult) => void;
+  const log: string[] = [];
+  const camera = createCameraJoinPublish({
+    startPublish: () => new Promise((resolve) => (resolveStart = resolve)),
+    meetingPhase: () => 'connected',
+    onPublished: () => log.push('published'),
+    onRetrying: () => log.push('retrying'),
+    onFailed: () => log.push('failed')
+  });
+  const pending = camera.publish();
+  camera.receive({ publishing: false, error: 'no frames', generation: 7 }, (a) => log.push(a));
+  resolveStart({ published: false, generation: 7 });
+  await pending;
+  assert.deepEqual(log, ['failed', 'retrying']);
+});
+
 // PR #503 F4: the deferred camera is published at the room commit, before
 // join() resolves (the macOS audio tail can hold it for tens of seconds), so
 // the route must already be listening when it calls join(), and every
@@ -211,4 +261,18 @@ test('the meeting route listens for camera-publish-state before it joins', () =>
   assert.ok(listener > 0 && join > 0);
   assert.ok(listener < join, 'listener registered before join()');
   assert.match(route, /cameraPublish\.receive\(event\.payload, \(action\) =>/);
+});
+
+// PR #503 round 2, item 3: a failed join the route then abandons left native
+// keeping a camera for it, so a later camera-on outside any meeting waited
+// forever. The route tells native it is gone.
+test('disposing the meeting route abandons its pending join natively', () => {
+  const meetingSession = readFileSync(
+    fileURLToPath(new URL('../src/lib/meeting/meetingSession.svelte.ts', import.meta.url)),
+    'utf8'
+  );
+  const dispose = meetingSession.match(/function dispose\(\) \{[\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.match(dispose, /invoke\(COMMANDS\.abandonPendingJoin\)/);
+  const ipc = readFileSync(fileURLToPath(new URL('../src/lib/ipc.ts', import.meta.url)), 'utf8');
+  assert.match(ipc, /abandonPendingJoin: 'abandon_pending_join'/);
 });
