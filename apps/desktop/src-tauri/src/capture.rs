@@ -25,7 +25,7 @@
 
 use std::ffi::c_void;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use screencapturekit::cv::{CVPixelBuffer, CVPixelBufferLockFlags};
@@ -295,6 +295,10 @@ pub enum CaptureError {
     WindowCaptureExcluded(u32),
     #[error("ScreenCaptureKit error: {0}")]
     ScreenCaptureKit(String),
+    /// #533: the source is too small to size a stream (collapsed, sub-2px,
+    /// or non-finite). Refused rather than started as a 2px capture.
+    #[error("source {0} is too small to capture (degenerate size)")]
+    DegenerateSourceSize(u32),
 }
 
 /// Opt-in, privacy-safe accounting for why a stream has not yielded an
@@ -582,6 +586,9 @@ pub struct WindowCapture {
     /// Proof-phase fence for the newest applied ROI configuration.
     pending_region_generation: Arc<Mutex<Option<PendingRegionConfigurationState>>>,
     region_proof_warning_at: Arc<Mutex<Option<std::time::Instant>>>,
+    /// #533: set while the newest region is refused as degenerate, so the
+    /// refusal and the recovery each log once per transition.
+    degenerate_region_size: Arc<AtomicBool>,
     region_transaction: Arc<Mutex<()>>,
     origin: CaptureSourceOrigin,
     layout_gate: LayoutIntegrityGate,
@@ -817,6 +824,9 @@ pub struct WindowCaptureConfig {
     /// Proof-phase fence for the newest applied ROI configuration.
     pending_region_generation: Arc<Mutex<Option<PendingRegionConfigurationState>>>,
     region_proof_warning_at: Arc<Mutex<Option<std::time::Instant>>>,
+    /// #533: set while the newest region is refused as degenerate, so the
+    /// refusal and the recovery each log once per transition.
+    degenerate_region_size: Arc<AtomicBool>,
     region_transaction: Arc<Mutex<()>>,
     origin: CaptureSourceOrigin,
     layout_gate: LayoutIntegrityGate,
@@ -850,11 +860,27 @@ struct CaptureSourceLayout {
     logical_width: f64,
     logical_height: f64,
     backing_scale: f64,
+    /// Validated `capture_pixel_size` of the three fields above. Only `new`
+    /// writes it, so no layout can exist that sizes a stream below 2 px.
+    backing: (u32, u32, f64),
 }
 
 impl CaptureSourceLayout {
+    /// #533: `None` for a degenerate (collapsed, sub-2px, non-finite) source.
+    /// Do not fall back to a 2px size here -- that stream is what reached
+    /// libwebrtc in PETAL-DESKTOP-4Y. Callers keep the last good layout.
+    fn new(logical_width: f64, logical_height: f64, backing_scale: f64) -> Option<Self> {
+        let backing = capture_pixel_size(logical_width, logical_height, backing_scale)?;
+        Some(Self {
+            logical_width,
+            logical_height,
+            backing_scale,
+            backing,
+        })
+    }
+
     fn backing_pixel_size(self) -> (u32, u32, f64) {
-        capture_pixel_size(self.logical_width, self.logical_height, self.backing_scale)
+        self.backing
     }
 
     /// #106: the same numbers `backing_pixel_size` already computes for the
@@ -1484,14 +1510,19 @@ impl WindowCapture {
             source_generation,
             origin,
         } = source;
-        let source_layout = CaptureSourceLayout {
-            logical_width,
-            logical_height,
-            backing_scale: backing_scale.max(1.0),
+        let Some((source_layout, (width, height, initial_source_scale))) =
+            CaptureSourceLayout::new(logical_width, logical_height, backing_scale.max(1.0))
+                .and_then(|layout| {
+                    let (w, h, scale) = layout.backing_pixel_size();
+                    Some((layout, cap_capture_size(w, h, scale, resolution)?))
+                })
+        else {
+            log::warn!(
+                "capture: window {window_id} refused: degenerate source size {logical_width:.1}x{logical_height:.1}pt (backing_scale {backing_scale:.2}) (#533)"
+            );
+            return Err(CaptureError::DegenerateSourceSize(window_id));
         };
         let (backing_width, backing_height, backing_scale) = source_layout.backing_pixel_size();
-        let (width, height, initial_source_scale) =
-            cap_capture_size(backing_width, backing_height, backing_scale, resolution);
 
         let fps = sanitize_capture_fps(fps);
         let filter = Arc::new(Mutex::new(filter));
@@ -1780,6 +1811,7 @@ impl WindowCapture {
             region_generation,
             pending_region_generation,
             region_proof_warning_at,
+            degenerate_region_size: Arc::new(AtomicBool::new(false)),
             region_transaction,
             origin,
             layout_gate,
@@ -1825,6 +1857,7 @@ impl WindowCapture {
             region_generation: self.region_generation.clone(),
             pending_region_generation: self.pending_region_generation.clone(),
             region_proof_warning_at: self.region_proof_warning_at.clone(),
+            degenerate_region_size: self.degenerate_region_size.clone(),
             region_transaction: self.region_transaction.clone(),
             window_id: self.window_id,
             fps: self.fps.clone(),
@@ -2239,6 +2272,30 @@ impl WindowCaptureConfig {
                 }
             }
         }
+        let Some(local) = display.local_roi(source.frame) else {
+            return Ok(false);
+        };
+        let rect = screencapturekit::cg::CGRect::new(local.x, local.y, local.width, local.height);
+        let Some((layout, (width, height, source_scale))) = region_reconfigure_size(
+            local.width,
+            local.height,
+            display.scale,
+            *self.resolution.lock_unpoisoned(),
+            *self.demand_long_edge.lock_unpoisoned(),
+        ) else {
+            // #533: keep the last good layout and stream config. The pump
+            // holds the last frame; the next usable region applies normally.
+            if !self.degenerate_region_size.swap(true, Ordering::AcqRel) {
+                log::warn!(
+                    "capture: window {} ROI generation {} refused: degenerate region {:.1}x{:.1}pt; keeping last good capture size (#533)",
+                    self.window_id,
+                    source.generation.0,
+                    local.width,
+                    local.height
+                );
+            }
+            return Ok(false);
+        };
         let display_changed = *self.region_display_id.lock_unpoisoned() != Some(display.id);
         let replacement_filter = if display_changed {
             let content = SCShareableContent::create()
@@ -2271,23 +2328,6 @@ impl WindowCaptureConfig {
         } else {
             None
         };
-        let Some(local) = display.local_roi(source.frame) else {
-            return Ok(false);
-        };
-        let rect = screencapturekit::cg::CGRect::new(local.x, local.y, local.width, local.height);
-        let layout = CaptureSourceLayout {
-            logical_width: local.width,
-            logical_height: local.height,
-            backing_scale: display.scale.max(1.0),
-        };
-        let (backing_width, backing_height, backing_scale) = layout.backing_pixel_size();
-        let (width, height, source_scale) = cap_capture_size_for_limits(
-            backing_width,
-            backing_height,
-            backing_scale,
-            *self.resolution.lock_unpoisoned(),
-            *self.demand_long_edge.lock_unpoisoned(),
-        );
         let fps = self.fps.load(Ordering::Relaxed).max(1);
         let config = stream_configuration(width, height, fps, self.color_profile, Some(rect));
         let previous_generation = current_generation;
@@ -2317,6 +2357,14 @@ impl WindowCaptureConfig {
         }
         *self.source_rect.lock_unpoisoned() = Some(rect);
         *self.source_layout.lock_unpoisoned() = layout;
+        if self.degenerate_region_size.swap(false, Ordering::AcqRel) {
+            log::info!(
+                "capture: window {} ROI back to a usable size {}x{}; reconfiguring (#533)",
+                self.window_id,
+                width,
+                height
+            );
+        }
         *self.configured_state.lock_unpoisoned() = ConfiguredCaptureState {
             output: (width, height),
             source_scale,
@@ -2434,15 +2482,10 @@ impl WindowCaptureConfig {
         &self,
         resolution: CaptureResolution,
     ) -> (u32, u32, f64) {
-        let (backing_width, backing_height, backing_scale) =
-            self.source_layout.lock_unpoisoned().backing_pixel_size();
-        cap_capture_size_for_limits(
-            backing_width,
-            backing_height,
-            backing_scale,
-            resolution,
-            *self.demand_long_edge.lock_unpoisoned(),
-        )
+        let layout = *self.source_layout.lock_unpoisoned();
+        let demand_long_edge = *self.demand_long_edge.lock_unpoisoned();
+        let configured = *self.configured_state.lock_unpoisoned();
+        computed_capture_size(layout, resolution, demand_long_edge, configured)
     }
 
     pub fn source_scale(&self) -> f64 {
@@ -2769,15 +2812,26 @@ fn cv_ycbcr_matrix_attachment(pixel_buffer: &CVPixelBuffer) -> Option<MatrixCoef
 /// `even_capture_dimension` (above) already existed for `layout_decision`;
 /// this sizing path simply never used it. Reuse it rather than adding a second
 /// rounding rule -- two independent notions of "even enough" is how they drift.
-fn capture_pixel_size(logical_w: f64, logical_h: f64, scale: f64) -> (u32, u32, f64) {
+///
+/// #533: `None` when either axis is degenerate (non-finite, or under 2 px
+/// once scaled). Never fabricate a 2 px axis -- keep the last good size.
+fn capture_pixel_size(logical_w: f64, logical_h: f64, scale: f64) -> Option<(u32, u32, f64)> {
+    if !logical_w.is_finite() || !logical_h.is_finite() || !scale.is_finite() {
+        return None;
+    }
     let scale = scale.max(1.0);
-    let width = logical_w.round().max(1.0) as u32;
-    let height = logical_h.round().max(1.0) as u32;
-    (
-        even_capture_dimension((width as f64) * scale).unwrap_or(2),
-        even_capture_dimension((height as f64) * scale).unwrap_or(2),
+    // Refuse on the RAW size: rounding 1.9pt up to 2pt first would turn a
+    // sub-2px source into a 2px stream all the same.
+    if logical_w * scale < 2.0 || logical_h * scale < 2.0 {
+        return None;
+    }
+    let width = logical_w.round();
+    let height = logical_h.round();
+    Some((
+        even_capture_dimension(width * scale)?,
+        even_capture_dimension(height * scale)?,
         scale,
-    )
+    ))
 }
 
 fn sanitize_capture_fps(fps: u32) -> u32 {
@@ -2981,12 +3035,45 @@ fn color_profile_for_display_id(_display_id: u32) -> Option<VideoColorProfile> {
     None
 }
 
+/// #533: the size `refresh_region_source` reconfigures to, or `None` for a
+/// degenerate region -- the caller then keeps the last good layout and does
+/// not touch the stream. Never pad a degenerate axis up to 2 px.
+fn region_reconfigure_size(
+    logical_width: f64,
+    logical_height: f64,
+    display_scale: f64,
+    resolution: CaptureResolution,
+    demand_long_edge: Option<u32>,
+) -> Option<(CaptureSourceLayout, (u32, u32, f64))> {
+    let layout = CaptureSourceLayout::new(logical_width, logical_height, display_scale.max(1.0))?;
+    let (width, height, scale) = layout.backing_pixel_size();
+    let size = cap_capture_size_for_limits(width, height, scale, resolution, demand_long_edge)?;
+    Some((layout, size))
+}
+
+/// The size authority behind `computed_capture_size_for_resolution`. A cap
+/// that would round an axis below 2 px keeps the last committed output
+/// rather than fabricating a 2 px stream (#533).
+fn computed_capture_size(
+    layout: CaptureSourceLayout,
+    resolution: CaptureResolution,
+    demand_long_edge: Option<u32>,
+    configured: ConfiguredCaptureState,
+) -> (u32, u32, f64) {
+    let (width, height, scale) = layout.backing_pixel_size();
+    cap_capture_size_for_limits(width, height, scale, resolution, demand_long_edge).unwrap_or((
+        configured.output.0,
+        configured.output.1,
+        configured.source_scale,
+    ))
+}
+
 pub(crate) fn cap_capture_size(
     width: u32,
     height: u32,
     scale: f64,
     resolution: CaptureResolution,
-) -> (u32, u32, f64) {
+) -> Option<(u32, u32, f64)> {
     let long_edge = width.max(height);
     let max_long_edge = resolution.long_edge_cap_for_native(long_edge);
     cap_capture_size_to_long_edge(width, height, scale, max_long_edge)
@@ -2998,7 +3085,7 @@ pub(crate) fn cap_capture_size_for_limits(
     scale: f64,
     resolution: CaptureResolution,
     demand_long_edge: Option<u32>,
-) -> (u32, u32, f64) {
+) -> Option<(u32, u32, f64)> {
     let native_long_edge = width.max(height);
     let manual_cap = resolution.long_edge_cap_for_native(native_long_edge);
     let max_long_edge = demand_long_edge
@@ -3017,11 +3104,12 @@ pub(crate) fn cap_capture_size_for_limits(
         // an odd height: 1312x844 capped to 1280 gives 844*(1280/1312)=823.41
         // -> 823, and every NV12->I420 fallback conversion then failed forever,
         // publishing no video at all.
-        return (
-            even_capture_dimension(width as f64 * ratio).unwrap_or(2),
-            even_capture_dimension(height as f64 * ratio).unwrap_or(2),
+        // #533: a short axis that rounds below 2 px is refused, not padded.
+        return Some((
+            even_capture_dimension(width as f64 * ratio)?,
+            even_capture_dimension(height as f64 * ratio)?,
             scale.max(1.0) * ratio,
-        );
+        ));
     }
     cap_capture_size_to_long_edge(width, height, scale, max_long_edge)
 }
@@ -3031,18 +3119,18 @@ fn cap_capture_size_to_long_edge(
     height: u32,
     scale: f64,
     max_long_edge: u32,
-) -> (u32, u32, f64) {
+) -> Option<(u32, u32, f64)> {
     let long_edge = width.max(height);
     let scale = scale.max(1.0);
     let max_long_edge = max_long_edge.max(1);
     if long_edge <= max_long_edge {
         // #781: even here too -- an odd native size under the cap was
         // previously passed through untouched.
-        return (
-            even_capture_dimension(width as f64).unwrap_or(2),
-            even_capture_dimension(height as f64).unwrap_or(2),
+        return Some((
+            even_capture_dimension(width as f64)?,
+            even_capture_dimension(height as f64)?,
             scale.round().max(1.0),
-        );
+        ));
     }
 
     let logical_w = (width as f64 / scale).max(1.0);
@@ -3055,18 +3143,18 @@ fn cap_capture_size_to_long_edge(
     let effective_scale = scale.floor().min(max_scale_for_cap).max(1.0);
     // #781: even in both axes -- an odd logical size times an integer scale
     // still lands odd.
-    let capped_w = even_capture_dimension(logical_w * effective_scale).unwrap_or(2);
-    let capped_h = even_capture_dimension(logical_h * effective_scale).unwrap_or(2);
+    let capped_w = even_capture_dimension(logical_w * effective_scale)?;
+    let capped_h = even_capture_dimension(logical_h * effective_scale)?;
     if capped_w.max(capped_h) <= max_long_edge {
-        return (capped_w, capped_h, effective_scale);
+        return Some((capped_w, capped_h, effective_scale));
     }
 
     let ratio = max_long_edge as f64 / long_edge as f64;
-    (
-        even_capture_dimension(width as f64 * ratio).unwrap_or(2),
-        even_capture_dimension(height as f64 * ratio).unwrap_or(2),
+    Some((
+        even_capture_dimension(width as f64 * ratio)?,
+        even_capture_dimension(height as f64 * ratio)?,
         scale * ratio,
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -3411,7 +3499,10 @@ mod tests {
 
     #[test]
     fn capture_pixel_size_uses_filter_point_pixel_scale() {
-        assert_eq!(capture_pixel_size(1512.0, 844.0, 2.0), (3024, 1688, 2.0));
+        assert_eq!(
+            capture_pixel_size(1512.0, 844.0, 2.0),
+            Some((3024, 1688, 2.0))
+        );
     }
 
     /// #804 REGRESSION GUARD -- the exact live livelock, replayed.
@@ -3575,7 +3666,8 @@ mod tests {
     #[test]
     fn demand_cap_never_produces_an_odd_dimension_781() {
         let (w, h, _) =
-            cap_capture_size_for_limits(1312, 844, 2.0, CaptureResolution::Auto, Some(1280));
+            cap_capture_size_for_limits(1312, 844, 2.0, CaptureResolution::Auto, Some(1280))
+                .unwrap();
         assert_eq!(h % 2, 0, "height {h} must be even -- 823 killed the share");
         assert_eq!(w % 2, 0, "width {w} must be even");
         assert_eq!((w, h), (1280, 822));
@@ -3592,7 +3684,8 @@ mod tests {
                         2.0,
                         CaptureResolution::Auto,
                         Some(demand),
-                    );
+                    )
+                    .unwrap();
                     assert_eq!(
                         w % 2,
                         0,
@@ -3614,7 +3707,7 @@ mod tests {
     /// 1.95 produced 1280x823 and killed the share.
     #[test]
     fn capture_pixel_size_is_always_even_so_i420_conversion_can_succeed() {
-        let (w, h, _) = capture_pixel_size(656.0, 422.0, 1.95);
+        let (w, h, _) = capture_pixel_size(656.0, 422.0, 1.95).expect("a real window sizes");
         assert_eq!(h % 2, 0, "height {h} must be even (#781); 823 broke I420");
         assert_eq!(w % 2, 0, "width {w} must be even (#781)");
         assert_eq!((w, h), (1278, 822));
@@ -3623,7 +3716,15 @@ mod tests {
         // dimension. A single odd value here is a total loss of video.
         for logical in 1..400u32 {
             for scale in [1.0f64, 1.25, 1.5, 1.95, 2.0, 3.0] {
-                let (w, h, _) = capture_pixel_size(logical as f64, logical as f64, scale);
+                let Some((w, h, _)) = capture_pixel_size(logical as f64, logical as f64, scale)
+                else {
+                    // #533: only a sub-2px source may refuse.
+                    assert!(
+                        (logical as f64) * scale < 2.0,
+                        "logical={logical} scale={scale}"
+                    );
+                    continue;
+                };
                 assert_eq!(w % 2, 0, "odd width for logical={logical} scale={scale}");
                 assert_eq!(h % 2, 0, "odd height for logical={logical} scale={scale}");
                 assert!(w >= 2 && h >= 2, "dimension collapsed below 2");
@@ -3631,9 +3732,173 @@ mod tests {
         }
     }
 
+    /// #533: a degenerate size is refused, never padded to a 2 px axis --
+    /// that 2 px stream is what reached libwebrtc in PETAL-DESKTOP-4Y.
+    #[test]
+    fn degenerate_sizes_are_refused_not_fabricated_into_2px_533() {
+        for bad in [
+            0.0,
+            1.0,
+            1.9,
+            -5.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert_eq!(
+                even_capture_dimension(bad),
+                None,
+                "even_capture_dimension({bad})"
+            );
+            assert_eq!(capture_pixel_size(bad, 400.0, 1.0), None, "width {bad}");
+            assert_eq!(capture_pixel_size(640.0, bad, 1.0), None, "height {bad}");
+            assert!(
+                CaptureSourceLayout::new(bad, 400.0, 1.0).is_none(),
+                "layout {bad}"
+            );
+        }
+        assert_eq!(capture_pixel_size(640.0, 400.0, f64::NAN), None);
+        assert_eq!(
+            capture_pixel_size(0.4, 400.0, 2.0),
+            None,
+            "0.4pt rounds to nothing"
+        );
+        // Normal inputs are unchanged.
+        assert_eq!(capture_pixel_size(1.0, 400.0, 2.0), Some((2, 800, 2.0)));
+        assert_eq!(capture_pixel_size(2.0, 2.0, 1.0), Some((2, 2, 1.0)));
+        assert_eq!(even_capture_dimension(2.0), Some(2));
+        assert_eq!(even_capture_dimension(823.4), Some(822));
+
+        // Both capping branches refuse a short axis that rounds under 2 px.
+        // 4000x2 under a 1280 demand cap: 2 * 0.32 = 0.64 px.
+        assert_eq!(
+            cap_capture_size_for_limits(4000, 2, 2.0, CaptureResolution::Auto, Some(1280)),
+            None
+        );
+        // 8000x2 at 2x under P1080's cap: the integer-scale branch lands the
+        // short axis on 1 px.
+        assert_eq!(
+            cap_capture_size(8000, 2, 2.0, CaptureResolution::P1080),
+            None
+        );
+        assert_eq!(cap_capture_size(1, 400, 1.0, CaptureResolution::Auto), None);
+        assert_eq!(
+            cap_capture_size(2, 400, 1.0, CaptureResolution::Auto),
+            Some((2, 400, 1.0))
+        );
+    }
+
+    /// #533: the ROI reconfigure path (`refresh_region_source`) refuses a
+    /// degenerate region, so the stream config and source layout it would
+    /// have overwritten stay at the last good size.
+    #[test]
+    fn a_degenerate_region_never_reconfigures_the_stream_533() {
+        let good = region_reconfigure_size(800.0, 600.0, 2.0, CaptureResolution::Auto, None)
+            .expect("a real region sizes");
+        assert_eq!(good.1, (1600, 1200, 2.0));
+        assert_eq!(good.0.backing_pixel_size(), (1600, 1200, 2.0));
+
+        for (w, h, scale) in [
+            (0.0, 600.0, 2.0),
+            (800.0, 0.0, 2.0),
+            (1.0, 600.0, 1.0),
+            (800.0, 1.9, 1.0),
+            (f64::NAN, 600.0, 2.0),
+            (800.0, f64::INFINITY, 2.0),
+        ] {
+            assert!(
+                region_reconfigure_size(w, h, scale, CaptureResolution::Auto, None).is_none(),
+                "{w}x{h}@{scale} must keep the last good size"
+            );
+        }
+        // Non-degenerate source, degenerate after the receiver demand cap.
+        assert!(
+            region_reconfigure_size(2000.0, 1.0, 2.0, CaptureResolution::Auto, Some(1280))
+                .is_none()
+        );
+
+        // The refusal must happen BEFORE any stream mutation in the real path.
+        let src = include_str!("capture.rs");
+        let body = &src[src.find("pub fn refresh_region_source(").unwrap()..];
+        let body = &body[..body
+            .find("\n    pub fn update_stream_configuration(")
+            .unwrap()];
+        let refuse = body
+            .find("region_reconfigure_size(")
+            .expect("routes through the helper");
+        for mutation in [
+            "self.region_generation.store(0",
+            "update_content_filter(",
+            "update_configuration(&config)",
+            "*self.source_layout.lock_unpoisoned() = layout",
+        ] {
+            let at = body
+                .find(mutation)
+                .unwrap_or_else(|| panic!("{mutation} missing"));
+            assert!(
+                refuse < at,
+                "{mutation} must come after the degenerate refusal"
+            );
+        }
+    }
+
+    /// #533 review: refusing a degenerate ROI while an earlier, valid ROI is
+    /// still awaiting proof must not wedge the fence. The refusal leaves the
+    /// pending (already applied, last good) config in place: a frame at its
+    /// size still proves it, and the next usable region is retried.
+    #[test]
+    fn a_degenerate_refusal_during_pending_proof_does_not_wedge_the_fence_533() {
+        let pending = crate::region_window::PendingRegionConfiguration {
+            generation: 7,
+            expected_width: 1600,
+            expected_height: 1200,
+        };
+        let timed_out = crate::region_window::REGION_PROOF_TIMEOUT * 2;
+        // Generation 8 is degenerate: the decision is RetryLatest, and the
+        // sizing refuses it, so no state changes (active stays 0).
+        assert!(matches!(
+            crate::region_window::region_update_decision(0, 8, Some(pending), Some(timed_out)),
+            crate::region_window::RegionUpdateDecision::RetryLatest { generation: 8 }
+        ));
+        assert!(region_reconfigure_size(0.5, 600.0, 2.0, CaptureResolution::Auto, None).is_none());
+        // A frame at the last good applied size still proves generation 7.
+        assert_eq!(
+            region_fence_decision(Some(pending), 0, (1600, 1200), true),
+            RegionFenceDecision::Accept(7)
+        );
+        // And a usable newer region is retried rather than waited on forever.
+        assert!(matches!(
+            crate::region_window::region_update_decision(0, 9, Some(pending), Some(timed_out)),
+            crate::region_window::RegionUpdateDecision::RetryLatest { generation: 9 }
+        ));
+        assert!(
+            region_reconfigure_size(800.0, 600.0, 2.0, CaptureResolution::Auto, None).is_some()
+        );
+    }
+
+    /// #533: the size authority keeps the last committed output when the cap
+    /// would round an axis under 2 px, instead of asking for a 2 px stream.
+    #[test]
+    fn the_size_authority_keeps_the_last_good_size_for_a_degenerate_cap_533() {
+        let configured = ConfiguredCaptureState {
+            output: (1280, 720),
+            source_scale: 1.0,
+        };
+        let sliver = CaptureSourceLayout::new(2000.0, 1.0, 2.0).unwrap();
+        assert_eq!(
+            computed_capture_size(sliver, CaptureResolution::Auto, Some(1280), configured),
+            (1280, 720, 1.0)
+        );
+        let normal = CaptureSourceLayout::new(1728.0, 1117.0, 2.0).unwrap();
+        assert_eq!(
+            computed_capture_size(normal, CaptureResolution::Auto, Some(2560), configured).0,
+            2560
+        );
+    }
+
     #[test]
     fn capture_pixel_size_never_reports_sub_one_scale() {
-        assert_eq!(capture_pixel_size(640.0, 400.0, 0.0), (640, 400, 1.0));
+        assert_eq!(capture_pixel_size(640.0, 400.0, 0.0), Some((640, 400, 1.0)));
     }
 
     #[test]
@@ -3737,22 +4002,24 @@ mod tests {
 
     #[test]
     fn capture_size_cap_snaps_to_integer_effective_source_scale() {
-        let (width, height, scale) = cap_capture_size(3024, 1688, 2.0, CaptureResolution::P1440);
+        let (width, height, scale) =
+            cap_capture_size(3024, 1688, 2.0, CaptureResolution::P1440).unwrap();
         assert_eq!((width, height), (1512, 844));
         assert_eq!(scale, 1.0);
     }
 
     #[test]
     fn capture_size_cap_uses_largest_integer_scale_under_cap() {
-        let (width, height, scale) = cap_capture_size(3600, 2400, 3.0, CaptureResolution::P1440);
+        let (width, height, scale) =
+            cap_capture_size(3600, 2400, 3.0, CaptureResolution::P1440).unwrap();
         assert_eq!((width, height), (2400, 1600));
         assert_eq!(scale, 2.0);
     }
 
     #[test]
     fn capture_resolution_auto_is_dynamic_not_p1440_alias() {
-        let auto = cap_capture_size(3840, 2160, 2.0, CaptureResolution::Auto);
-        let p1440 = cap_capture_size(3840, 2160, 2.0, CaptureResolution::P1440);
+        let auto = cap_capture_size(3840, 2160, 2.0, CaptureResolution::Auto).unwrap();
+        let p1440 = cap_capture_size(3840, 2160, 2.0, CaptureResolution::P1440).unwrap();
 
         assert_eq!(auto, (3840, 2160, 2.0));
         assert_eq!(p1440, (1920, 1080, 1.0));
@@ -3765,21 +4032,24 @@ mod tests {
             CaptureResolution::Uhd4k.long_edge_cap_for_native(8192),
             3840
         );
-        let (width, height, _scale) = cap_capture_size(5120, 2880, 1.0, CaptureResolution::Auto);
+        let (width, height, _scale) =
+            cap_capture_size(5120, 2880, 1.0, CaptureResolution::Auto).unwrap();
         assert!(width.max(height) <= crate::transport::publisher::VIDEO_TOOLBOX_H264_MAX_LONG_EDGE);
     }
 
     #[test]
     fn receiver_demand_lands_on_requested_physical_long_edge() {
         let captured =
-            cap_capture_size_for_limits(5120, 2880, 2.0, CaptureResolution::Auto, Some(3840));
+            cap_capture_size_for_limits(5120, 2880, 2.0, CaptureResolution::Auto, Some(3840))
+                .unwrap();
         assert_eq!(captured, (3840, 2160, 1.5));
     }
 
     #[test]
     fn manual_resolution_remains_hard_cap_over_receiver_demand() {
         let captured =
-            cap_capture_size_for_limits(5120, 2880, 2.0, CaptureResolution::P1080, Some(3840));
+            cap_capture_size_for_limits(5120, 2880, 2.0, CaptureResolution::P1080, Some(3840))
+                .unwrap();
         assert_eq!(captured, (1920, 1080, 0.75));
     }
 
@@ -4308,11 +4578,9 @@ mod tests {
 
     /// The #841 incident's source: a 16" MBP built-in display shared whole --
     /// 1728x1117pt logical at a true 2.0 backing scale (3456x2234 native).
-    const INCIDENT_SOURCE: CaptureSourceLayout = CaptureSourceLayout {
-        logical_width: 1728.0,
-        logical_height: 1117.0,
-        backing_scale: 2.0,
-    };
+    fn incident_source() -> CaptureSourceLayout {
+        CaptureSourceLayout::new(1728.0, 1117.0, 2.0).unwrap()
+    }
 
     /// The receiver demand cap the share had stepped down to when the loop
     /// began (`Some(3456)` -> `Some(2560)`), after which it never moved.
@@ -4328,7 +4596,8 @@ mod tests {
             backing_scale,
             CaptureResolution::Auto,
             INCIDENT_DEMAND_CAP,
-        );
+        )
+        .unwrap();
         (width, height)
     }
 
@@ -4348,11 +4617,7 @@ mod tests {
     fn backing_scale_is_not_the_capped_capture_scale_106() {
         // The reported field case: a 2560x1440 logical display on Apple
         // silicon, i.e. a 5120x2880 backing store at 2x.
-        let reported = CaptureSourceLayout {
-            logical_width: 2560.0,
-            logical_height: 1440.0,
-            backing_scale: 2.0,
-        };
+        let reported = CaptureSourceLayout::new(2560.0, 1440.0, 2.0).unwrap();
         let backing = reported.backing_geometry();
         assert_eq!(
             (backing.width, backing.height),
@@ -4366,7 +4631,8 @@ mod tests {
             backing.height,
             backing.scale,
             CaptureResolution::Auto,
-        );
+        )
+        .unwrap();
         // This is why the field log said `source=2560x1440`: Auto's H.264
         // guardrail snaps a 2x 5K source back to effective 1x, so the
         // configured output equals the LOGICAL size exactly.
@@ -4381,20 +4647,14 @@ mod tests {
         assert_eq!(
             (output_w, output_h),
             (
-                CaptureSourceLayout {
-                    logical_width: 2560.0,
-                    logical_height: 1440.0,
-                    backing_scale: 1.0,
-                }
-                .backing_geometry()
-                .width,
-                CaptureSourceLayout {
-                    logical_width: 2560.0,
-                    logical_height: 1440.0,
-                    backing_scale: 1.0,
-                }
-                .backing_geometry()
-                .height,
+                CaptureSourceLayout::new(2560.0, 1440.0, 1.0)
+                    .unwrap()
+                    .backing_geometry()
+                    .width,
+                CaptureSourceLayout::new(2560.0, 1440.0, 1.0)
+                    .unwrap()
+                    .backing_geometry()
+                    .height,
             ),
             "a 1x panel of the same logical size produces the identical output size"
         );
@@ -4403,7 +4663,7 @@ mod tests {
         // convenient resolution: a 1728x1117pt 2x panel under a 2560 receiver
         // demand cap reports a fractional capture scale that is neither the
         // backing scale nor 1.
-        let incident = INCIDENT_SOURCE.backing_geometry();
+        let incident = incident_source().backing_geometry();
         assert_eq!((incident.width, incident.height), (3456, 2234));
         assert_eq!(incident.scale, 2.0);
         let (_, _, incident_capture_scale) = cap_capture_size_for_limits(
@@ -4412,7 +4672,8 @@ mod tests {
             incident.scale,
             CaptureResolution::Auto,
             INCIDENT_DEMAND_CAP,
-        );
+        )
+        .unwrap();
         assert_ne!(incident_capture_scale, incident.scale);
         assert!(
             (incident_capture_scale - 1.4814814814814814).abs() < 1e-9,
@@ -4427,11 +4688,7 @@ mod tests {
     /// not a missing measurement.
     #[test]
     fn a_1x_source_reports_a_real_1x_backing_store_106() {
-        let runner = CaptureSourceLayout {
-            logical_width: 1920.0,
-            logical_height: 1080.0,
-            backing_scale: 1.0,
-        };
+        let runner = CaptureSourceLayout::new(1920.0, 1080.0, 1.0).unwrap();
         let backing = runner.backing_geometry();
         assert_eq!((backing.width, backing.height), (1920, 1080));
         assert_eq!(backing.scale, 1.0);
@@ -4465,7 +4722,7 @@ mod tests {
         // The three published sizes the live stream actually cycled between.
         const DELIVERED: [(u32, u32); 3] = [(2560, 1654), (2560, 1652), (2556, 1652)];
 
-        let expected = incident_computed_target(&INCIDENT_SOURCE);
+        let expected = incident_computed_target(&incident_source());
         assert_eq!(
             expected,
             (2560, 1654),
@@ -4476,7 +4733,7 @@ mod tests {
         // 1654-tall frame AND a 1652-tall one, since the bug's whole shape is
         // that each makes the authority compute the other.
         for start in 0..DELIVERED.len() {
-            let mut layout = INCIDENT_SOURCE;
+            let mut layout = incident_source();
             let mut targets = Vec::new();
             for step in 0..16 {
                 let frame = DELIVERED[(start + step) % DELIVERED.len()];
@@ -4494,11 +4751,12 @@ mod tests {
                 targets
             );
             assert_eq!(
-                layout.logical_width, INCIDENT_SOURCE.logical_width,
+                layout.logical_width,
+                incident_source().logical_width,
                 "source geometry is the source's, not the last frame's"
             );
-            assert_eq!(layout.logical_height, INCIDENT_SOURCE.logical_height);
-            assert_eq!(layout.backing_scale, INCIDENT_SOURCE.backing_scale);
+            assert_eq!(layout.logical_height, incident_source().logical_height);
+            assert_eq!(layout.backing_scale, incident_source().backing_scale);
         }
     }
 }
