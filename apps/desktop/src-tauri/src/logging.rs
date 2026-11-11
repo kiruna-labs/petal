@@ -265,6 +265,9 @@ pub enum SentryDiagnosticEvent {
     CaptureRawStalled(CaptureRawStalledDiagnostic),
     EncoderWedged(EncoderWedgeDiagnostic),
     EncoderWedgeExhausted(EncoderWedgeDiagnostic),
+    /// #528: a share pinned to the software encoder (`software_encoder` the
+    /// first time, `hardware_probe_failed` once its one hardware probe wedged).
+    EncoderSoftwareFallback(EncoderWedgeDiagnostic),
     DegenerateFrameSkipped(DegenerateFrameDiagnostic),
 }
 
@@ -315,6 +318,9 @@ pub enum EncoderWedgeActionTag {
     /// The last recovery step's republish was superseded or failed, and its
     /// one retry too, so the share stays on the wedged publication (#527).
     RecoveryRepublishFailed,
+    /// The share's one hardware-encoder probe wedged again, so it stays on
+    /// the software encoder for the rest of its life (#528).
+    HardwareProbeFailed,
 }
 
 impl EncoderWedgeActionTag {
@@ -325,6 +331,7 @@ impl EncoderWedgeActionTag {
             Self::NotWired => "not_wired",
             Self::Exhausted => "exhausted",
             Self::RecoveryRepublishFailed => "recovery_republish_failed",
+            Self::HardwareProbeFailed => "hardware_probe_failed",
         }
     }
 }
@@ -815,7 +822,7 @@ diagnostic_enum!(SinceLastFrameBucketTag {
 
 const SENTRY_DIAGNOSTIC_SCHEMA_VERSION: &str = "1";
 const SENTRY_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
-const DIAGNOSTIC_EVENT_NAMES: [&str; 23] = [
+const DIAGNOSTIC_EVENT_NAMES: [&str; 24] = [
     "capture-layout-invalid",
     "camera-health",
     "camera-size-mismatch-recovery",
@@ -838,6 +845,7 @@ const DIAGNOSTIC_EVENT_NAMES: [&str; 23] = [
     "capture-raw-stalled",
     "encoder-wedged",
     "encoder-wedge-exhausted",
+    "encoder-software-fallback",
     "degenerate-frame-skipped",
 ];
 const DIAGNOSTIC_TAGS: &[&str] = &[
@@ -987,7 +995,9 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "wgc-border-request-failed" => Some(WGC_BORDER_REQUEST_FAILED_MESSAGE_TAGS),
         "remote-video-stalled" => Some(REMOTE_VIDEO_STALLED_MESSAGE_TAGS),
         "capture-raw-stalled" => Some(CAPTURE_RAW_STALLED_MESSAGE_TAGS),
-        "encoder-wedged" | "encoder-wedge-exhausted" => Some(ENCODER_WEDGE_MESSAGE_TAGS),
+        "encoder-wedged" | "encoder-wedge-exhausted" | "encoder-software-fallback" => {
+            Some(ENCODER_WEDGE_MESSAGE_TAGS)
+        }
         "degenerate-frame-skipped" => Some(DEGENERATE_FRAME_MESSAGE_TAGS),
         _ => None,
     }
@@ -1340,6 +1350,7 @@ impl SentryDiagnosticEvent {
             Self::CaptureRawStalled(_) => "capture-raw-stalled",
             Self::EncoderWedged(_) => "encoder-wedged",
             Self::EncoderWedgeExhausted(_) => "encoder-wedge-exhausted",
+            Self::EncoderSoftwareFallback(_) => "encoder-software-fallback",
             Self::DegenerateFrameSkipped(_) => "degenerate-frame-skipped",
         }
     }
@@ -2117,7 +2128,8 @@ pub(crate) fn build_sentry_diagnostic_event(
             insert("occluded_by_petal", value.occluded_by_petal.tag());
         }
         SentryDiagnosticEvent::EncoderWedged(value)
-        | SentryDiagnosticEvent::EncoderWedgeExhausted(value) => {
+        | SentryDiagnosticEvent::EncoderWedgeExhausted(value)
+        | SentryDiagnosticEvent::EncoderSoftwareFallback(value) => {
             insert("session_role", "sharer");
             for key in DIAGNOSTIC_TAGS {
                 if !matches!(
@@ -6409,6 +6421,7 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
                 | "not_wired"
                 | "exhausted"
                 | "recovery_republish_failed"
+                | "hardware_probe_failed"
                 | "not_applicable"
         ),
         "playout_transition" => {
@@ -11307,6 +11320,20 @@ mod tests {
                 }),
                 "encoder-wedge-exhausted",
                 "recovery_republish_failed",
+            ),
+            (
+                SentryDiagnosticEvent::EncoderSoftwareFallback(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::SoftwareEncoder,
+                }),
+                "encoder-software-fallback",
+                "software_encoder",
+            ),
+            (
+                SentryDiagnosticEvent::EncoderSoftwareFallback(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::HardwareProbeFailed,
+                }),
+                "encoder-software-fallback",
+                "hardware_probe_failed",
             ),
         ] {
             let event = build_sentry_diagnostic_event(event, "1");

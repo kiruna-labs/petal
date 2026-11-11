@@ -67,7 +67,7 @@ use std::future::Future;
 #[cfg(target_os = "macos")]
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "windows")]
@@ -179,6 +179,16 @@ pub(crate) struct EncoderWedgeRecovery {
     /// permanently broken encoder escalates once more and then stops instead of
     /// republishing forever (each publication would otherwise start fresh).
     steps_used: u32,
+    /// #528: set only on a share pinned to the software encoder whose one
+    /// hardware probe is unspent. The guard calls it once after
+    /// `ENCODER_HARDWARE_PROBE_HEALTHY_SAMPLES` producing polls.
+    hardware_probe: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// #528: the share's producing-poll count toward that probe, shared by its
+    /// publications so a quality/resize republish does not restart the window.
+    hardware_probe_healthy_polls: Option<Arc<AtomicU32>>,
+    /// #528: the SHARE's "exhaustion already reported" flag. Without it every
+    /// republish of an exhausted share re-emits `encoder-wedge-exhausted`.
+    share_exhaustion_reported: Option<Arc<AtomicBool>>,
 }
 
 impl EncoderWedgeRecovery {
@@ -189,7 +199,29 @@ impl EncoderWedgeRecovery {
         Self {
             request: Arc::new(request),
             steps_used,
+            hardware_probe: None,
+            hardware_probe_healthy_polls: None,
+            share_exhaustion_reported: None,
         }
+    }
+
+    pub(crate) fn with_hardware_probe(
+        mut self,
+        probe: Arc<dyn Fn() + Send + Sync>,
+        healthy_polls: Arc<AtomicU32>,
+    ) -> Self {
+        self.hardware_probe = Some(probe);
+        self.hardware_probe_healthy_polls = Some(healthy_polls);
+        self
+    }
+
+    pub(crate) fn with_share_exhaustion_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.share_exhaustion_reported = Some(flag);
+        self
+    }
+
+    pub(crate) fn has_hardware_probe(&self) -> bool {
+        self.hardware_probe.is_some()
     }
 
     fn request(&self, step: EncoderRecoveryStep) {
@@ -5879,6 +5911,7 @@ mod track_name_tests {
         guard: EncoderWedgeGuard,
         requested: Vec<EncoderRecoveryStep>,
         action_wired: bool,
+        probes: u32,
     }
 
     impl WedgeHarness {
@@ -5887,6 +5920,7 @@ mod track_name_tests {
                 guard: EncoderWedgeGuard::default(),
                 requested: Vec::new(),
                 action_wired: true,
+                probes: 0,
             }
         }
 
@@ -5898,6 +5932,17 @@ mod track_name_tests {
                 },
                 requested: Vec::new(),
                 action_wired: true,
+                probes: 0,
+            }
+        }
+
+        /// The guard production builds for a publication from its recovery.
+        fn for_recovery(recovery: &EncoderWedgeRecovery) -> Self {
+            Self {
+                guard: EncoderWedgeGuard::for_publication(Some(recovery)),
+                requested: Vec::new(),
+                action_wired: true,
+                probes: 0,
             }
         }
 
@@ -5908,7 +5953,12 @@ mod track_name_tests {
                 requested.push(step);
                 wired
             };
-            apply_encoder_wedge_guard_sample(&mut self.guard, sample, &mut request);
+            let probes = &mut self.probes;
+            let mut probe = || {
+                *probes += 1;
+                true
+            };
+            apply_encoder_wedge_guard_sample(&mut self.guard, sample, &mut request, &mut probe);
         }
 
         fn poll_n(&mut self, n: u32, sample: EncoderOutputSample) {
@@ -6048,6 +6098,110 @@ mod track_name_tests {
         poll_from_counters(&mut normal, 150, 150, ENCODER_WEDGE_TRIGGER_SAMPLES * 4);
         assert!(normal.requested.is_empty());
         take_wedge_reports();
+    }
+
+    #[test]
+    fn a_software_pinned_publication_probes_the_hardware_encoder_once_after_healthy_polls() {
+        // #528: a false-positive wedge pinned the share to software for its
+        // whole life. A publication carrying the share's probe asks for it
+        // once, after a full healthy window of REAL encoder output.
+        let probe = || {
+            EncoderWedgeRecovery::new(2, |_| {})
+                .with_hardware_probe(Arc::new(|| {}), Arc::new(AtomicU32::new(0)))
+        };
+        let mut armed = WedgeHarness::for_recovery(&probe());
+        armed.poll_n(ENCODER_HARDWARE_PROBE_HEALTHY_SAMPLES - 1, encoding_sample(150));
+        assert_eq!(armed.probes, 0, "not before the healthy window is complete");
+        armed.poll(encoding_sample(150));
+        assert_eq!(armed.probes, 1);
+        armed.poll_n(ENCODER_HARDWARE_PROBE_HEALTHY_SAMPLES * 2, encoding_sample(150));
+        assert_eq!(armed.probes, 1, "one probe per publication");
+        assert!(armed.requested.is_empty());
+
+        // Idle and unfunded polls prove nothing; a wedged poll restarts it.
+        let mut interrupted = WedgeHarness::for_recovery(&probe());
+        interrupted.poll_n(ENCODER_HARDWARE_PROBE_HEALTHY_SAMPLES - 1, encoding_sample(150));
+        interrupted.poll_n(10, unfunded_sample());
+        poll_from_counters(&mut interrupted, 0, 0, 10);
+        interrupted.poll(wedged_sample());
+        interrupted.poll_n(ENCODER_HARDWARE_PROBE_HEALTHY_SAMPLES - 1, encoding_sample(150));
+        assert_eq!(interrupted.probes, 0, "a wedged poll restarts the healthy window");
+        interrupted.poll(encoding_sample(150));
+        assert_eq!(interrupted.probes, 1);
+
+        // No probe attached (hardware publication, or the probe is spent).
+        let mut unarmed = WedgeHarness::for_recovery(&EncoderWedgeRecovery::new(2, |_| {}));
+        unarmed.poll_n(ENCODER_HARDWARE_PROBE_HEALTHY_SAMPLES * 3, encoding_sample(150));
+        assert_eq!(unarmed.probes, 0);
+    }
+
+    #[test]
+    fn the_probe_window_survives_a_republish_of_the_software_share() {
+        // #528: a quality/resize republish must not restart the healthy window,
+        // or a share republished every few minutes would never be probed.
+        let healthy = Arc::new(AtomicU32::new(0));
+        let probe = || {
+            EncoderWedgeRecovery::new(2, |_| {})
+                .with_hardware_probe(Arc::new(|| {}), healthy.clone())
+        };
+        let mut before = WedgeHarness::for_recovery(&probe());
+        before.poll_n(ENCODER_HARDWARE_PROBE_HEALTHY_SAMPLES - 1, encoding_sample(150));
+        let mut after = WedgeHarness::for_recovery(&probe());
+        after.poll(encoding_sample(150));
+        assert_eq!((before.probes, after.probes), (0, 1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_last_recovery_step_and_the_live_guard_report_exhaustion_once() {
+        // #528: #527's RecoveryRepublishFailed report and the still-live wedged
+        // publication's guard both reported exhaustion for one share.
+        use crate::logging::{EncoderWedgeDiagnostic, SentryDiagnosticEvent};
+        use WedgeRecoveryAttempt::*;
+        take_wedge_reports();
+        let flag = Arc::new(AtomicBool::new(false));
+        let result = drive_wedge_recovery_step(
+            EncoderRecoveryStep::FallBackToSoftware,
+            Some(flag.clone()),
+            |_is_retry| async { NotReplaced },
+        )
+        .await;
+        assert_eq!(result, NotReplaced);
+        let mut live = WedgeHarness::for_recovery(
+            &EncoderWedgeRecovery::new(ENCODER_WEDGE_MAX_RECOVERY_STEPS, |_| {})
+                .with_share_exhaustion_flag(flag),
+        );
+        live.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 2, wedged_sample());
+        assert_eq!(
+            take_wedge_reports(),
+            vec![SentryDiagnosticEvent::EncoderWedgeExhausted(EncoderWedgeDiagnostic {
+                action: EncoderWedgeActionTag::RecoveryRepublishFailed,
+            })]
+        );
+    }
+
+    #[test]
+    fn a_share_reports_exhaustion_once_across_its_republications() {
+        // #528: each republish built a fresh guard with reported_exhausted =
+        // false, so an exhausted share re-reported on every republish.
+        use crate::logging::{EncoderWedgeDiagnostic, SentryDiagnosticEvent};
+        take_wedge_reports();
+        let flag = Arc::new(AtomicBool::new(false));
+        let exhausted = || {
+            EncoderWedgeRecovery::new(ENCODER_WEDGE_MAX_RECOVERY_STEPS, |_| {})
+                .with_share_exhaustion_flag(flag.clone())
+        };
+        let mut first = WedgeHarness::for_recovery(&exhausted());
+        first.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 2, wedged_sample());
+        let mut republished = WedgeHarness::for_recovery(&exhausted());
+        republished.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 2, wedged_sample());
+        assert_eq!(
+            take_wedge_reports(),
+            vec![SentryDiagnosticEvent::EncoderWedgeExhausted(EncoderWedgeDiagnostic {
+                action: EncoderWedgeActionTag::Exhausted,
+            })],
+            "one exhaustion report per share"
+        );
+        assert!(first.requested.is_empty() && republished.requested.is_empty());
     }
 
     #[test]
@@ -6194,7 +6348,7 @@ mod track_name_tests {
         outcomes: &[WedgeRecoveryAttempt],
     ) -> (Vec<bool>, WedgeRecoveryAttempt) {
         let calls = std::cell::RefCell::new(Vec::new());
-        let result = drive_wedge_recovery_step(step, |is_retry| {
+        let result = drive_wedge_recovery_step(step, None, |is_retry| {
             let index = {
                 let mut calls = calls.borrow_mut();
                 calls.push(is_retry);
@@ -10390,6 +10544,10 @@ const ENCODER_WEDGE_TRIGGER_SAMPLES: u32 = 3;
 /// genuinely broken share forever. A publication that exhausts both steps is
 /// reported once and then left alone.
 const ENCODER_WEDGE_MAX_RECOVERY_STEPS: u32 = 2;
+/// #528: producing 5s polls (~5 min) a share pinned to the software encoder
+/// must log before its one hardware probe. A false-positive wedge otherwise
+/// cost the share VideoToolbox for its whole life.
+const ENCODER_HARDWARE_PROBE_HEALTHY_SAMPLES: u32 = 60;
 
 /// One poll's encoder-OUTPUT evidence for the wedge guard.
 ///
@@ -10494,6 +10652,8 @@ pub(crate) const WEDGE_RECOVERY_RETRY_DELAY: std::time::Duration = std::time::Du
 /// `attempt(is_retry)` performs one republish and classifies it.
 pub(crate) async fn drive_wedge_recovery_step<Fut>(
     step: EncoderRecoveryStep,
+    // #528: the share's exhaustion flag; `None` (Windows) reports per call.
+    share_exhaustion_reported: Option<Arc<AtomicBool>>,
     mut attempt: impl FnMut(bool) -> Fut,
 ) -> WedgeRecoveryAttempt
 where
@@ -10516,11 +10676,15 @@ where
                 "publisher: wedged-encoder recovery ({}) failed twice; the share is left on an empty track -- reopen the share to retry the encoder (#527)",
                 step.description()
             );
-            report_encoder_wedge(crate::logging::SentryDiagnosticEvent::EncoderWedgeExhausted(
-                crate::logging::EncoderWedgeDiagnostic {
-                    action: EncoderWedgeActionTag::RecoveryRepublishFailed,
-                },
-            ));
+            // Once per share: the wedged publication's guard, still live, would
+            // otherwise report the same exhaustion again (#528).
+            if !share_exhaustion_reported.is_some_and(|flag| flag.swap(true, Ordering::SeqCst)) {
+                report_encoder_wedge(crate::logging::SentryDiagnosticEvent::EncoderWedgeExhausted(
+                    crate::logging::EncoderWedgeDiagnostic {
+                        action: EncoderWedgeActionTag::RecoveryRepublishFailed,
+                    },
+                ));
+            }
         } else {
             // A step remains: the wedged publication's guard escalates to it.
             log::warn!(
@@ -10542,6 +10706,8 @@ enum EncoderWedgeDecision {
     Recover(EncoderRecoveryStep),
     /// Wedged and out of recovery budget. Reported once, never re-requested.
     Exhausted,
+    /// #528: healthy on software long enough: try the hardware encoder once.
+    ProbeHardware,
 }
 
 /// Hysteresis for #427. Pure and unit-testable without a live encoder: it takes
@@ -10559,9 +10725,32 @@ struct EncoderWedgeGuard {
     /// (later wedged polls are `Suspect` warnings), instead of spending budget
     /// it cannot use and then reporting a fake `Exhausted`.
     not_wired: bool,
+    /// #528: the share's exhaustion flag, so a republication of an exhausted
+    /// share does not report it again. `None` keeps the per-guard flag only.
+    share_exhaustion_reported: Option<Arc<AtomicBool>>,
+    /// #528: this publication may ask for the one hardware probe.
+    hardware_probe_armed: bool,
+    hardware_probe_requested: bool,
+    /// Producing polls toward the probe; the share's counter when armed.
+    consecutive_producing_samples: Arc<AtomicU32>,
 }
 
 impl EncoderWedgeGuard {
+    /// The guard a publication starts with: the share's spent budget, its
+    /// exhaustion flag and whether its one hardware probe is still open.
+    fn for_publication(recovery: Option<&EncoderWedgeRecovery>) -> Self {
+        Self {
+            recovery_steps: recovery.map(EncoderWedgeRecovery::steps_used).unwrap_or(0),
+            share_exhaustion_reported: recovery
+                .and_then(|recovery| recovery.share_exhaustion_reported.clone()),
+            hardware_probe_armed: recovery.is_some_and(EncoderWedgeRecovery::has_hardware_probe),
+            consecutive_producing_samples: recovery
+                .and_then(|recovery| recovery.hardware_probe_healthy_polls.clone())
+                .unwrap_or_default(),
+            ..Self::default()
+        }
+    }
+
     fn observe(&mut self, sample: EncoderOutputSample) -> EncoderWedgeDecision {
         if !sample.looks_wedged() {
             // Any produced frame (or an unfunded layer) clears the streak. The
@@ -10569,8 +10758,23 @@ impl EncoderWedgeGuard {
             // share that flaps between wedged and healthy cannot turn this into
             // a republish loop.
             self.consecutive_zero_encode_samples = 0;
+            // #528: only polls that really encoded count as "healthy"; an idle
+            // or unfunded poll proves nothing about the encoder either way.
+            let producing = if sample.frames_encoded > 0 {
+                self.consecutive_producing_samples.fetch_add(1, Ordering::SeqCst).saturating_add(1)
+            } else {
+                self.consecutive_producing_samples.load(Ordering::SeqCst)
+            };
+            if self.hardware_probe_armed
+                && !self.hardware_probe_requested
+                && producing >= ENCODER_HARDWARE_PROBE_HEALTHY_SAMPLES
+            {
+                self.hardware_probe_requested = true;
+                return EncoderWedgeDecision::ProbeHardware;
+            }
             return EncoderWedgeDecision::Healthy;
         }
+        self.consecutive_producing_samples.store(0, Ordering::SeqCst);
         self.consecutive_zero_encode_samples =
             self.consecutive_zero_encode_samples.saturating_add(1);
         if self.consecutive_zero_encode_samples < ENCODER_WEDGE_TRIGGER_SAMPLES || self.not_wired {
@@ -10581,6 +10785,14 @@ impl EncoderWedgeGuard {
                 return EncoderWedgeDecision::Suspect;
             }
             self.reported_exhausted = true;
+            if self
+                .share_exhaustion_reported
+                .as_ref()
+                .is_some_and(|flag| flag.swap(true, Ordering::SeqCst))
+            {
+                // An earlier publication of this share already reported it.
+                return EncoderWedgeDecision::Suspect;
+            }
             return EncoderWedgeDecision::Exhausted;
         }
         let step = if self.recovery_steps == 0 {
@@ -11153,9 +11365,18 @@ fn apply_encoder_wedge_guard_sample(
     guard: &mut EncoderWedgeGuard,
     sample: EncoderOutputSample,
     request_recovery: &mut dyn FnMut(EncoderRecoveryStep) -> bool,
+    request_hardware_probe: &mut dyn FnMut() -> bool,
 ) {
     match guard.observe(sample) {
         EncoderWedgeDecision::Healthy => {}
+        EncoderWedgeDecision::ProbeHardware => {
+            if request_hardware_probe() {
+                log::info!(
+                    "publisher: software encoder produced frames for {} consecutive polls; probing the hardware encoder once (#528)",
+                    ENCODER_HARDWARE_PROBE_HEALTHY_SAMPLES,
+                );
+            }
+        }
         EncoderWedgeDecision::Suspect => log::warn!(
             "publisher: window-share encoder produced 0 frames this interval while funded at {:.0}kbps (delivered {:.1}fps, {} frames pushed this interval) for {} consecutive samples; below the {}sample #427 wedge trigger, watching",
             sample.target_bitrate_bps / 1000.0,
@@ -11233,11 +11454,47 @@ fn encoder_wedge_exhausted_log_line(sample: EncoderOutputSample) -> (log::Level,
 
 /// Sentry keeps the wedge as an event, not a warn breadcrumb (#427). Tests
 /// observe the reports through a thread-local sink instead.
-fn report_encoder_wedge(event: crate::logging::SentryDiagnosticEvent) {
+pub(crate) fn report_encoder_wedge(event: crate::logging::SentryDiagnosticEvent) {
     #[cfg(test)]
     ENCODER_WEDGE_REPORTS.with(|reports| reports.borrow_mut().push(event));
     #[cfg(not(test))]
     crate::logging::capture_sentry_diagnostic(event);
+}
+
+/// Drives the guard production builds for a publication carrying `recovery`
+/// through `polls` wedged polls of the real observe -> decide -> report chain
+/// and returns the steps it requested (tests only; reports land in the sink).
+#[cfg(test)]
+pub(crate) fn drive_wedged_publication_for_test(
+    recovery: &EncoderWedgeRecovery,
+    polls: u32,
+) -> Vec<EncoderRecoveryStep> {
+    let mut guard = EncoderWedgeGuard::for_publication(Some(recovery));
+    let mut requested = Vec::new();
+    let wedged = EncoderOutputSample {
+        frames_pushed: 150,
+        frames_encoded: 0,
+        target_bitrate_bps: 3_000_000.0,
+        frames_per_second: 0.0,
+    };
+    for _ in 0..polls {
+        apply_encoder_wedge_guard_sample(
+            &mut guard,
+            wedged,
+            &mut |step| {
+                requested.push(step);
+                true
+            },
+            &mut || false,
+        );
+    }
+    requested
+}
+
+/// Drains this thread's `report_encoder_wedge` sink (tests only).
+#[cfg(test)]
+pub(crate) fn take_encoder_wedge_reports() -> Vec<crate::logging::SentryDiagnosticEvent> {
+    ENCODER_WEDGE_REPORTS.with(|reports| std::mem::take(&mut *reports.borrow_mut()))
 }
 
 #[cfg(test)]
@@ -11474,13 +11731,7 @@ async fn log_window_share_encoder_stats(
     // "the encoder produced nothing while it was funded". The budget is
     // inherited from the share, so a publication created BY a recovery starts
     // where the previous one stopped instead of resetting the escalation.
-    let mut wedge_guard = EncoderWedgeGuard {
-        recovery_steps: encoder_wedge_recovery
-            .as_ref()
-            .map(EncoderWedgeRecovery::steps_used)
-            .unwrap_or(0),
-        ..EncoderWedgeGuard::default()
-    };
+    let mut wedge_guard = EncoderWedgeGuard::for_publication(encoder_wedge_recovery.as_ref());
     let mut guard_initialized = false;
     // Throttled warning for a repeatedly-failing `get_stats()` call (#907
     // review finding 8: silently ignoring every error left this diagnostic
@@ -11654,7 +11905,24 @@ async fn log_window_share_encoder_stats(
                 target_bps,
                 enc_fps,
             );
-            apply_encoder_wedge_guard_sample(&mut wedge_guard, sample, &mut request_recovery);
+            let mut request_hardware_probe = || {
+                match encoder_wedge_recovery
+                    .as_ref()
+                    .and_then(|recovery| recovery.hardware_probe.as_ref())
+                {
+                    Some(probe) => {
+                        probe();
+                        true
+                    }
+                    None => false,
+                }
+            };
+            apply_encoder_wedge_guard_sample(
+                &mut wedge_guard,
+                sample,
+                &mut request_recovery,
+                &mut request_hardware_probe,
+            );
             log::debug!(
                 "publisher: outbound enc_fps={:.1} frames_encoded={} keyframes={} gop_frames={:.1} avg_qp={:.1} sent_kbps={:.0} frames_sent={} packets={} mean_send_delay_ms={:.2} send_delay_growth_ms={:.1} pli={} nack={} limitation={:?} target_kbps={:.0} bwe_kbps={:.0} rtt_ms={:.2} frames_pushed={}",
                 enc_fps,

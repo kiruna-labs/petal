@@ -690,19 +690,88 @@ struct StickyEncoderRecovery {
     software: bool,
     steps_used: u32,
     factory: Option<EncoderWedgeRecoveryFactory>,
+    /// #528: the one way back from `software`. Attached to software
+    /// publications until spent; a probe that wedges again pins the share to
+    /// software for the rest of its life.
+    hardware_probe: Option<Arc<dyn Fn() + Send + Sync>>,
+    hardware_probe_spent: bool,
+    /// Producing polls toward the probe, shared by the software publications
+    /// so a quality/resize republish does not restart the window.
+    software_healthy_polls: Arc<AtomicU32>,
+    /// #528: shared by every publication of the share (the first one too), so
+    /// exhaustion is reported once per share rather than once per republish.
+    exhaustion_reported: Arc<AtomicBool>,
 }
 
 impl RepublishCoordinator {
-    fn attach_encoder_recovery(&self, factory: EncoderWedgeRecoveryFactory) {
-        self.encoder_recovery.lock_unpoisoned().factory = Some(factory);
+    /// `exhaustion_reported` is the flag the share's FIRST publication already
+    /// carries (it is published before this coordinator exists).
+    fn attach_encoder_recovery(
+        &self,
+        factory: EncoderWedgeRecoveryFactory,
+        exhaustion_reported: Arc<AtomicBool>,
+    ) {
+        let mut state = self.encoder_recovery.lock_unpoisoned();
+        state.factory = Some(factory);
+        state.exhaustion_reported = exhaustion_reported;
+    }
+
+    fn exhaustion_flag(&self) -> Arc<AtomicBool> {
+        self.encoder_recovery.lock_unpoisoned().exhaustion_reported.clone()
+    }
+
+    fn attach_hardware_probe(&self, probe: Arc<dyn Fn() + Send + Sync>) {
+        self.encoder_recovery.lock_unpoisoned().hardware_probe = Some(probe);
     }
 
     /// Records a wedge step the moment it is taken, so a republish queued
     /// behind it (or racing it) already sees the spent budget and fallback.
     fn note_wedge_recovery_step(&self, step: EncoderRecoveryStep) {
         let mut state = self.encoder_recovery.lock_unpoisoned();
+        let pins_software = step.forces_software_encoder() && !state.software;
         state.software |= step.forces_software_encoder();
         state.steps_used = state.steps_used.max(step.steps_used_after());
+        if pins_software {
+            // #528: the one structured record that a share went to software.
+            let action = if state.hardware_probe_spent {
+                crate::logging::EncoderWedgeActionTag::HardwareProbeFailed
+            } else {
+                crate::logging::EncoderWedgeActionTag::SoftwareEncoder
+            };
+            crate::transport::publisher::report_encoder_wedge(
+                crate::logging::SentryDiagnosticEvent::EncoderSoftwareFallback(
+                    crate::logging::EncoderWedgeDiagnostic { action },
+                ),
+            );
+        }
+    }
+
+    /// #528: leave the software fallback for ONE hardware republish. Its budget
+    /// is one step spent, so a new wedge goes straight back to software (and
+    /// stays there: the probe is spent). False if not pinned, already probed,
+    /// or the software encoder is exhausted too.
+    fn begin_hardware_probe(&self) -> bool {
+        let mut state = self.encoder_recovery.lock_unpoisoned();
+        if !state.software
+            || state.hardware_probe_spent
+            || state.exhaustion_reported.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        state.software = false;
+        state.hardware_probe_spent = true;
+        state.steps_used = EncoderRecoveryStep::Republish.steps_used_after();
+        true
+    }
+
+    /// #528: the probe never replaced the software publication: pin back to
+    /// software. The probe stays spent, so this cannot loop.
+    fn abandon_hardware_probe(&self) {
+        let mut state = self.encoder_recovery.lock_unpoisoned();
+        state.software = true;
+        state.steps_used = state
+            .steps_used
+            .max(EncoderRecoveryStep::FallBackToSoftware.steps_used_after());
     }
 
     /// The encoder choice and recovery action for ANY republish of this share.
@@ -714,12 +783,26 @@ impl RepublishCoordinator {
         explicit_recovery: Option<EncoderWedgeRecovery>,
     ) -> (bool, Option<EncoderWedgeRecovery>) {
         let state = self.encoder_recovery.lock_unpoisoned();
-        let recovery = explicit_recovery.or_else(|| {
-            state
-                .factory
-                .as_ref()
-                .map(|factory| factory(state.steps_used))
-        });
+        let probe = state
+            .hardware_probe
+            .clone()
+            .filter(|_| state.software && !state.hardware_probe_spent);
+        let recovery = explicit_recovery
+            .or_else(|| {
+                state
+                    .factory
+                    .as_ref()
+                    .map(|factory| factory(state.steps_used))
+            })
+            .map(|recovery| {
+                let recovery = recovery.with_share_exhaustion_flag(state.exhaustion_reported.clone());
+                match probe {
+                    Some(probe) => {
+                        recovery.with_hardware_probe(probe, state.software_healthy_polls.clone())
+                    }
+                    None => recovery,
+                }
+            });
         (force_software_encoder || state.software, recovery)
     }
 }
@@ -5389,14 +5472,17 @@ async fn start_share_with_capture_source(
             Some("quality=Full".to_string()),
         );
     }
+    // #528: one exhaustion flag for every publication of this share, the
+    // first one included; the share's RepublishCoordinator adopts it below.
+    let share_exhaustion_reported = Arc::new(AtomicBool::new(false));
     let (published_result, metadata_outcome, metadata_elapsed) = match publish_origin {
         SharePublishOrigin::Ordinary => {
             // #427: an ordinary share is where a wedged VideoToolbox encoder
             // actually shows up (a fresh share after the wedge publishes an
             // empty track for the rest of the process), so it is also where the
             // recovery action has to be attached.
-            let encoder_wedge_recovery =
-                wedge_recovery_for_share(&app, window_id, started_seq, 0);
+            let encoder_wedge_recovery = wedge_recovery_for_share(&app, window_id, started_seq, 0)
+                .with_share_exhaustion_flag(share_exhaustion_reported.clone());
             publish_media_while_metadata_runs(
                 metadata_task,
                 publish_with_reconnect_retry(
@@ -5441,7 +5527,10 @@ async fn start_share_with_capture_source(
                     ShareQuality::Full,
                     window_id,
                     recovery,
-                    Some(wedge_recovery_for_share(&app, window_id, started_seq, 0)),
+                    Some(
+                        wedge_recovery_for_share(&app, window_id, started_seq, 0)
+                            .with_share_exhaustion_flag(share_exhaustion_reported.clone()),
+                    ),
                 ),
             )
             .await
@@ -5578,8 +5667,19 @@ async fn start_share_with_capture_source(
     {
         // #427: every later republish of this share attaches recovery.
         let app_for_recovery = app.clone();
-        republish_intent.attach_encoder_recovery(Arc::new(move |steps_used| {
-            wedge_recovery_for_share(&app_for_recovery, window_id, started_seq, steps_used)
+        republish_intent.attach_encoder_recovery(
+            Arc::new(move |steps_used| {
+                wedge_recovery_for_share(&app_for_recovery, window_id, started_seq, steps_used)
+            }),
+            share_exhaustion_reported,
+        );
+        // #528: a share pinned to software gets one hardware probe back.
+        let app_for_probe = app.clone();
+        republish_intent.attach_hardware_probe(Arc::new(move || {
+            let app = app_for_probe.clone();
+            tokio::spawn(async move {
+                probe_hardware_encoder_publication(app, window_id, started_seq).await;
+            });
         }));
     }
     let interaction_signal = Arc::new(InteractionSignal::default());
@@ -9086,7 +9186,16 @@ pub(crate) async fn recover_wedged_encoder_publication(
     // settings) or the share gone stops.
     let wedged: Arc<Mutex<Option<Arc<crate::transport::publisher::PublishedTrack>>>> =
         Arc::default();
-    crate::transport::publisher::drive_wedge_recovery_step(step, |is_retry| {
+    let share_exhaustion_reported = {
+        let state = app.state::<SessionState>();
+        let guard = state.inner().inner.lock_unpoisoned();
+        guard
+            .shares
+            .get(&window_id)
+            .filter(|share| share.started_seq == started_seq)
+            .map(|share| share.republish_intent.exhaustion_flag())
+    };
+    crate::transport::publisher::drive_wedge_recovery_step(step, share_exhaustion_reported, |is_retry| {
         let app = app.clone();
         let wedged = wedged.clone();
         async move {
@@ -9216,6 +9325,105 @@ async fn wedged_encoder_recovery_attempt(
         WedgeRecoveryAttempt::NotReplaced
     };
     (attempt, Some(live))
+}
+
+/// [#528] The one way back from a sticky software fallback. After the
+/// software publication has produced frames for the probe window, republish
+/// once onto the hardware encoder WITH wedge recovery attached (one step
+/// spent), so a real wedge returns the share to software for good instead of
+/// a false positive costing VideoToolbox for the life of the share.
+pub(crate) async fn probe_hardware_encoder_publication(
+    app: tauri::AppHandle,
+    window_id: u32,
+    started_seq: u64,
+) {
+    let state = app.state::<SessionState>();
+    let state = state.inner();
+    let Some((room_connection, slot, republish_intent, intent_generation, capture_config, live)) = ({
+        let guard = state.inner.lock_unpoisoned();
+        guard
+            .shares
+            .get(&window_id)
+            .filter(|share| share.started_seq == started_seq)
+            .and_then(|share| {
+                let room_connection = guard
+                    .joined
+                    .as_ref()
+                    .map(|joined| joined.room_connection.clone())?;
+                Some((
+                    room_connection,
+                    share.published.clone(),
+                    share.republish_intent.clone(),
+                    // Join the current generation: a queued quality/resize
+                    // intent wins and itself becomes the probe (it resolves
+                    // the sticky settings, now hardware with recovery).
+                    share.republish_intent.generation.load(Ordering::SeqCst),
+                    share.capture.configuration_handle(),
+                    share.published.lock_unpoisoned().clone(),
+                ))
+            })
+    }) else {
+        log::info!("session: skipping hardware-encoder probe for stale share {window_id}/{started_seq} (#528)");
+        return;
+    };
+    // Leave the pin under the apply lock, and only while the software
+    // publication that asked is still live: no republish is mid-resolve, so
+    // every later one resolves hardware with recovery and none resolved the
+    // pinned settings after the probe was spent.
+    let began = {
+        let _apply = republish_intent.apply_lock.lock().await;
+        Arc::ptr_eq(&slot.lock_unpoisoned(), &live) && republish_intent.begin_hardware_probe()
+    };
+    if !began {
+        log::info!(
+            "session: window {window_id} skipping hardware-encoder probe; the share is not pinned to software, already probed, exhausted, or was republished meanwhile (#528)"
+        );
+        return;
+    }
+    // The outcome is not the verdict: see the slot check below.
+    let _outcome = republish_window_with_target(
+        room_connection,
+        slot.clone(),
+        republish_intent.clone(),
+        intent_generation,
+        &capture_config,
+        window_id,
+        |current, _capture_config, resolution| RepublishTarget {
+            width: current.width(),
+            height: current.height(),
+            quality: current.quality(),
+            resolution,
+        },
+        "encoder probation: retry the hardware encoder",
+        true,
+        1,
+        None,
+        false,
+        None,
+        Some(&live),
+    )
+    .await;
+    // Judge by the slot, not the outcome: a superseded probe reports success.
+    // Under the apply lock no republish is mid-flight, so "still the software
+    // publication" means nothing replaced it, and a queued republish resolves
+    // after the re-pin below.
+    let replaced = {
+        let _apply = republish_intent.apply_lock.lock().await;
+        let replaced = !Arc::ptr_eq(&slot.lock_unpoisoned(), &live);
+        if !replaced {
+            republish_intent.abandon_hardware_probe();
+        }
+        replaced
+    };
+    if replaced {
+        log::warn!(
+            "session: window {window_id} left the software encoder for its one hardware-encoder probe; a new wedge returns it to software for the rest of the share (#528)"
+        );
+    } else {
+        log::warn!(
+            "session: window {window_id} hardware-encoder probe did not replace the software publication; staying on the software encoder (#528)"
+        );
+    }
 }
 
 /// Repair a publication retired by a receiver's no-frame watchdog. The
@@ -10949,12 +11157,208 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         ))
     }
 
+    /// `republish_args` plus whether the resolved recovery carries the
+    /// share's hardware probe (#528).
+    fn republish_args_with_probe(
+        coordinator: &RepublishCoordinator,
+        force_software: bool,
+        explicit: Option<EncoderWedgeRecovery>,
+    ) -> (bool, Option<u32>, bool) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime.block_on(publish_with_sticky_encoder_settings(
+            coordinator,
+            force_software,
+            explicit,
+            |software, recovery| async move {
+                (
+                    software,
+                    recovery.as_ref().map(EncoderWedgeRecovery::steps_used),
+                    recovery.as_ref().is_some_and(EncoderWedgeRecovery::has_hardware_probe),
+                )
+            },
+        ))
+    }
+
+    fn resolved_recovery(coordinator: &RepublishCoordinator) -> EncoderWedgeRecovery {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime
+            .block_on(publish_with_sticky_encoder_settings(
+                coordinator,
+                false,
+                None,
+                |_software, recovery| async move { recovery },
+            ))
+            .expect("a share with a factory always resolves recovery")
+    }
+
+    fn probing_coordinator() -> RepublishCoordinator {
+        let coordinator = RepublishCoordinator::default();
+        coordinator.attach_encoder_recovery(sticky_test_factory(), Arc::default());
+        coordinator.attach_hardware_probe(Arc::new(|| {}));
+        coordinator
+    }
+
+    #[test]
+    fn a_software_pinned_share_gets_one_hardware_probe_with_recovery_attached() {
+        // #528: a false-positive wedge pinned the share to software for life.
+        use crate::logging::{EncoderWedgeActionTag, EncoderWedgeDiagnostic, SentryDiagnosticEvent};
+        crate::transport::publisher::take_encoder_wedge_reports();
+        let coordinator = probing_coordinator();
+        assert_eq!(
+            republish_args_with_probe(&coordinator, false, None),
+            (false, Some(0), false),
+            "a hardware publication carries no probe"
+        );
+        coordinator.note_wedge_recovery_step(EncoderRecoveryStep::Republish);
+        coordinator.note_wedge_recovery_step(EncoderRecoveryStep::FallBackToSoftware);
+        let step2 = EncoderWedgeRecovery::new(2, |_| {});
+        assert_eq!(
+            republish_args_with_probe(&coordinator, true, Some(step2)),
+            (true, Some(2), true),
+            "the step-2 software publication carries the probe"
+        );
+        assert_eq!(
+            republish_args_with_probe(&coordinator, false, None),
+            (true, Some(2), true),
+            "so does a quality republish while pinned"
+        );
+
+        assert!(coordinator.begin_hardware_probe());
+        // #521 must not come back: on probation every republish shape is
+        // hardware WITH recovery, one step spent so a new wedge goes straight
+        // to software.
+        assert_eq!(republish_args_with_probe(&coordinator, false, None), (false, Some(1), false));
+        // One trigger window (3 polls) on the probe publication: its first
+        // wedge escalates straight to software, not to another recreate.
+        let probe_steps =
+            crate::transport::publisher::drive_wedged_publication_for_test(&resolved_recovery(&coordinator), 3);
+        assert_eq!(probe_steps, vec![EncoderRecoveryStep::FallBackToSoftware]);
+
+        coordinator.note_wedge_recovery_step(EncoderRecoveryStep::FallBackToSoftware);
+        assert_eq!(
+            republish_args_with_probe(&coordinator, false, None),
+            (true, Some(2), false),
+            "a probe that wedged pins software for the rest of the share"
+        );
+        assert!(!coordinator.begin_hardware_probe(), "one probe per share");
+        assert_eq!(
+            crate::transport::publisher::take_encoder_wedge_reports(),
+            vec![
+                SentryDiagnosticEvent::EncoderSoftwareFallback(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::SoftwareEncoder,
+                }),
+                SentryDiagnosticEvent::EncoderSoftwareFallback(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::HardwareProbeFailed,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hardware_probe_that_never_replaced_the_track_pins_software_again() {
+        let coordinator = probing_coordinator();
+        coordinator.note_wedge_recovery_step(EncoderRecoveryStep::FallBackToSoftware);
+        assert!(coordinator.begin_hardware_probe());
+        coordinator.abandon_hardware_probe();
+        assert_eq!(republish_args_with_probe(&coordinator, false, None), (true, Some(2), false));
+        assert!(!coordinator.begin_hardware_probe(), "an abandoned probe is still spent");
+        crate::transport::publisher::take_encoder_wedge_reports();
+    }
+
+    #[test]
+    fn an_exhausted_share_reports_exhaustion_once_across_republishes() {
+        // #528: every republish of an exhausted share built a fresh guard and
+        // re-emitted `encoder-wedge-exhausted`. The share's FIRST publication
+        // is built before its coordinator, so it must carry the same flag.
+        use crate::logging::{EncoderWedgeActionTag, EncoderWedgeDiagnostic, SentryDiagnosticEvent};
+        crate::transport::publisher::take_encoder_wedge_reports();
+        let flag: Arc<AtomicBool> = Arc::default();
+        let first = EncoderWedgeRecovery::new(0, |_| {}).with_share_exhaustion_flag(flag.clone());
+        let coordinator = RepublishCoordinator::default();
+        coordinator.attach_encoder_recovery(sticky_test_factory(), flag.clone());
+        coordinator.attach_hardware_probe(Arc::new(|| {}));
+        // The first publication's recoveries never replace it: it exhausts.
+        let steps = crate::transport::publisher::drive_wedged_publication_for_test(&first, 30);
+        assert_eq!(
+            steps,
+            vec![EncoderRecoveryStep::Republish, EncoderRecoveryStep::FallBackToSoftware]
+        );
+        for step in steps {
+            coordinator.note_wedge_recovery_step(step);
+        }
+        for _republish in 0..3 {
+            let steps = crate::transport::publisher::drive_wedged_publication_for_test(
+                &resolved_recovery(&coordinator),
+                30,
+            );
+            assert!(steps.is_empty(), "an exhausted share requests nothing");
+        }
+        let exhausted: Vec<_> = crate::transport::publisher::take_encoder_wedge_reports()
+            .into_iter()
+            .filter(|event| matches!(event, SentryDiagnosticEvent::EncoderWedgeExhausted(_)))
+            .collect();
+        assert_eq!(
+            exhausted,
+            vec![SentryDiagnosticEvent::EncoderWedgeExhausted(EncoderWedgeDiagnostic {
+                action: EncoderWedgeActionTag::Exhausted,
+            })],
+            "one exhaustion report per share"
+        );
+        assert!(
+            !coordinator.begin_hardware_probe(),
+            "a share whose software encoder is dead too is not probed"
+        );
+    }
+
+    #[test]
+    fn every_share_wires_its_hardware_probe_to_the_probe_republish() {
+        // Source-level by design (a real probe needs a live room): the share
+        // attaches the probe, and the probe republishes only after leaving the
+        // software pin, and re-pins if its republish never replaced the track.
+        let full = include_str!("share.rs");
+        let source = full
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map(|(prod, _)| prod)
+            .expect("share.rs must keep its test module in one #[cfg(test)] block");
+        let start = source
+            .split_once("fn start_share_with_capture_source(")
+            .map(|(_, rest)| rest)
+            .expect("start_share_with_capture_source");
+        let attach = start
+            .find("republish_intent.attach_hardware_probe(")
+            .expect("start-share attaches the hardware probe");
+        assert!(
+            start[attach..attach + 400].contains("probe_hardware_encoder_publication(app, window_id, started_seq)"),
+            "the attached probe runs the probe republish for THIS share"
+        );
+        let probe_fn = source
+            .split_once("pub(crate) async fn probe_hardware_encoder_publication(")
+            .map(|(_, rest)| rest)
+            .expect("probe_hardware_encoder_publication");
+        let begin = probe_fn.find("republish_intent.begin_hardware_probe()").expect("begin");
+        let republish = probe_fn.find("republish_window_with_target(").expect("republish");
+        let abandon = probe_fn.find("republish_intent.abandon_hardware_probe()").expect("abandon");
+        assert!(begin < republish && republish < abandon);
+        // Both transitions run under the apply lock and are judged by the slot
+        // (a superseded probe reports success without replacing anything).
+        let before = &probe_fn[..begin];
+        let lock_before = before.rfind("republish_intent.apply_lock.lock().await").expect("lock for begin");
+        assert!(before[lock_before..].contains("Arc::ptr_eq(&slot.lock_unpoisoned(), &live)"));
+        let between = &probe_fn[republish..abandon];
+        assert!(between.contains("republish_intent.apply_lock.lock().await"), "lock for abandon");
+        assert!(between.contains("!Arc::ptr_eq(&slot.lock_unpoisoned(), &live)"));
+    }
+
     #[test]
     fn wedge_recovery_survives_every_later_republish_of_the_share() {
         // #427 macOS: wedge -> software fallback -> receiver-demand quality
         // republish put VideoToolbox back with no recovery attached.
         let coordinator = RepublishCoordinator::default();
-        coordinator.attach_encoder_recovery(sticky_test_factory());
+        coordinator.attach_encoder_recovery(sticky_test_factory(), Arc::default());
 
         assert_eq!(republish_args(&coordinator, false, None), (false, Some(0)));
         coordinator.note_wedge_recovery_step(EncoderRecoveryStep::Republish);
