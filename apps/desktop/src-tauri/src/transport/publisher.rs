@@ -2443,14 +2443,21 @@ impl RoomConnection<Arc<Room>> {
     /// cadence on a republish). The published cadence is that ceiling capped to
     /// the geometry's Level 5.2 limit, and the encoder's `max_framerate`, the
     /// bitrate ask and [`PublishedTrack::cadence_fps`] all use it.
+    ///
+    /// `recovery` is the share's wedge-recovery action and
+    /// `force_software_encoder` the step-2 software fallback, exactly as in
+    /// [`publish_window_at_with_recovery_context`](Self::publish_window_at_with_recovery_context)
+    /// (#525: Windows shares were published with neither).
     #[cfg(target_os = "windows")]
-    pub async fn publish_window_at_cadence(
+    pub(crate) async fn publish_window_at_cadence(
         &self,
         width: u32,
         height: u32,
         quality: ShareQuality,
         window_id: Option<u32>,
         cadence_fps: u32,
+        recovery: Option<EncoderWedgeRecovery>,
+        force_software_encoder: bool,
     ) -> Result<PublishedTrack, RoomConnectionError> {
         self.publish_window_at_with_encoder_context(
             width,
@@ -2459,8 +2466,8 @@ impl RoomConnection<Arc<Room>> {
             window_id,
             EncoderPublishOrigin::Ordinary,
             None,
-            None,
-            false,
+            recovery,
+            force_software_encoder,
             Some(cadence_fps),
         )
         .await
@@ -6106,12 +6113,55 @@ mod track_name_tests {
     #[test]
     fn encoder_wedge_without_a_wired_action_still_reports_but_does_not_act() {
         // The camera path and test publishes attach no recovery action: the
-        // guard must not claim it asked for one.
+        // guard must not claim it asked for one, must not spend budget it
+        // cannot use, and must not then report a fake exhaustion (#525: every
+        // Windows wedge read "after 2 recovery steps" after zero attempts).
+        take_wedge_reports();
         let mut harness = WedgeHarness::new();
         harness.action_wired = false;
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 3, wedged_sample());
+        assert_eq!(harness.requested.len(), 1, "asked once, then quiet");
+        assert_eq!(harness.guard.recovery_steps, 0, "no step was taken");
+        assert_eq!(
+            take_wedge_reports(),
+            vec![crate::logging::SentryDiagnosticEvent::EncoderWedged(
+                crate::logging::EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::NotWired,
+                }
+            )],
+            "exactly one not-wired report and no Exhausted"
+        );
+    }
+
+    #[test]
+    fn encoder_wedge_recovery_chain_uses_the_step_settings_both_sessions_share() {
+        // Each step's replacement inherits `steps_used_after` as its starting
+        // budget (as the stats loop seeds the guard from the recovery), so the
+        // chain is recreate -> software -> exhausted across publications.
+        let mut harness = WedgeHarness::new();
         harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES, wedged_sample());
-        assert_eq!(harness.requested.len(), 1);
-        assert_eq!(harness.guard.recovery_steps, 1);
+        assert_eq!(harness.requested, vec![EncoderRecoveryStep::Republish]);
+        let step = harness.requested[0];
+        assert!(!step.forces_software_encoder());
+
+        let mut replacement = WedgeHarness::with_steps_used(step.steps_used_after());
+        replacement.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES, wedged_sample());
+        assert_eq!(replacement.requested, vec![EncoderRecoveryStep::FallBackToSoftware]);
+        let step = replacement.requested[0];
+        assert!(step.forces_software_encoder());
+
+        take_wedge_reports();
+        let mut software = WedgeHarness::with_steps_used(step.steps_used_after());
+        software.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 2, wedged_sample());
+        assert!(software.requested.is_empty(), "the budget is spent");
+        assert_eq!(
+            take_wedge_reports(),
+            vec![crate::logging::SentryDiagnosticEvent::EncoderWedgeExhausted(
+                crate::logging::EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::Exhausted,
+                }
+            )]
+        );
     }
 
     #[test]
@@ -9967,6 +10017,22 @@ impl EncoderRecoveryStep {
         }
     }
 
+    /// Whether the replacement publication for this step uses the software
+    /// H.264 encoder. One answer for both sessions (macOS + Windows, #525).
+    pub(crate) fn forces_software_encoder(self) -> bool {
+        self == Self::FallBackToSoftware
+    }
+
+    /// The share's spent recovery budget once this step is taken. The
+    /// replacement publication inherits it, so the escalation continues
+    /// instead of restarting (#427/#525).
+    pub(crate) fn steps_used_after(self) -> u32 {
+        match self {
+            Self::Republish => 1,
+            Self::FallBackToSoftware => 2,
+        }
+    }
+
     fn diagnostic_tag(self) -> EncoderWedgeActionTag {
         match self {
             Self::Republish => EncoderWedgeActionTag::Republish,
@@ -9994,8 +10060,14 @@ enum EncoderWedgeDecision {
 #[derive(Debug, Default)]
 struct EncoderWedgeGuard {
     consecutive_zero_encode_samples: u32,
+    /// Steps actually TAKEN (a wired action ran). An unwired request never
+    /// counts, so it cannot fake "after 2 recovery steps" (#525).
     recovery_steps: u32,
     reported_exhausted: bool,
+    /// No recovery action is wired: reported once, then never requested again
+    /// (later wedged polls are `Suspect` warnings), instead of spending budget
+    /// it cannot use and then reporting a fake `Exhausted`.
+    not_wired: bool,
 }
 
 impl EncoderWedgeGuard {
@@ -10010,7 +10082,7 @@ impl EncoderWedgeGuard {
         }
         self.consecutive_zero_encode_samples =
             self.consecutive_zero_encode_samples.saturating_add(1);
-        if self.consecutive_zero_encode_samples < ENCODER_WEDGE_TRIGGER_SAMPLES {
+        if self.consecutive_zero_encode_samples < ENCODER_WEDGE_TRIGGER_SAMPLES || self.not_wired {
             return EncoderWedgeDecision::Suspect;
         }
         if self.recovery_steps >= ENCODER_WEDGE_MAX_RECOVERY_STEPS {
@@ -10025,12 +10097,22 @@ impl EncoderWedgeGuard {
         } else {
             EncoderRecoveryStep::FallBackToSoftware
         };
-        self.recovery_steps += 1;
-        // Restart the streak: the NEXT escalation must be justified by another
+        // The budget is spent in `record_recovery_request`, once the caller
+        // knows whether an action actually ran (#525). Restart the streak: the NEXT escalation must be justified by another
         // full trigger window of wedge evidence AFTER this recovery, not by the
         // samples that led to it.
         self.consecutive_zero_encode_samples = 0;
         EncoderWedgeDecision::Recover(step)
+    }
+
+    /// Apply the outcome of a `Recover` decision: a wired action spends one
+    /// step; an unwired publication is marked and never asks again.
+    fn record_recovery_request(&mut self, requested: bool) {
+        if requested {
+            self.recovery_steps += 1;
+        } else {
+            self.not_wired = true;
+        }
     }
 }
 
@@ -10592,9 +10674,11 @@ fn apply_encoder_wedge_guard_sample(
             ENCODER_WEDGE_TRIGGER_SAMPLES,
         ),
         EncoderWedgeDecision::Recover(step) => {
+            let first_for_share = guard.recovery_steps == 0;
             let requested = request_recovery(step);
+            guard.record_recovery_request(requested);
             // One report per share: the first trigger, with what was done.
-            if guard.recovery_steps == 1 {
+            if first_for_share {
                 let action = if requested { step.diagnostic_tag() } else { EncoderWedgeActionTag::NotWired };
                 report_encoder_wedge(crate::logging::SentryDiagnosticEvent::EncoderWedged(
                     crate::logging::EncoderWedgeDiagnostic { action },
