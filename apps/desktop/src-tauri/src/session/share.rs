@@ -1540,20 +1540,37 @@ fn stall_occlusion(
 ) -> Option<crate::platform::cg::OcclusionBreakdown> {
     #[cfg(target_os = "macos")]
     {
-        let remote = crate::compositor::open_pointer_family_meta(app).map(|metas| {
-            metas
-                .into_iter()
-                .filter(|meta| meta.is_visible)
-                .flat_map(|meta| meta.family_ids)
-                .collect::<Vec<u32>>()
-        });
-        crate::platform::cg::occlusion_breakdown(window_id, remote.as_deref())
+        stall_occlusion_from(crate::compositor::open_pointer_family_meta(app), |remote| {
+            crate::platform::cg::occlusion_breakdown(window_id, remote)
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, window_id);
         None
     }
+}
+
+/// A partly-read Petal set (#540) is a lower bound like an unreadable one:
+/// measure with what was read, but never as `petal_known`.
+#[cfg(target_os = "macos")]
+fn stall_occlusion_from(
+    metas: Option<Vec<crate::compositor::PointerFamilyMeta>>,
+    measure: impl FnOnce(Option<&[u32]>) -> Option<crate::platform::cg::OcclusionBreakdown>,
+) -> Option<crate::platform::cg::OcclusionBreakdown> {
+    let complete = metas
+        .as_ref()
+        .is_some_and(|metas| metas.iter().all(|meta| meta.read_complete));
+    let remote = metas.map(|metas| {
+        metas
+            .into_iter()
+            .filter(|meta| meta.is_visible)
+            .flat_map(|meta| meta.family_ids)
+            .collect::<Vec<u32>>()
+    });
+    let mut breakdown = measure(remote.as_deref())?;
+    breakdown.petal_known &= complete;
+    Some(breakdown)
 }
 
 fn report_raw_capture_stall(
@@ -15000,6 +15017,67 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             occlusion_tags(W, Some(B { foreign: 1.0, petal: 0.0, combined: 1.0, petal_known: false })),
             (Occ::Full, ByPetal::Unknown)
         );
+    }
+
+    /// #540: a remote panel whose window-number or visibility read failed is
+    /// missing from the union, so a source it fully covers must bucket
+    /// `unknown`, not `none`. Driven through the real stall sampling and
+    /// diagnostic path; only the AppKit read and CG window list are faked.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn partial_petal_window_list_never_reports_a_definitive_union_540() {
+        use crate::compositor::PointerFamilyMeta;
+        use crate::logging::{
+            CaptureOcclusionTag as Occ, OccludedByPetalTag as ByPetal, RawCaptureActionTag,
+        };
+        use crate::platform::cg::{occlusion_breakdown_from, OcclusionRect};
+        const SELF_PID: i64 = 4242;
+        const TARGET: u32 = 540_001;
+        let rect = |number: i64, owner_pid: i64, w: f64| OcclusionRect {
+            number,
+            owner_pid,
+            layer: 0,
+            alpha: 1.0,
+            x: 0.0,
+            y: 0.0,
+            w,
+            h: 100.0,
+        };
+        let meta = |family_ids: &[u32], is_visible: bool, read_complete: bool| PointerFamilyMeta {
+            window_id: 1,
+            owner_identity: "sharer".into(),
+            family_ids: family_ids.to_vec(),
+            is_visible,
+            read_complete,
+        };
+        // Petal panel 900 fully covers the target; panel 901 covers ~a third.
+        let entries = [rect(900, SELF_PID, 100.0), rect(901, SELF_PID, 30.0), rect(TARGET as i64, 7, 100.0)];
+        let tags = |metas: Vec<PointerFamilyMeta>| {
+            let sample = stall_occlusion_from(Some(metas), |remote| {
+                occlusion_breakdown_from(&entries, TARGET, SELF_PID, remote)
+            });
+            let d = capture_raw_stall_diagnostic(
+                TARGET,
+                SourceSelectionClass::Window,
+                RawCaptureActionTag::Restart,
+                91_000_000,
+                crate::capture::RawSilenceEvidence::default(),
+                1,
+                1,
+                sample,
+            );
+            (d.occlusion, d.occluded_by_petal)
+        };
+        // Number read failed for 900: only 901's third was measured.
+        assert_eq!(tags(vec![meta(&[], true, false), meta(&[901], true, true)]), (Occ::Unknown, ByPetal::Unknown));
+        // Visibility read failed for 900: treated as hidden, still not definitive.
+        assert_eq!(tags(vec![meta(&[900], false, false)]), (Occ::Unknown, ByPetal::Unknown));
+        // Measured coverage already `full` stays `full` despite the gap.
+        assert_eq!(tags(vec![meta(&[900], true, true), meta(&[], true, false)]), (Occ::Full, ByPetal::Unknown));
+        // A complete list is unchanged.
+        assert_eq!(tags(vec![meta(&[900], true, true)]), (Occ::Full, ByPetal::Yes));
+        assert_eq!(tags(vec![meta(&[901], true, true)]), (Occ::Partial, ByPetal::Yes));
+        assert_eq!(tags(vec![]), (Occ::None, ByPetal::No));
     }
 
     /// Review of #524: display and region shares have no window to cover, so
