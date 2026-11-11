@@ -727,6 +727,11 @@ diagnostic_enum!(OccludedByPetalTag {
 });
 
 impl CaptureOcclusionTag {
+    /// The closed-enum wire value, for the local `capture-stall-evidence:` line.
+    pub(crate) fn as_str(self) -> &'static str {
+        self.tag()
+    }
+
     pub fn from_fraction(fraction: f64) -> Self {
         match fraction {
             f if f < 0.05 => Self::None,
@@ -734,6 +739,12 @@ impl CaptureOcclusionTag {
             f if f < 0.95 => Self::Mostly,
             _ => Self::Full,
         }
+    }
+}
+
+impl OccludedByPetalTag {
+    pub(crate) fn as_str(self) -> &'static str {
+        self.tag()
     }
 }
 
