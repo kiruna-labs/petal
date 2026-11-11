@@ -828,6 +828,8 @@ export interface CameraPublishState {
   error: string | null;
   /** Room generation the outcome belongs to (see `StartCameraPublishResult`). */
   generation: number;
+  /** Native emit order, shared with `StartCameraPublishResult.seq`. */
+  seq: number;
 }
 
 /**
@@ -850,6 +852,9 @@ export interface StartCameraPublishResult {
   /** Room generation the request is bound to (the joined room, or the join
    * native deferred it to). An outcome from an older generation is stale. */
   generation: number;
+  /** Native camera-publish-state seq when this result was decided (under the
+   * camera control lock): an OFF with a higher seq came after this start. */
+  seq: number;
 }
 
 /** Mirrors native `CameraPublishStateSnapshot` -- lets a (re)mounting meeting

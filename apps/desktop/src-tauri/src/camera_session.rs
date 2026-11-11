@@ -6,7 +6,7 @@
 //! `transport::camera`.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -238,6 +238,38 @@ pub(crate) struct CameraPublishStateEvent {
     /// Room generation the outcome belongs to: a surface ignores an outcome
     /// older than its own camera request (PR #503).
     pub generation: u64,
+    /// Process-wide emit order ([`camera_event_seq`]). Orders an outcome
+    /// against a start's result within one room generation (PR #503).
+    pub seq: u64,
+}
+
+/// One counter for every `camera-publish-state` emit, so a surface can tell
+/// an OFF emitted before its start from one emitted after (PR #503).
+static CAMERA_EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_camera_event_seq() -> u64 {
+    CAMERA_EVENT_SEQ.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// The seq of the latest `camera-publish-state` emitted. A start reads it
+/// under the camera control lock: every outcome with a higher seq was
+/// emitted after the start's own result was decided.
+pub(crate) fn camera_event_seq() -> u64 {
+    CAMERA_EVENT_SEQ.load(Ordering::SeqCst)
+}
+
+/// A `camera-publish-state` payload, stamped with the next seq.
+pub(crate) fn camera_publish_state_event(
+    generation: u64,
+    publishing: bool,
+    error: Option<String>,
+) -> CameraPublishStateEvent {
+    CameraPublishStateEvent {
+        publishing,
+        error,
+        generation,
+        seq: next_camera_event_seq(),
+    }
 }
 
 /// Payload of the `camera-intent-changed` event: the user's camera INTENT,
@@ -265,6 +297,20 @@ pub struct StartCameraPublishResult {
     /// Room generation this request is bound to (the joined room, or the
     /// join it was deferred to); later outcomes carry the same or newer.
     pub generation: u64,
+    /// [`camera_event_seq`] read under the camera control lock as the result
+    /// was decided: an OFF with a higher seq came after this start.
+    pub seq: u64,
+}
+
+impl StartCameraPublishResult {
+    /// Build under the camera control lock (see `seq`).
+    fn decided(published: bool, generation: u64) -> Self {
+        Self {
+            published,
+            generation,
+            seq: camera_event_seq(),
+        }
+    }
 }
 
 /// Snapshot for UI surfaces syncing their camera toggle to reality (e.g. the
@@ -891,11 +937,7 @@ pub(crate) fn emit_camera_publish_state(
     if let Err(error) = tauri::Emitter::emit(
         app,
         "camera-publish-state",
-        CameraPublishStateEvent {
-            publishing,
-            error,
-            generation,
-        },
+        camera_publish_state_event(generation, publishing, error),
     ) {
         log::warn!("session: failed to emit camera-publish-state: {error}");
     }
@@ -1150,7 +1192,7 @@ pub(crate) async fn ensure_camera_published(
         break (outcome, generation, guard);
     };
 
-    let event = match outcome {
+    let (publishing, error) = match outcome {
         CameraHealOutcome::Published => {
             announce_heal_published(
                 state,
@@ -1173,14 +1215,10 @@ pub(crate) async fn ensure_camera_published(
             // Intent was cleared with the retries exhausted and nothing
             // acquired -- the device is free for a Settings preview again.
             emit_camera_intent(app, false);
-            CameraPublishStateEvent {
-                publishing: false,
-                error: Some(error),
-                generation: generation.value(),
-            }
+            (false, Some(error))
         }
     };
-    emit_camera_publish_state(app, event.generation, event.publishing, event.error);
+    emit_camera_publish_state(app, generation.value(), publishing, error);
 }
 
 /// #461: check-and-announce a heal's publish UNDER the control lock. Checked
@@ -1523,10 +1561,10 @@ pub(crate) async fn start_camera_publish_intent(
         log::info!(
             "session: camera turned on while the room join is pending -- publishing once joined"
         );
-        return Ok(StartCameraPublishResult {
-            published: false,
-            generation: state.current_room_generation().value(),
-        });
+        return Ok(StartCameraPublishResult::decided(
+            false,
+            state.current_room_generation().value(),
+        ));
     }
     match start_camera_publish_with_device(
         app,
@@ -1536,10 +1574,10 @@ pub(crate) async fn start_camera_publish_intent(
     )
     .await
     {
-        Ok(_) => Ok(StartCameraPublishResult {
-            published: true,
-            generation: state.current_room_generation().value(),
-        }),
+        Ok(_) => Ok(StartCameraPublishResult::decided(
+            true,
+            state.current_room_generation().value(),
+        )),
         Err(error) if error == "not in room" => {
             let generation = state.current_room_generation().value();
             match state.deferred_camera().defer(|| state.is_in_room()) {
@@ -1549,10 +1587,7 @@ pub(crate) async fn start_camera_publish_intent(
                     log::info!(
                         "session: camera turned on while the room join is pending -- publishing once joined"
                     );
-                    Ok(StartCameraPublishResult {
-                        published: false,
-                        generation,
-                    })
+                    Ok(StartCameraPublishResult::decided(false, generation))
                 }
                 CameraDeferral::RetryNow => {
                     // The join committed between our room check and now.
@@ -1560,10 +1595,10 @@ pub(crate) async fn start_camera_publish_intent(
                         "session: room join completed during camera start -- retrying publish"
                     );
                     spawn_camera_heal(app, CAMERA_REJOIN_ATTEMPT_SCHEDULE);
-                    Ok(StartCameraPublishResult {
-                        published: false,
-                        generation: state.current_room_generation().value(),
-                    })
+                    Ok(StartCameraPublishResult::decided(
+                        false,
+                        state.current_room_generation().value(),
+                    ))
                 }
                 CameraDeferral::Refused => {
                     // No room and none pending. Intent is cleared so a later
@@ -1579,10 +1614,10 @@ pub(crate) async fn start_camera_publish_intent(
                 "session: start_camera_publish_command immediate attempt failed, starting self-heal: {error}"
             );
             spawn_camera_heal(app, CAMERA_HEAL_RETRY_BACKOFF);
-            Ok(StartCameraPublishResult {
-                published: false,
-                generation: state.current_room_generation().value(),
-            })
+            Ok(StartCameraPublishResult::decided(
+                false,
+                state.current_room_generation().value(),
+            ))
         }
     }
 }
@@ -2022,6 +2057,59 @@ mod tests {
         assert!(!abandon_pending_join_inner(&state, "room-a").await);
         assert!(state.camera_intent());
         assert!(join.commit(), "room B still publishes its camera");
+    }
+
+    /// Round-3 review: a start's result and every camera-publish-state share
+    /// one order. An event emitted before the result was decided has a seq
+    /// at or below the result's; one emitted after has a higher seq.
+    #[test]
+    fn a_start_result_is_ordered_against_emitted_events() {
+        let before = camera_publish_state_event(1, false, None);
+        let result = StartCameraPublishResult::decided(true, 1);
+        let after = camera_publish_state_event(1, false, None);
+        assert!(before.seq <= result.seq, "emitted before: not newer than the start");
+        assert!(after.seq > result.seq, "emitted after: newer than the start");
+        assert!(after.seq > before.seq);
+    }
+
+    /// The stop/start pair is serialized by the camera control lock: a stop
+    /// that holds it emits before a waiting start decides, and a stop that
+    /// waits for a start emits after it (the seq read is under the lock).
+    #[tokio::test]
+    async fn the_control_lock_orders_a_stop_against_a_start() {
+        let state = crate::session::SessionState::default();
+        let control = state.lock_camera_control().await;
+        let start = async {
+            let _control = state.lock_camera_control().await;
+            StartCameraPublishResult::decided(true, 1)
+        };
+        let stop = async {
+            let event = camera_publish_state_event(1, false, None);
+            drop(control);
+            event
+        };
+        let (result, stop_off) = tokio::join!(start, stop);
+        assert!(stop_off.seq <= result.seq, "an OFF before the start never stops it");
+        let control = state.lock_camera_control().await;
+        let later_off = camera_publish_state_event(1, false, None);
+        drop(control);
+        assert!(later_off.seq > result.seq, "an OFF after the start wins");
+    }
+
+    /// Wiring guard: every start result is decided under the control lock,
+    /// and every emit is stamped through the one counter.
+    #[test]
+    fn start_results_and_emits_use_the_shared_seq() {
+        let src = include_str!("camera_session.rs");
+        let body = &src[src.find("pub(crate) async fn start_camera_publish_intent(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let lock = body.find("let _control = state.lock_camera_control().await;").unwrap();
+        let first = body.find("StartCameraPublishResult::decided(").unwrap();
+        assert!(lock < first, "decided under the control lock");
+        assert!(!body.contains("StartCameraPublishResult {"), "no seq-less literal");
+        let emit = &src[src.find("pub(crate) fn emit_camera_publish_state(").unwrap()..];
+        let emit = &emit[..emit.find("\n}\n").unwrap()];
+        assert!(emit.contains("camera_publish_state_event(generation, publishing, error)"));
     }
 
     /// Wiring guard for item 3: the command is registered on both platforms.

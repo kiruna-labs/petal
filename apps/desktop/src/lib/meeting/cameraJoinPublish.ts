@@ -12,9 +12,11 @@
 // Native keeps a camera turned on while a join is in flight and publishes it
 // at the commit (`room_generation::DeferredCamera`); that start returns
 // `published: false` and needs no toast while connecting. Outcomes carry the
-// room generation, and one older than this controller's request is stale:
-// an outcome that lands while a start is in flight is held until the start
-// says which generation it belongs to (PR #503).
+// room generation and a native emit seq. One from an older generation is
+// stale, and an OFF whose seq is not above the latest start's was emitted
+// before that start decided its result. An outcome that lands while a start
+// is in flight is held until the start returns its generation and seq; a
+// held OFF emitted after it wins over its `published: true` (PR #503).
 
 import type { CameraPublishState, StartCameraPublishResult } from '#lib/ipc.js';
 import type { MeetingPhase } from './meetingSession.svelte';
@@ -52,13 +54,16 @@ export interface CameraJoinPublish {
 export type CameraStateAction = 'on' | 'off' | 'failed';
 
 /** What an outcome means given the generation the camera request is bound
- * to; `ignore` for an outcome from an older room generation. */
+ * to and the seq of the latest start's result; `ignore` for an outcome from
+ * an older room generation, or an OFF emitted before that start decided. */
 export function cameraStateAction(
   event: CameraPublishState,
-  boundGeneration: number
+  boundGeneration: number,
+  startSeq = 0
 ): CameraStateAction | 'ignore' {
   if (event.generation < boundGeneration) return 'ignore';
   if (event.publishing) return 'on';
+  if (event.seq <= startSeq) return 'ignore';
   return event.error ? 'failed' : 'off';
 }
 
@@ -73,6 +78,7 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
   // user turned the camera off (or after a newer attempt) can't re-arm it.
   let request = 0;
   let boundGeneration = 0;
+  let startSeq = 0;
   let inFlight = 0;
   let held: Array<[CameraPublishState, (action: CameraStateAction) => void]> = [];
 
@@ -80,13 +86,11 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
     event: CameraPublishState,
     apply: (action: CameraStateAction) => void
   ): CameraStateAction | 'ignore' {
-    const action = cameraStateAction(event, boundGeneration);
+    const action = cameraStateAction(event, boundGeneration, startSeq);
     if (action === 'ignore') return action;
     boundGeneration = Math.max(boundGeneration, event.generation);
     // Native stopped it: nothing is left waiting for the connected edge. Not
-    // a request bump (`cancel`): native serializes stop and start, so a start
-    // that returns `published: true` after a held OFF is the newer truth
-    // (OFF then a quick ON).
+    // a request bump (`cancel`), which only the user's own toggle makes.
     if (action !== 'on') deferred = false;
     apply(action);
     return action;
@@ -106,6 +110,7 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
     try {
       result = await seams.startPublish();
       boundGeneration = Math.max(boundGeneration, result.generation);
+      startSeq = Math.max(startSeq, result.seq);
     } finally {
       inFlight -= 1;
       if (inFlight === 0) {
@@ -150,13 +155,14 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
       }
       return;
     }
-    // The user turned it off (or retried) while it was in flight.
-    if (id !== request) return;
+    // The user turned it off (or retried) while it was in flight, or native
+    // stopped it after this start decided (a held OFF with a newer seq).
+    if (id !== request || stopped) return;
     if (result.published === false) {
       // While connecting, native holds it for the join's commit and reports
       // the outcome as camera-publish-state: nothing to show yet. A failure
       // that already landed keeps its Retry toast.
-      if (!stopped && seams.meetingPhase() !== 'connecting') seams.onRetrying();
+      if (seams.meetingPhase() !== 'connecting') seams.onRetrying();
       return;
     }
     seams.onPublished();

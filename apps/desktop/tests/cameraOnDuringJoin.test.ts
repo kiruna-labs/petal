@@ -39,7 +39,7 @@ function rig(phase: MeetingPhase, steps: Step[]) {
 }
 
 test('a not-in-room refusal while connecting shows no toast and publishes after connect', async () => {
-  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1 }]);
+  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1, seq: 0 }]);
   await camera.publish();
   assert.deepEqual(log, ['start@connecting'], 'no toast of any kind during the join');
   assert.equal(camera.deferred, true, 'the camera intent is kept for the join');
@@ -52,7 +52,7 @@ test('a not-in-room refusal while connecting shows no toast and publishes after 
 
 test('a refusal during connection recovery is deferred the same way', async () => {
   // recoverLostConnection reports 'connecting' for the whole rejoin.
-  const { camera, log, state } = rig('connecting', ['not in room', 'not in room', { published: true, generation: 1 }]);
+  const { camera, log, state } = rig('connecting', ['not in room', 'not in room', { published: true, generation: 1, seq: 0 }]);
   await camera.publish();
   await camera.publish(); // the user clicks again mid-recovery
   assert.deepEqual(log, ['start@connecting', 'start@connecting']);
@@ -70,7 +70,7 @@ test('a refusal while connected still shows the Retry toast', async () => {
 test('a refusal at the start of a connection loss toasts and still publishes after recovery', async () => {
   // Native drops the room before room-left reaches the route, so the route
   // still reads 'connected' when the refusal lands.
-  const { camera, log, state } = rig('connected', ['not in room', { published: true, generation: 1 }]);
+  const { camera, log, state } = rig('connected', ['not in room', { published: true, generation: 1, seq: 0 }]);
   await camera.publish();
   assert.deepEqual(log, ['start@connected', 'retry-toast:not in room']);
   assert.equal(camera.deferred, true, 'the intent survives into the recovery');
@@ -107,7 +107,7 @@ test('a real failure after connect toasts and leaves nothing deferred', async ()
 });
 
 test('a refusal that lands after the meeting connected retries at once', async () => {
-  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1 }]);
+  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1, seq: 0 }]);
   const first = camera.publish();
   state.phase = 'connected'; // the connected edge passes while start is in flight
   await first;
@@ -115,7 +115,7 @@ test('a refusal that lands after the meeting connected retries at once', async (
 });
 
 test('turning the camera off drops a deferred publish', async () => {
-  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1 }]);
+  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1, seq: 0 }]);
   await camera.publish();
   camera.cancel();
   state.phase = 'connected';
@@ -124,7 +124,7 @@ test('turning the camera off drops a deferred publish', async () => {
 });
 
 test('a refusal that arrives after the camera was turned off does not re-arm it', async () => {
-  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1 }]);
+  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1, seq: 0 }]);
   const pending = camera.publish();
   camera.cancel();
   await pending;
@@ -134,10 +134,10 @@ test('a refusal that arrives after the camera was turned off does not re-arm it'
 });
 
 test('self-heal and success results report as before', async () => {
-  const healing = rig('connected', [{ published: false, generation: 1 }]);
+  const healing = rig('connected', [{ published: false, generation: 1, seq: 0 }]);
   await healing.camera.publish();
   assert.deepEqual(healing.log, ['start@connected', 'retrying-toast']);
-  const ok = rig('connecting', [{ published: true, generation: 1 }]);
+  const ok = rig('connecting', [{ published: true, generation: 1, seq: 0 }]);
   await ok.camera.publish();
   assert.deepEqual(ok.log, ['start@connecting', 'published']);
 });
@@ -183,7 +183,7 @@ test('the meeting route publishes through the join-aware controller', () => {
 // publishes it at the commit, answering `published: false`. That is not a
 // self-heal: nothing to show while the meeting is connecting.
 test('a camera native keeps for the in-flight join shows nothing while connecting', async () => {
-  const { camera, log } = rig('connecting', [{ published: false, generation: 2 }]);
+  const { camera, log } = rig('connecting', [{ published: false, generation: 2, seq: 0 }]);
   await camera.publish();
   assert.deepEqual(log, ['start@connecting']);
   assert.equal(camera.deferred, false, 'native owns it now; the connected edge does nothing');
@@ -193,7 +193,8 @@ test('camera-publish-state from an older room generation is ignored', () => {
   const at = (publishing: boolean, error: string | null, generation: number): CameraPublishState => ({
     publishing,
     error,
-    generation
+    generation,
+    seq: 1
   });
   assert.equal(cameraStateAction(at(false, null, 4), 5), 'ignore');
   assert.equal(cameraStateAction(at(false, 'x', 4), 5), 'ignore');
@@ -216,21 +217,21 @@ test('a stale OFF that lands while the start is in flight is dropped', async () 
   });
   const applied: CameraStateAction[] = [];
   const apply = (action: CameraStateAction) => applied.push(action);
-  camera.receive({ publishing: true, error: null, generation: 3 }, apply);
+  camera.receive({ publishing: true, error: null, generation: 3, seq: 1 }, apply);
   assert.deepEqual(applied, ['on'], 'nothing in flight: delivered at once');
 
   const pending = camera.publish();
   // The previous room's teardown (generation 3) lands before start returns.
-  camera.receive({ publishing: false, error: null, generation: 3 }, apply);
-  camera.receive({ publishing: false, error: 'stale heal', generation: 3 }, apply);
+  camera.receive({ publishing: false, error: null, generation: 3, seq: 3 }, apply);
+  camera.receive({ publishing: false, error: 'stale heal', generation: 3, seq: 4 }, apply);
   assert.deepEqual(applied, ['on'], 'held while the start is in flight');
-  resolveStart({ published: false, generation: 4 });
+  resolveStart({ published: false, generation: 4, seq: 2 });
   await pending;
   assert.deepEqual(applied, ['on'], 'older than the request: dropped');
 
-  camera.receive({ publishing: false, error: null, generation: 3 }, apply);
-  camera.receive({ publishing: true, error: null, generation: 4 }, apply);
-  camera.receive({ publishing: false, error: 'capture failed', generation: 4 }, apply);
+  camera.receive({ publishing: false, error: null, generation: 3, seq: 5 }, apply);
+  camera.receive({ publishing: true, error: null, generation: 4, seq: 6 }, apply);
+  camera.receive({ publishing: false, error: 'capture failed', generation: 4, seq: 7 }, apply);
   assert.deepEqual(applied, ['on', 'on', 'failed'], "the request's own outcomes still apply");
 });
 
@@ -245,8 +246,8 @@ test('an outcome for the request itself that lands mid-start is applied after it
     onFailed: () => log.push('failed')
   });
   const pending = camera.publish();
-  camera.receive({ publishing: false, error: 'no frames', generation: 7 }, (a) => log.push(a));
-  resolveStart({ published: false, generation: 7 });
+  camera.receive({ publishing: false, error: 'no frames', generation: 7, seq: 8 }, (a) => log.push(a));
+  resolveStart({ published: false, generation: 7, seq: 7 });
   await pending;
   assert.deepEqual(log, ['failed'], 'the failure stands: no "still connecting" over its Retry');
 });
@@ -265,16 +266,14 @@ test('a camera turned off while its start is in flight stays off', async () => {
   });
   const pending = camera.publish();
   camera.cancel(); // the Video toggle turned off
-  camera.receive({ publishing: false, error: null, generation: 2 }, (a) => log.push(a));
-  resolveStart({ published: true, generation: 2 });
+  // The stop waits for the control lock, so its OFF is emitted after.
+  camera.receive({ publishing: false, error: null, generation: 2, seq: 3 }, (a) => log.push(a));
+  resolveStart({ published: true, generation: 2, seq: 2 });
   await pending;
   assert.deepEqual(log, ['off']);
 });
 
-// Round-2 review: OFF then a quick ON. The stop's OFF (same generation) lands
-// while the new start is in flight; native serializes the two, so the start's
-// `published: true` is the newer truth and the toggle ends ON.
-test('a held OFF from just before the start does not discard its publish', async () => {
+function inFlightRig() {
   let resolveStart!: (result: StartCameraPublishResult) => void;
   const log: string[] = [];
   const camera = createCameraJoinPublish({
@@ -284,11 +283,37 @@ test('a held OFF from just before the start does not discard its publish', async
     onRetrying: () => log.push('retrying'),
     onFailed: () => log.push('failed')
   });
+  const off = (seq: number) =>
+    camera.receive({ publishing: false, error: null, generation: 5, seq }, (a) => log.push(a));
+  return { camera, log, off, resolve: (r: StartCameraPublishResult) => resolveStart(r) };
+}
+
+// Round-2 review: OFF then a quick ON. The stop's OFF (same generation) was
+// emitted before the start took the control lock, so its seq is not above
+// the start's: dropped, and the toggle ends ON with native publishing.
+test('an OFF emitted before the start decided never stops it', async () => {
+  const { camera, log, off, resolve } = inFlightRig();
   const pending = camera.publish();
-  camera.receive({ publishing: false, error: null, generation: 5 }, (a) => log.push(a));
-  resolveStart({ published: true, generation: 5 });
+  off(4); // the user's stop, delivered while the new start is in flight
+  resolve({ published: true, generation: 5, seq: 4 });
   await pending;
-  assert.deepEqual(log, ['off', 'published']);
+  assert.deepEqual(log, ['published']);
+  off(3); // a late copy of an older OFF, after the start returned
+  assert.deepEqual(log, ['published']);
+});
+
+// Round-3 review: another surface (the menubar) turns the camera off while
+// the route's start is still in flight. That OFF was emitted after the start
+// decided (higher seq), so it wins over `published: true`.
+test('an OFF emitted after the start decided wins over its publish', async () => {
+  const { camera, log, off, resolve } = inFlightRig();
+  const pending = camera.publish();
+  off(6);
+  resolve({ published: true, generation: 5, seq: 5 });
+  await pending;
+  assert.deepEqual(log, ['off'], 'the toggle ends OFF, matching native');
+  off(7); // and any later OFF still applies
+  assert.deepEqual(log, ['off', 'off']);
 });
 
 // PR #503 F4: the deferred camera is published at the room commit, before
