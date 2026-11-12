@@ -170,4 +170,9 @@ impl NativeVideoSource {
     pub fn video_resolution(&self) -> VideoResolution {
         self.sys_handle.video_resolution().into()
     }
+
+    /// Petal (#534): frames the C++ degenerate-size guard dropped so far.
+    pub fn degenerate_frames_dropped(&self) -> u64 {
+        self.sys_handle.degenerate_frames_dropped()
+    }
 }

@@ -175,6 +175,8 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
   // receiver holds its last good frame.
   if (adapted_width <= 0 || adapted_height <= 0 || crop_width <= 0 ||
       crop_height <= 0) {
+    // #534: per-source count Rust reads, so the drop is never "published".
+    degenerate_frames_dropped_.fetch_add(1, std::memory_order_relaxed);
     static std::atomic<uint32_t> dropped{0};
     if (dropped.fetch_add(1) % 300 == 0) {  // 1st, then every 10s at 30fps
       // Closed reason only: this line becomes a Sentry breadcrumb, and raw
@@ -213,6 +215,10 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
               .build());
 
   return true;
+}
+
+uint64_t VideoTrackSource::InternalSource::degenerate_frames_dropped() const {
+  return degenerate_frames_dropped_.load(std::memory_order_relaxed);
 }
 
 void VideoTrackSource::InternalSource::set_packet_trailer_handler(
@@ -268,6 +274,10 @@ bool VideoTrackSource::capture_dmabuf_frame(int dmabuf_fd,
 void VideoTrackSource::set_packet_trailer_handler(
     std::shared_ptr<PacketTrailerHandler> handler) const {
   source_->set_packet_trailer_handler(std::move(handler));
+}
+
+uint64_t VideoTrackSource::degenerate_frames_dropped() const {
+  return source_->degenerate_frames_dropped();
 }
 
 webrtc::scoped_refptr<VideoTrackSource::InternalSource> VideoTrackSource::get()

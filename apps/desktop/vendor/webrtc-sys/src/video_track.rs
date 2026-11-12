@@ -93,6 +93,8 @@ pub mod ffi {
             timestamp_us: i64,
             frame_metadata: &FrameMetadata,
         ) -> bool;
+        /// Petal #534: frames the degenerate-size guard dropped (Patch 9).
+        fn degenerate_frames_dropped(self: &VideoTrackSource) -> u64;
         fn set_packet_trailer_handler(
             self: &VideoTrackSource,
             handler: SharedPtr<PacketTrailerHandler>,

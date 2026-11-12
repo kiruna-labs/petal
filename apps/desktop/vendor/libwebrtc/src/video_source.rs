@@ -130,6 +130,14 @@ pub mod native {
         pub fn video_resolution(&self) -> VideoResolution {
             self.handle.video_resolution()
         }
+
+        /// Petal (#534): monotonic count of frames the source dropped because
+        /// the adapter sized them to zero (webrtc-sys Patch 8). `capture_frame`
+        /// returns `false` for those AND for ordinary adapter rejections; a
+        /// rise across one call is how a caller tells the two apart.
+        pub fn degenerate_frames_dropped(&self) -> u64 {
+            self.handle.degenerate_frames_dropped()
+        }
     }
 }
 

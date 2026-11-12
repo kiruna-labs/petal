@@ -21,6 +21,12 @@ use livekit::webrtc::prelude::*;
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 
+use super::publisher::{
+    capture_frame_counting_source_drops, degenerate_frame_diagnostic, frame_below_publishable_edge,
+    ADAPTER_MIN_EDGE,
+};
+use crate::logging::{build_sentry_diagnostic_event, DegenerateAxisTag, SentryDiagnosticEvent};
+
 const CHILD_ENV: &str = "PETAL_TINY_FRAME_RUNTIME_CHILD";
 const CHILD_TEST: &str = "tiny_frames_child_pushes_through_real_libwebrtc";
 const CHILD_BUDGET: Duration = Duration::from_secs(120);
@@ -44,6 +50,22 @@ fn capture(source: &NativeVideoSource, (width, height): (u32, u32)) -> bool {
         frame_metadata: None,
         buffer: i420(width, height),
     })
+}
+
+/// The publisher's real push helper: `Err(axis)` when the source dropped it.
+fn push_counted(
+    source: &NativeVideoSource,
+    (width, height): (u32, u32),
+) -> Result<bool, DegenerateAxisTag> {
+    capture_frame_counting_source_drops(
+        source,
+        &VideoFrame {
+            rotation: VideoRotation::VideoRotation0,
+            timestamp_us: 0,
+            frame_metadata: None,
+            buffer: i420(width, height),
+        },
+    )
 }
 
 /// Sizes of the frames the sink has received so far (delivery is synchronous).
@@ -72,6 +94,10 @@ fn tiny_frames_child_pushes_through_real_libwebrtc() {
         true,
     );
     let track = factory.create_video_track("petal-535", source.clone());
+    // #534: an ordinary adapter rejection (no sink yet) is `Ok(false)`, never
+    // a degenerate drop -- the counter is what tells the two apart.
+    assert_eq!(push_counted(&source, (2, 2)), Ok(false), "sinkless push misread as a drop");
+    assert_eq!(source.degenerate_frames_dropped(), 0);
     // The sink is what engages the adapter: with no sink `AdaptFrame`
     // returns false before any crop math, and the test would be vacuous.
     let mut stream = NativeVideoStream::new(track);
@@ -84,8 +110,38 @@ fn tiny_frames_child_pushes_through_real_libwebrtc() {
         assert!(!capture(&source, size), "{size:?} frame was accepted");
         assert_eq!(drain(&mut stream), Vec::new(), "{size:?} frame reached the sink");
     }
+    assert_eq!(
+        source.degenerate_frames_dropped(),
+        TINY.len() as u64,
+        "#534: every C++ guard drop must be visible to Rust"
+    );
 
-    assert!(capture(&source, NORMAL), "normal frame rejected after tiny frames");
+    // #534: the Rust floor normally skips these first. Push them past it, via
+    // the publisher's own capture helper, so only the C++ guard stands.
+    for size in TINY {
+        assert!(frame_below_publishable_edge(size.0, size.1, ADAPTER_MIN_EDGE), "{size:?}");
+        let before = source.degenerate_frames_dropped();
+        let axis = push_counted(&source, size).expect_err("C++ drop read as a delivered frame");
+        assert_eq!(axis, DegenerateAxisTag::Adapter, "{size:?}");
+        assert_eq!(source.degenerate_frames_dropped(), before + 1, "{size:?}");
+        assert_eq!(drain(&mut stream), Vec::new(), "{size:?} frame reached the sink");
+        let event = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::DegenerateFrameSkipped(degenerate_frame_diagnostic(
+                size, NORMAL, axis,
+            )),
+            "1",
+        );
+        assert_eq!(event.tags.get("degenerate_axis").map(String::as_str), Some("adapter"));
+        assert!(
+            event.message.as_deref().is_some_and(|m| m.starts_with("diagnostic: degenerate-frame-skipped ")),
+            "{:?}",
+            event.message
+        );
+    }
+
+    let dropped = source.degenerate_frames_dropped();
+    assert_eq!(push_counted(&source, NORMAL), Ok(true), "normal frame rejected after tiny frames");
+    assert_eq!(source.degenerate_frames_dropped(), dropped, "a delivered frame bumped the counter");
     assert_eq!(drain(&mut stream), vec![NORMAL], "pipeline wedged after tiny frames");
     println!("issue535: child survived every tiny frame");
 }
