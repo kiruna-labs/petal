@@ -48,6 +48,10 @@ for (const [name, type] of [['chromium', chromium], ['webkit', webkit]] as Array
   test(`chat history scrolls with the mouse wheel (${name})`, { timeout: 240_000 }, async () => {
     const buildDir = await mkdtemp(join(tmpdir(), 'petal-chat-wheel-'));
     const browser = await type.launch({ headless: true });
+    // Headless WebKit wedges with the screen locked: a pending call never settles, `finally` never ran, and the
+    // whole test process hung past this test's timeout. Closing the browser rejects the pending call.
+    // 180 s leaves the close (measured 15-35 s on a wedged WebKit) inside the 240 s test timeout.
+    const deadline = setTimeout(() => browser.close().catch(() => {}), 180_000);
     let server: Server | undefined;
     try {
       await build({
@@ -106,6 +110,7 @@ for (const [name, type] of [['chromium', chromium], ['webkit', webkit]] as Array
         await page.close();
       }
     } finally {
+      clearTimeout(deadline);
       await browser.close();
       await new Promise<void>((ok) => (server ? server.close(() => ok()) : ok()));
       await rm(buildDir, { recursive: true, force: true });
