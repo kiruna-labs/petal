@@ -17,7 +17,7 @@
 //! cargo run --example token_probe -- --expiry-secs 60 --seconds 120   # Q4
 //! ```
 //! Flags:
-//!   --model <id>        Live model (default models/gemini-3.1-flash-live-preview)
+//!   --model <id>        Live model (default models/gemini-3.8-live)
 //!   --expiry-secs N     token expireTime = now + N (default 720 = 12 min)
 //!   --seconds N         how long to hold the WS open after setup (default 25)
 //!   --new-session-secs N  newSessionExpireTime = now + N (default 60)

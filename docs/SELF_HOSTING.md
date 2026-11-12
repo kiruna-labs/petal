@@ -121,12 +121,12 @@ Audio never proxies through the backend, and the key never reaches a client.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | to enable AI chat | Gemini Developer API key from Google AI Studio. Server-side only — never a `VITE_*` or client variable. |
-| `GEMINI_LIVE_MODEL` | no | Live model id to mint against. Defaults to `models/gemini-3.1-flash-live-preview`. |
+| `GEMINI_LIVE_MODEL` | no | Live model id to mint against. Defaults to `models/gemini-3.8-live`. |
 | `GEMINI_API_VERSION` | no | Overrides the Gemini API version used for minting. Leave unset unless Google moves the endpoint. |
 
 ```dotenv
 GEMINI_API_KEY=your-gemini-developer-api-key
-GEMINI_LIVE_MODEL=models/gemini-3.1-flash-live-preview
+GEMINI_LIVE_MODEL=models/gemini-3.8-live
 ```
 
 **Leaving `GEMINI_API_KEY` unset is the supported way to run without AI

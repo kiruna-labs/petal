@@ -32,7 +32,7 @@ import type { GoogleGenAI, LiveConnectConfig, Modality } from '@google/genai';
 // Preview Live models get renamed/retired on short notice, so the id is env-
 // driven and echoed back in the response: rotating it is `vercel env` + a
 // redeploy, never a client release (#655/#656).
-export const DEFAULT_GEMINI_LIVE_MODEL = 'models/gemini-3.1-flash-live-preview';
+export const DEFAULT_GEMINI_LIVE_MODEL = 'models/gemini-3.8-live';
 
 // One use, one session, one short window. These are the only server-side cost
 // bounds that survive a modified client, so keep them tight.
