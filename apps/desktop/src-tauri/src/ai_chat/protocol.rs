@@ -24,7 +24,7 @@ use serde::Deserialize;
 /// Default Live model for BYOK / the spike. Hosted mode does NOT use this — it
 /// takes the `model` field returned by `/api/ai-token` (#655/#656) so a
 /// preview-model rename is a backend env change, not a client release.
-pub const DEFAULT_MODEL_ID: &str = "models/gemini-3.1-flash-live-preview";
+pub const DEFAULT_MODEL_ID: &str = "models/gemini-3.8-live";
 
 /// System instruction for the meeting context. Adapted from takt's single-user
 /// wording: multiple participants address the model via push-to-talk, each
@@ -76,10 +76,15 @@ pub fn setup_message_with_tools(model_id: &str, enable_tools: bool) -> String {
 /// an enumerated key set (no arbitrary chords), and bounded scrolling. The
 /// model must not be ABLE to express a dangerous action, rather than merely
 /// being asked not to.
+///
+/// Every declaration is `BLOCKING`: gemini-3.8-live defaults to NON_BLOCKING
+/// calls, and these permission-gated actions need the model to wait for the
+/// toolResponse rather than talk past a pending or refused action (#561).
 fn tool_declarations() -> serde_json::Value {
     serde_json::json!([{
         "functionDeclarations": [{
             "name": "window_type",
+            "behavior": "BLOCKING",
             "description": "Type exact text into the shared window's currently focused, non-secure input.",
             "parameters": {
                 "type": "object",
@@ -90,6 +95,7 @@ fn tool_declarations() -> serde_json::Value {
             }
         }, {
             "name": "window_click",
+            "behavior": "BLOCKING",
             "description": "Click the visible accessibility element identified by its accessibility snapshot generation and index.",
             "parameters": {
                 "type": "object",
@@ -101,6 +107,7 @@ fn tool_declarations() -> serde_json::Value {
             }
         }, {
             "name": "window_press_key",
+            "behavior": "BLOCKING",
             "description": "Press one safe navigation key; arbitrary chords are not supported.",
             "parameters": {
                 "type": "object",
@@ -111,6 +118,7 @@ fn tool_declarations() -> serde_json::Value {
             }
         }, {
             "name": "window_scroll",
+            "behavior": "BLOCKING",
             "description": "Scroll a small bounded amount in the shared window.",
             "parameters": {
                 "type": "object",
@@ -737,6 +745,28 @@ mod tests {
             .unwrap();
         assert!(instruction.contains("permission-gated"), "{instruction}");
         assert!(instruction.contains("never retry a refused action"));
+    }
+
+    #[test]
+    fn default_model_is_the_supported_live_model() {
+        // gemini-3.1-flash-live-preview shuts down 2026-11-17 (#561); the
+        // backend default (backend/lib/gemini.ts) must move in lockstep.
+        assert_eq!(DEFAULT_MODEL_ID, "models/gemini-3.8-live");
+    }
+
+    #[test]
+    fn every_tool_is_declared_blocking() {
+        // 3.8-live defaults function calls to NON_BLOCKING; permission-gated
+        // window control needs the model to wait for the toolResponse (#561).
+        let v: serde_json::Value =
+            serde_json::from_str(&setup_message_with_tools(DEFAULT_MODEL_ID, true)).unwrap();
+        let decls = v["setup"]["tools"][0]["functionDeclarations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(decls.len(), 4);
+        for d in decls {
+            assert_eq!(d["behavior"], "BLOCKING", "{}", d["name"]);
+        }
     }
 
     #[test]

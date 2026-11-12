@@ -97,7 +97,7 @@ route always answers inside `vercel.json`'s `maxDuration: 10`.
 | Env var | Required | Purpose |
 |---|---|---|
 | `GEMINI_API_KEY` | to enable AI chat | Gemini Developer API key. **Unset = global kill switch:** every call returns `503 {"error":"AI chat is not configured"}`. |
-| `GEMINI_LIVE_MODEL` | no | Model id to mint against; defaults to `models/gemini-3.1-flash-live-preview`. |
+| `GEMINI_LIVE_MODEL` | no | Model id to mint against; defaults to `models/gemini-3.8-live`. |
 | `GEMINI_API_VERSION` | no | Overrides the Gemini API version used for minting. |
 
 The response's `model` field is authoritative — **clients must use it rather

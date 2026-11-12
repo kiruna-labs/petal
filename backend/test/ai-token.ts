@@ -448,6 +448,12 @@ async function main() {
     });
   });
 
+  await test('the pinned default is gemini-3.8-live, not the retired 3.1 preview (#561)', () => {
+    // gemini-3.1-flash-live-preview shuts down 2026-11-17; the desktop BYOK
+    // default (ai_chat/protocol.rs DEFAULT_MODEL_ID) must move in lockstep.
+    assert.equal(DEFAULT_GEMINI_LIVE_MODEL, 'models/gemini-3.8-live');
+  });
+
   await test('a blank GEMINI_LIVE_MODEL falls back to the pinned default', async () => {
     await withGeminiModel('   ', async () => {
       const response = await handleAiToken(
