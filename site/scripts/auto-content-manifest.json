@@ -3,12 +3,12 @@
 		"self-hosting": {
 			"source": "docs/SELF_HOSTING.md",
 			"dest": "site/src/content/docs/customizing/self-hosting.md",
-			"sha256": "bc3d1149f0c8fe3b8cc4c24141898c2beebbf6229b1ae015dd73966494c13f21"
+			"sha256": "a6441f3be60e786a4f7ada770fecbcf74e848eaa5252c4849b193317a67a8f98"
 		},
 		"backend-api": {
 			"source": "backend/README.md",
 			"dest": "site/src/content/docs/customizing/backend-api.md",
-			"sha256": "db2f0749e95146965104685d666b60f35efe39d97a12aab19c6d654e476ae0ef"
+			"sha256": "9e21304f351d1141a42b1f095b1c7b6cfe898d9e354f9f196556afe61174284a"
 		},
 		"web-harness-fragment": {
 			"source": "web-harness/README.md",
