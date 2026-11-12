@@ -2239,6 +2239,7 @@ pub(crate) fn window_has_active_controller(window_id: u32) -> bool {
 /// name and treats multiple simultaneous grants conservatively.
 /// #371: controllers holding any grant on this host. Read from the grant
 /// table on every probe tick, so every revoke path stops the pings.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn granted_controller_identities() -> HashSet<String> {
     sessions()
         .lock_unpoisoned()
@@ -25269,6 +25270,7 @@ mod tests {
     /// Drives the real grant install and revoke, which every revoke path
     /// funnels through; the probe re-reads the grant table each tick.
     #[test]
+    #[cfg(target_os = "macos")] // latency_probe is macOS-only
     fn latency_probe_targets_a_controller_only_while_its_grant_is_active() {
         let ids = remote_control_test_ids(
             "latency_probe_targets_a_controller_only_while_its_grant_is_active",

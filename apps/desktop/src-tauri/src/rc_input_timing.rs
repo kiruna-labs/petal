@@ -460,6 +460,8 @@ pub(crate) fn controller_result(message: &RemoteControlMessage, result_recv_ms: 
 }
 
 /// Host: a latency-probe answer from a controller that holds a grant.
+/// The probe is macOS-only, so a Windows host has no offset and no leg yet.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn record_controller_clock(peer: &str, offset_us: i64, rtt_ms: f64) {
     lock(clock_windows()).record(peer, offset_us, rtt_ms, now_ms());
 }
