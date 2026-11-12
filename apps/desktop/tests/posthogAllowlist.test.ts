@@ -99,6 +99,7 @@ test('allowlist documents the latency-summary exception and every stage', () => 
   for (const key of [
     ...schema.stages,
     ...schema.counters,
+    ...schema.maxCounters,
     ...Object.keys(schema.dimensions),
     ...schema.alwaysPresent,
     ...schema.roles

@@ -6,8 +6,11 @@
 //! `probeId`/`sendTimeMs` plus receiver-side timestamps, and the original
 //! sender computes RTT plus an NTP-style peer clock-offset estimate on its
 //! own clock when the pong returns.
+//!
+//! #371: besides the cockpit, a host pings every controller holding a grant,
+//! so the controller->host input leg has a fresh clock offset.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -247,6 +250,15 @@ pub fn start_receiver_for_room(
                     peer_identity,
                 }) => {
                     if let Some(offset_us) = peer_to_local_clock_offset_us {
+                        if crate::remote_control::granted_controller_identities()
+                            .contains(&peer_identity)
+                        {
+                            crate::rc_input_timing::record_controller_clock(
+                                &peer_identity,
+                                offset_us,
+                                rtt_ms,
+                            );
+                        }
                         diagnostics.record_peer_clock_offset(
                             peer_identity.clone(),
                             offset_us,
@@ -281,14 +293,13 @@ fn start_ping_sender(
                 log::debug!("latency-probe: ping sender exiting for stale room generation");
                 break;
             }
-            if !diagnostics.is_cockpit_open() {
-                continue;
-            }
-            let peer_identities = room
-                .remote_participants()
-                .keys()
-                .map(|identity| identity.to_string())
-                .collect::<Vec<_>>();
+            let peer_identities = ping_targets(
+                diagnostics.is_cockpit_open(),
+                room.remote_participants()
+                    .keys()
+                    .map(|identity| identity.to_string()),
+                &crate::remote_control::granted_controller_identities(),
+            );
             for peer_identity in peer_identities {
                 let send_time_ms = now_ms();
                 let probe_id = next_probe_id(send_time_ms);
@@ -318,6 +329,19 @@ fn start_ping_sender(
             }
         }
     });
+}
+
+/// Every peer while the cockpit is open; otherwise only present peers that
+/// hold a remote-control grant on this host (#371), none once it ends.
+pub(crate) fn ping_targets(
+    cockpit_open: bool,
+    present_peers: impl IntoIterator<Item = String>,
+    granted_controllers: &HashSet<String>,
+) -> Vec<String> {
+    present_peers
+        .into_iter()
+        .filter(|peer| cockpit_open || granted_controllers.contains(peer))
+        .collect()
 }
 
 async fn publish_probe(

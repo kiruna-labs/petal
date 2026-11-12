@@ -7,18 +7,121 @@
 //!   discrete ops ([`PendingRtt`]); same clock on both ends, no offset needed.
 //! - host `input_excess_delay_ms` / `input_stall_count` over consecutive
 //!   ordered inputs ([`StallDetector`]); clock-free, compares gaps only.
+//! - host `input_leg_ms` / `input_leg_lossy_ms` = socket receive minus
+//!   offset-corrected `sentAtMs`, with the offset from the grant-gated
+//!   latency probe ([`ClockWindows`]); `offset_err_ms` qualifies them.
 //! - the controller session lifecycle ([`ControllerTargets`]) that decides
 //!   when the controller aggregator has an active session.
 //!
 //! Identities live only in these in-memory keys; nothing here is emitted.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::rc_latency_telemetry::{self, Counter, RcRole, Stage};
-use crate::remote_control_core::{ControllerStatusEffect, RemoteControlMessage, RemoteControlType};
+use crate::diagnostics::CLOCK_OFFSET_STALE_MS;
+use crate::rc_latency_telemetry::{self, Counter, MaxCounter, RcRole, Stage};
+use crate::remote_control_core::{
+    rides_lossy_transport, ControllerStatusEffect, RemoteControlMessage, RemoteControlType,
+};
 use crate::remote_control_redundant::rides_redundant_stream;
+use crate::time_util::now_ms;
+
+/// When a remote-control packet came off the data channel, taken before
+/// parse and auth so host queueing is not folded into the network leg.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SocketReceive {
+    pub(crate) at: Instant,
+    pub(crate) wall_ms: u64,
+}
+
+impl SocketReceive {
+    pub(crate) fn now() -> Self {
+        Self {
+            at: Instant::now(),
+            wall_ms: now_ms(),
+        }
+    }
+}
+
+/// Probe samples kept per controller; the offset comes from the lowest-RTT one.
+pub(crate) const CLOCK_WINDOW_SAMPLES: usize = 16;
+/// A controller with no probe answer for this long is forgotten entirely.
+const CLOCK_WINDOW_RETAIN_MS: u64 = 60_000;
+
+#[derive(Debug, Clone, Copy)]
+struct ClockSample {
+    /// `host_clock - controller_clock`, as `latency_probe` estimates it.
+    controller_to_host_offset_us: i64,
+    rtt_ms: f64,
+    at_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ClockEstimate {
+    pub(crate) offset_ms: f64,
+    /// NTP bound: half the selected sample's round trip.
+    pub(crate) err_ms: f64,
+}
+
+/// Rolling per-controller window of latency-probe offset samples (#371).
+#[derive(Debug, Default)]
+pub(crate) struct ClockWindows {
+    peers: HashMap<String, VecDeque<ClockSample>>,
+}
+
+impl ClockWindows {
+    pub(crate) fn record(&mut self, peer: &str, offset_us: i64, rtt_ms: f64, now_ms: u64) {
+        if !rtt_ms.is_finite() || rtt_ms < 0.0 {
+            return;
+        }
+        self.peers.retain(|_, window| {
+            window
+                .back()
+                .is_some_and(|newest| now_ms.saturating_sub(newest.at_ms) <= CLOCK_WINDOW_RETAIN_MS)
+        });
+        let window = self.peers.entry(peer.to_string()).or_default();
+        if window.len() >= CLOCK_WINDOW_SAMPLES {
+            window.pop_front();
+        }
+        window.push_back(ClockSample {
+            controller_to_host_offset_us: offset_us,
+            rtt_ms,
+            at_ms: now_ms,
+        });
+    }
+
+    /// `None` once the newest probe answer is older than the diagnostics
+    /// staleness rule: the probe stopped, so the offset may have drifted.
+    pub(crate) fn estimate(&self, peer: &str, now_ms: u64) -> Option<ClockEstimate> {
+        let window = self.peers.get(peer)?;
+        let newest = window.back()?;
+        if now_ms.saturating_sub(newest.at_ms) > CLOCK_OFFSET_STALE_MS {
+            return None;
+        }
+        let best = window
+            .iter()
+            .min_by(|a, b| a.rtt_ms.total_cmp(&b.rtt_ms))?;
+        Some(ClockEstimate {
+            offset_ms: best.controller_to_host_offset_us as f64 / 1000.0,
+            err_ms: best.rtt_ms / 2.0,
+        })
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.peers.clear();
+    }
+}
+
+/// `receive - (sentAtMs + offset)` on the host clock. A negative leg inside
+/// the offset error is 0; beyond it (a clock step) there is no sample.
+pub(crate) fn input_leg_ms(sent_at_ms: u64, received_wall_ms: u64, clock: ClockEstimate) -> Option<f64> {
+    let leg = received_wall_ms as f64 - (sent_at_ms as f64 + clock.offset_ms);
+    if !leg.is_finite() || leg < -clock.err_ms {
+        return None;
+    }
+    Some(leg.max(0.0))
+}
 
 /// One host share this controller holds a grant on. Keyed by the
 /// LiveKit-verified host identity: window ids are host-local, so the window
@@ -213,6 +316,13 @@ pub(crate) struct StallDetector {
 }
 
 impl StallDetector {
+    /// A redundant copy (or older) of the last scored input on this stream.
+    fn is_repeat(&self, controller_id: &str, window_id: u32, seq: u64, sent_at_ms: u64) -> bool {
+        self.last
+            .get(&(controller_id.to_string(), window_id))
+            .is_some_and(|previous| seq <= previous.seq && sent_at_ms <= previous.sent_at_ms)
+    }
+
     pub(crate) fn observe(
         &mut self,
         controller_id: &str,
@@ -266,6 +376,11 @@ fn pending_rtt() -> &'static Mutex<PendingRtt> {
 fn stall_detector() -> &'static Mutex<StallDetector> {
     static DETECTOR: OnceLock<Mutex<StallDetector>> = OnceLock::new();
     DETECTOR.get_or_init(Default::default)
+}
+
+fn clock_windows() -> &'static Mutex<ClockWindows> {
+    static WINDOWS: OnceLock<Mutex<ClockWindows>> = OnceLock::new();
+    WINDOWS.get_or_init(Default::default)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -336,13 +451,32 @@ pub(crate) fn controller_result(message: &RemoteControlMessage, result_recv_ms: 
     }
 }
 
-/// Host: one authorized controller input arrived. Hover moves are lossy
-/// latest-wins and never ordered behind anything, so they are not scored.
-pub(crate) fn host_input(message: &RemoteControlMessage, received_at: Instant) {
+/// Host: a latency-probe answer from a controller that holds a grant.
+pub(crate) fn record_controller_clock(peer: &str, offset_us: i64, rtt_ms: f64) {
+    lock(clock_windows()).record(peer, offset_us, rtt_ms, now_ms());
+}
+
+/// Host: one authorized controller input arrived. `seq_accepted` is the
+/// lossy-stream watermark verdict, so a stale or repeated hover move is not
+/// a leg sample. Hover moves are never ordered behind anything, so they are
+/// not stall-scored.
+pub(crate) fn host_input(message: &RemoteControlMessage, received: SocketReceive, seq_accepted: bool) {
     let Some(sent_at_ms) = message.sent_at_ms else {
         return;
     };
-    if !rides_redundant_stream(message) {
+    let lossy = rides_lossy_transport(message);
+    let ordered = rides_redundant_stream(message);
+    let repeat = ordered
+        && lock(stall_detector()).is_repeat(
+            &message.controller_id,
+            message.window_id,
+            message.seq,
+            sent_at_ms,
+        );
+    if seq_accepted && !repeat {
+        host_leg(&message.controller_id, sent_at_ms, received.wall_ms, lossy);
+    }
+    if !ordered {
         return;
     }
     let sample = lock(stall_detector()).observe(
@@ -350,7 +484,7 @@ pub(crate) fn host_input(message: &RemoteControlMessage, received_at: Instant) {
         message.window_id,
         message.seq,
         sent_at_ms,
-        received_at,
+        received.at,
     );
     if let Some(sample) = sample {
         rc_latency_telemetry::record_stage(
@@ -364,10 +498,53 @@ pub(crate) fn host_input(message: &RemoteControlMessage, received_at: Instant) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LegSample {
+    pub(crate) stage: Stage,
+    pub(crate) leg_ms: f64,
+    pub(crate) offset_err_ms: u64,
+}
+
+/// The one-way sample for one input, tagged by transport, or `None` without
+/// a fresh offset for this controller.
+pub(crate) fn leg_sample(
+    windows: &ClockWindows,
+    controller_id: &str,
+    sent_at_ms: u64,
+    received_wall_ms: u64,
+    lossy: bool,
+) -> Option<LegSample> {
+    let clock = windows.estimate(controller_id, received_wall_ms)?;
+    Some(LegSample {
+        stage: if lossy {
+            Stage::InputLegLossyMs
+        } else {
+            Stage::InputLegMs
+        },
+        leg_ms: input_leg_ms(sent_at_ms, received_wall_ms, clock)?,
+        offset_err_ms: clock.err_ms.ceil() as u64,
+    })
+}
+
+fn host_leg(controller_id: &str, sent_at_ms: u64, received_wall_ms: u64, lossy: bool) {
+    let sample = leg_sample(
+        &lock(clock_windows()),
+        controller_id,
+        sent_at_ms,
+        received_wall_ms,
+        lossy,
+    );
+    if let Some(sample) = sample {
+        rc_latency_telemetry::record_stage(RcRole::Host, sample.stage, sample.leg_ms);
+        rc_latency_telemetry::raise_max(RcRole::Host, MaxCounter::OffsetErrMs, sample.offset_err_ms);
+    }
+}
+
 /// Host: all control revoked (policy off or room left). Controller state is
 /// not touched here; [`sync_controller`] ends it once the windows are gone.
 pub(crate) fn clear_host_state() {
     lock(stall_detector()).clear();
+    lock(clock_windows()).clear();
 }
 
 #[cfg(test)]
@@ -407,6 +584,77 @@ mod tests {
             window_id,
             share_instance_id: share.map(str::to_string),
         }
+    }
+
+    /// Offset from the minimum-RTT sample of the last 16; err = min_rtt / 2.
+    #[test]
+    fn clock_offset_comes_from_the_minimum_rtt_sample_of_the_window() {
+        let mut windows = ClockWindows::default();
+        assert_eq!(windows.estimate("c", 1_000), None, "no probe yet");
+        windows.record("c", 40_000, 30.0, 1_000);
+        windows.record("c", 25_000, 8.0, 3_000);
+        windows.record("c", 60_000, 50.0, 5_000);
+        windows.record("c", 0, f64::NAN, 5_500);
+        assert_eq!(
+            windows.estimate("c", 6_000),
+            Some(ClockEstimate {
+                offset_ms: 25.0,
+                err_ms: 4.0
+            })
+        );
+        assert_eq!(windows.estimate("other", 6_000), None, "per controller");
+        // 16 newer, slower samples push the 8 ms one out of the window.
+        for index in 0..CLOCK_WINDOW_SAMPLES as u64 {
+            windows.record("c", 30_000 + index as i64, 12.0 + index as f64, 7_000 + index);
+        }
+        assert_eq!(
+            windows.estimate("c", 7_100),
+            Some(ClockEstimate {
+                offset_ms: 30.0,
+                err_ms: 6.0
+            })
+        );
+    }
+
+    /// Same staleness rule as diagnostics: 10 s after the newest answer.
+    #[test]
+    fn a_stale_offset_gives_no_leg_sample() {
+        let mut windows = ClockWindows::default();
+        windows.record("c", -25_000_000, 10.0, 1_000);
+        let fresh = leg_sample(&windows, "c", 2_000, 1_000 + CLOCK_OFFSET_STALE_MS, false);
+        assert!(fresh.is_some(), "exactly 10 s old is still fresh");
+        assert_eq!(
+            leg_sample(&windows, "c", 2_000, 1_001 + CLOCK_OFFSET_STALE_MS, false),
+            None
+        );
+        windows.record("c", -25_000_000, 10.0, 20_000);
+        assert!(leg_sample(&windows, "c", 21_000, 20_500, true).is_some(), "a new answer revives it");
+        windows.clear();
+        assert_eq!(leg_sample(&windows, "c", 21_000, 20_500, true), None);
+    }
+
+    #[test]
+    fn one_way_leg_math_with_a_synthetic_offset_and_transport_tag() {
+        // Host clock is 25 s behind the controller's; the input took 30 ms.
+        let mut windows = ClockWindows::default();
+        windows.record("c", -25_000_000, 9.0, 100_000);
+        let sent_on_controller = 125_000;
+        let received_on_host = 100_030;
+        assert_eq!(
+            leg_sample(&windows, "c", sent_on_controller, received_on_host, false),
+            Some(LegSample {
+                stage: Stage::InputLegMs,
+                leg_ms: 30.0,
+                offset_err_ms: 5
+            })
+        );
+        assert_eq!(
+            leg_sample(&windows, "c", sent_on_controller, received_on_host, true).map(|s| s.stage),
+            Some(Stage::InputLegLossyMs)
+        );
+        let clock = windows.estimate("c", 100_000).unwrap();
+        assert_eq!(input_leg_ms(125_000, 99_997, clock), Some(0.0), "within err: 0");
+        assert_eq!(input_leg_ms(125_000, 99_990, clock), None, "beyond err: clock step");
     }
 
     #[test]
