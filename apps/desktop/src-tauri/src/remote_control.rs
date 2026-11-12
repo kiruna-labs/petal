@@ -4854,15 +4854,14 @@ fn send_discrete_result_from_state(
     );
 }
 
-/// `received`: the socket-receive stamp (#371); `None` for input released
-/// by the gap timer, whose original receive time is not retained.
+/// `received`: when this packet came off the data channel (#371).
 fn handle_message(
     app: &AppHandle,
     state: &SessionState,
     local_identity: &str,
     trusted_sender: Option<String>,
     message: RemoteControlMessage,
-    received: Option<rc_input_timing::SocketReceive>,
+    received: rc_input_timing::SocketReceive,
 ) {
     if message.v != VERSION {
         if should_log_message(message.message_type, message.action, message.seq) {
@@ -5295,7 +5294,7 @@ fn handle_message(
                 unreliable_seq_accepted,
                 accessibility_trusted,
             };
-            if let Some(received) = received.filter(|_| remote_control_allowed && authorized) {
+            if remote_control_allowed && authorized {
                 rc_input_timing::host_input(&message, received, unreliable_seq_accepted);
             }
             let mut action =
@@ -5833,16 +5832,8 @@ fn handle_input_bundle(
 ) {
     let _fence = input_bundle_delivery_fence().lock_unpoisoned();
     let window_id = bundle.window_id;
-    let output = remote_control_engine().accept_input_bundle(sender, bundle, Instant::now());
-    deliver_sequenced_inputs(
-        app,
-        local_identity,
-        sender,
-        window_id,
-        output,
-        generation,
-        Some(received),
-    );
+    let output = remote_control_engine().accept_input_bundle(sender, bundle, received.at);
+    deliver_sequenced_inputs(app, local_identity, sender, window_id, output, generation, received);
 }
 
 /// Held input to release before a sequenced batch runs: a skipped input may
@@ -5861,7 +5852,8 @@ fn releases_for_sequencer_gap(
     drain_pressed_for_sequencer_gap(window_id, sender, resume)
 }
 
-/// Caller holds `input_bundle_delivery_fence`.
+/// Caller holds `input_bundle_delivery_fence`. `now` re-anchors each input's
+/// own accept instant (`output.received_at`) to a wall-clock stamp (#371).
 fn deliver_sequenced_inputs(
     app: &AppHandle,
     local_identity: &str,
@@ -5869,7 +5861,7 @@ fn deliver_sequenced_inputs(
     window_id: u32,
     output: SequencerOutput,
     generation: &RoomGeneration,
-    received: Option<rc_input_timing::SocketReceive>,
+    now: rc_input_timing::SocketReceive,
 ) {
     if output.stale_stream {
         log::debug!("remote-control: dropping input bundle from a retired stream of '{sender}'");
@@ -5894,14 +5886,14 @@ fn deliver_sequenced_inputs(
         );
     }
     if let Some(state) = app.try_state::<SessionState>() {
-        for message in output.deliver {
+        for (message, received_at) in output.deliver.into_iter().zip(output.received_at) {
             handle_message(
                 app,
                 state.inner(),
                 local_identity,
                 Some(sender.to_string()),
                 message,
-                received,
+                now.rewound_to(received_at),
             );
         }
     }
@@ -5916,17 +5908,9 @@ fn deliver_sequenced_inputs(
                 return;
             }
             let _fence = input_bundle_delivery_fence().lock_unpoisoned();
-            let output =
-                remote_control_engine().flush_input_bundle_gap(&sender, window_id, Instant::now());
-            deliver_sequenced_inputs(
-                &app,
-                &local_identity,
-                &sender,
-                window_id,
-                output,
-                &generation,
-                None,
-            );
+            let now = rc_input_timing::SocketReceive::now();
+            let output = remote_control_engine().flush_input_bundle_gap(&sender, window_id, now.at);
+            deliver_sequenced_inputs(&app, &local_identity, &sender, window_id, output, &generation, now);
         });
     }
 }
@@ -6031,7 +6015,7 @@ pub fn start_receiver_for_room(
                             &local_identity,
                             trusted_sender,
                             message,
-                            Some(received),
+                            received,
                         );
                     }
                 }

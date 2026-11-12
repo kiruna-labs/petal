@@ -42,6 +42,16 @@ impl SocketReceive {
             wall_ms: now_ms(),
         }
     }
+
+    /// The same stamp moved back to an earlier receive instant (an input the
+    /// sequencer held), keeping the wall clock in step with the monotonic one.
+    pub(crate) fn rewound_to(self, at: Instant) -> Self {
+        let back_ms = self.at.saturating_duration_since(at).as_millis() as u64;
+        Self {
+            at: at.min(self.at),
+            wall_ms: self.wall_ms.saturating_sub(back_ms),
+        }
+    }
 }
 
 /// Probe samples kept per controller; the offset comes from the lowest-RTT one.
@@ -91,16 +101,14 @@ impl ClockWindows {
         });
     }
 
-    /// `None` once the newest probe answer is older than the diagnostics
-    /// staleness rule: the probe stopped, so the offset may have drifted.
+    /// Lowest-RTT sample among those within the diagnostics staleness rule;
+    /// `None` when every answer is older (the probe stopped, offsets drift).
     pub(crate) fn estimate(&self, peer: &str, now_ms: u64) -> Option<ClockEstimate> {
-        let window = self.peers.get(peer)?;
-        let newest = window.back()?;
-        if now_ms.saturating_sub(newest.at_ms) > CLOCK_OFFSET_STALE_MS {
-            return None;
-        }
-        let best = window
+        let best = self
+            .peers
+            .get(peer)?
             .iter()
+            .filter(|sample| now_ms.saturating_sub(sample.at_ms) <= CLOCK_OFFSET_STALE_MS)
             .min_by(|a, b| a.rtt_ms.total_cmp(&b.rtt_ms))?;
         Some(ClockEstimate {
             offset_ms: best.controller_to_host_offset_us as f64 / 1000.0,
@@ -535,8 +543,13 @@ fn host_leg(controller_id: &str, sent_at_ms: u64, received_wall_ms: u64, lossy: 
         lossy,
     );
     if let Some(sample) = sample {
-        rc_latency_telemetry::record_stage(RcRole::Host, sample.stage, sample.leg_ms);
-        rc_latency_telemetry::raise_max(RcRole::Host, MaxCounter::OffsetErrMs, sample.offset_err_ms);
+        rc_latency_telemetry::record_stage_with_max(
+            RcRole::Host,
+            sample.stage,
+            sample.leg_ms,
+            MaxCounter::OffsetErrMs,
+            sample.offset_err_ms,
+        );
     }
 }
 
@@ -547,11 +560,12 @@ pub(crate) fn clear_host_state() {
     lock(clock_windows()).clear();
 }
 
+/// Controller state only: host clock/stall state is shared with
+/// `remote_control`'s host-input tests, which run in parallel.
 #[cfg(test)]
 fn clear_all() {
     lock(controller_targets()).clear();
     lock(pending_rtt()).clear();
-    clear_host_state();
 }
 
 #[cfg(test)]
@@ -614,6 +628,17 @@ mod tests {
                 err_ms: 6.0
             })
         );
+        // The best sample ages out after 10 s even while newer ones arrive.
+        windows.record("c", 90_000, 40.0, 7_000 + CLOCK_OFFSET_STALE_MS + 1);
+        assert_eq!(
+            windows.estimate("c", 7_000 + CLOCK_OFFSET_STALE_MS + 1).map(|e| e.offset_ms),
+            Some(30.001)
+        );
+        assert_eq!(
+            windows.estimate("c", 7_015 + CLOCK_OFFSET_STALE_MS + 1).map(|e| e.offset_ms),
+            Some(90.0),
+            "only the fresh sample is left"
+        );
     }
 
     /// Same staleness rule as diagnostics: 10 s after the newest answer.
@@ -631,6 +656,19 @@ mod tests {
         assert!(leg_sample(&windows, "c", 21_000, 20_500, true).is_some(), "a new answer revives it");
         windows.clear();
         assert_eq!(leg_sample(&windows, "c", 21_000, 20_500, true), None);
+    }
+
+    #[test]
+    fn a_held_input_is_rewound_to_its_own_receive_time() {
+        let t0 = Instant::now();
+        let reference = SocketReceive {
+            at: t0 + Duration::from_millis(80),
+            wall_ms: 10_080,
+        };
+        let held = reference.rewound_to(t0);
+        assert_eq!(held.at, t0);
+        assert_eq!(held.wall_ms, 10_000);
+        assert_eq!(reference.rewound_to(reference.at + Duration::from_secs(1)).wall_ms, 10_080);
     }
 
     #[test]

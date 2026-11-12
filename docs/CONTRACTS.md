@@ -909,10 +909,12 @@ Timing fields (#371), additive and optional:
   `receive - (sentAtMs + offset)` on its own clock, stamped when the packet
   comes off the data channel (before parse and auth): `input_leg_ms` for
   ordered inputs, `input_leg_lossy_ms` for hover moves (`unreliable_seq_stream`
-  pointer moves). The offset comes from the minimum-RTT sample of the last 16
-  latency-probe answers from that controller, and `offset_err_ms` is half that
-  RTT. No sample when the newest answer is over 10 s old (the diagnostics
-  staleness rule), and a hover move the seq watermark rejects adds none.
+  pointer moves). An input the sequencer held behind a gap keeps its own
+  receive time. The offset comes from the minimum-RTT sample among the last
+  16 latency-probe answers from that controller that are at most 10 s old
+  (the diagnostics staleness rule); with none, there is no sample.
+  `offset_err_ms` is half that RTT. A hover move the seq watermark rejects
+  adds no sample.
 - Old peers ignore both fields (no envelope uses `deny_unknown_fields`), and a
   malformed value is dropped rather than rejecting the packet. The binary
   hot-path frame does not carry `sentAtMs` yet.

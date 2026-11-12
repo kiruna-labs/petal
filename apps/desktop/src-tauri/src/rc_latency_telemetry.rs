@@ -5,7 +5,7 @@
 //! `remoteControlLatencySummary`). What lands with its first producer, not
 //! here: the TS mirror (#375), the Sentry degraded diagnostic (#371/#376).
 //!
-//! Producers call only [`record_stage`], [`add_counter`], [`raise_max`] and
+//! Producers call only [`record_stage`], [`record_stage_with_max`], [`add_counter`] and
 //! [`set_dimension`]. The owner
 //! calls [`sync`] on a timer with the current "is control active" truth.
 //! Each interval with samples becomes one `remote_control_latency_summary`
@@ -445,10 +445,14 @@ impl Aggregator {
         });
     }
 
-    pub(crate) fn raise_max(&self, counter: MaxCounter, value: u64) {
+    /// A stage sample and the max counter qualifying it, under one lock so
+    /// neither lands in an interval without the other.
+    pub(crate) fn record_stage_with_max(&self, stage: Stage, ms: f64, counter: MaxCounter, value: u64) {
         self.with_session_nonblocking(|session| {
-            let slot = &mut session.max_counters[counter.index()];
-            *slot = Some(slot.map_or(value, |current| current.max(value)));
+            if session.stages[stage.index()].record(ms) {
+                let slot = &mut session.max_counters[counter.index()];
+                *slot = Some(slot.map_or(value, |current| current.max(value)));
+            }
         });
     }
 
@@ -521,10 +525,9 @@ pub(crate) fn add_counter(role: RcRole, counter: Counter, delta: u64) {
     aggregator(role).add_counter(counter, delta);
 }
 
-/// Raise a max-per-interval value for `role`'s active session. Same
-/// non-blocking, dropped-without-a-session rules as [`record_stage`].
-pub(crate) fn raise_max(role: RcRole, counter: MaxCounter, value: u64) {
-    aggregator(role).raise_max(counter, value);
+/// [`record_stage`] plus the max-per-interval value that qualifies it.
+pub(crate) fn record_stage_with_max(role: RcRole, stage: Stage, ms: f64, counter: MaxCounter, value: u64) {
+    aggregator(role).record_stage_with_max(stage, ms, counter, value);
 }
 
 /// Set a closed-value dimension for the rest of `role`'s session.
@@ -867,31 +870,33 @@ mod tests {
         assert_eq!(last.stages.len(), 1, "the n = 1 stage rides along");
     }
 
-    /// #371: `offset_err_ms` keeps the interval max, renders 0, resets per
-    /// interval, and never makes an interval or a final partial emit alone.
+    /// #371: `offset_err_ms` is recorded only with the leg it qualifies,
+    /// keeps the interval max, renders 0, resets per interval, and does not
+    /// count toward the final partial's n >= 5 rule.
     #[test]
-    fn max_counters_keep_the_interval_max_but_never_emit_alone() {
+    fn max_counters_ride_with_their_stage_and_keep_the_interval_max() {
         let aggregator = Aggregator::new(RcRole::Host);
         let mut now = Instant::now();
         aggregator.sync_at(true, now);
-        aggregator.raise_max(MaxCounter::OffsetErrMs, 0);
+        let leg = |ms: f64, err: u64| {
+            aggregator.record_stage_with_max(Stage::InputLegMs, ms, MaxCounter::OffsetErrMs, err)
+        };
+        leg(-1.0, 50);
         now += EMIT_INTERVAL;
-        assert!(aggregator.sync_at(true, now).is_none(), "a max counter alone is not data");
-        aggregator.record_stage(Stage::InputLegMs, 20.0);
-        for value in [3, 9, 4] {
-            aggregator.raise_max(MaxCounter::OffsetErrMs, value);
+        assert!(aggregator.sync_at(true, now).is_none(), "a rejected leg sets no max");
+        for (ms, err) in [(20.0, 3), (21.0, 9), (22.0, 4)] {
+            leg(ms, err);
         }
         now += EMIT_INTERVAL;
         let summary = aggregator.sync_at(true, now).unwrap();
         assert_eq!(summary.max_counters, [(MaxCounter::OffsetErrMs, 9)]);
-        assert!(summary.log_line().contains(" input_leg_ms_n=1 offset_err_ms=9"));
-        aggregator.record_stage(Stage::InputLegLossyMs, 20.0);
-        aggregator.raise_max(MaxCounter::OffsetErrMs, 0);
+        assert!(summary.log_line().contains(" input_leg_ms_n=3 offset_err_ms=9"));
+        leg(20.0, 0);
         now += EMIT_INTERVAL;
         let next = aggregator.sync_at(true, now).unwrap();
         assert_eq!(next.max_counters, [(MaxCounter::OffsetErrMs, 0)], "reset, then 0 is sent");
-        aggregator.raise_max(MaxCounter::OffsetErrMs, 7);
-        assert!(aggregator.sync_at(false, now).is_none(), "nor is a max-only final");
+        leg(20.0, 7);
+        assert!(aggregator.sync_at(false, now).is_none(), "n = 1 final: the max does not rescue it");
     }
 
     #[test]
