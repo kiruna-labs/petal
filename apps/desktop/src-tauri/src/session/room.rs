@@ -883,9 +883,9 @@ pub async fn join_room(
         room_generation.clone(),
     );
 
-    // Data-channel RTT probe for the network cockpit. This is intentionally
-    // peer-to-peer data-channel RTT only, gated by the cockpit-open flag in
-    // diagnostics so a closed cockpit burns no probe bandwidth.
+    // Data-channel RTT probe: peer-to-peer data-channel RTT only. Pings run
+    // while the cockpit is open, and otherwise only toward controllers that
+    // hold a remote-control grant (#371, the input-leg clock offset).
     if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
         crate::latency_probe::start_receiver_for_room(
             app,
