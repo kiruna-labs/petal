@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import {
   HIDDEN_MEETING_LABEL,
   LIVE_MEETING_LABEL,
+  STREAM_CLEARTEXT_URL_HINT,
   STREAM_CPU_HINT,
   STREAM_CPU_LOAD_HINT,
   STREAM_MISSING_ENCODERS_HINT,
@@ -27,7 +28,8 @@ import {
   streamIsDownscaled,
   streamPreviewLine,
   streamStatusLine,
-  streamStatusTitle
+  streamStatusTitle,
+  streamUrlIsCleartext
 } from '../src/lib/data/liveStream.ts';
 import {
   CUSTOM_STREAM_SERVICE_ID,
@@ -291,4 +293,17 @@ test('service lookup', () => {
     assert.equal(streamServiceForUrl(url)?.id, 'youtube', url);
   }
   assert.equal(streamServiceForUrl('rtmp://notyoutube.com/live2'), undefined);
+});
+
+test('plain rtmp:// is flagged as sending the key unencrypted (#487)', () => {
+  assert.ok(streamUrlIsCleartext('rtmp://live.example.com/app'));
+  assert.ok(streamUrlIsCleartext('  RTMP://live.example.com/app'));
+  assert.ok(!streamUrlIsCleartext('rtmps://live.example.com/app'));
+  assert.ok(!streamUrlIsCleartext(''));
+  assert.ok(!streamUrlIsCleartext('rtmpx://live.example.com'));
+  for (const service of STREAM_SERVICES) {
+    assert.ok(!streamUrlIsCleartext(service.serverUrl), `${service.name}'s preset is encrypted`);
+  }
+  assert.match(STREAM_CLEARTEXT_URL_HINT, /rtmp:\/\//);
+  assert.match(STREAM_CLEARTEXT_URL_HINT, /rtmps:\/\//);
 });

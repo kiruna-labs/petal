@@ -63,6 +63,16 @@ export const STREAM_NO_AUDIO_OUTPUT_HINT =
   'This computer has no audio output device, so other people in the meeting won’t be heard on ' +
   'the stream. Connect speakers or headphones to include them.';
 
+/** Plain RTMP sends the stream key, like everything else, unencrypted. */
+export const STREAM_CLEARTEXT_URL_HINT =
+  'This server URL starts with rtmp://, so your stream key is sent unencrypted. ' +
+  'Use an rtmps:// URL if the service offers one.';
+
+/** Whether `serverUrl` is plain (unencrypted) RTMP. */
+export function streamUrlIsCleartext(serverUrl: string): boolean {
+  return /^rtmp:\/\//i.test(serverUrl.trim());
+}
+
 /**
  * The go-live dialog's hints about this computer: how (or whether) it can encode, and whether
  * the meeting's audio can reach the stream.

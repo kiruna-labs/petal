@@ -24,11 +24,13 @@
     type StreamResolution
   } from '#lib/ipc.js';
   import {
+    STREAM_CLEARTEXT_URL_HINT,
     parseMaxBitrateMbps,
     streamClientCanGoLive,
     streamClientHints,
     streamIsDownscaled,
-    streamPreviewLine
+    streamPreviewLine,
+    streamUrlIsCleartext
   } from '#lib/data/liveStream.js';
   import { streamerMode, watchStreamerMode } from '#lib/stores/streamerMode.svelte.js';
   import {
@@ -75,6 +77,12 @@
     usingNew
       ? service
       : streamServiceForUrl(destinations.find((d) => d.id === destinationId)?.serverUrl ?? '')
+  );
+  // The key goes out with the URL: warn when that's in the clear.
+  const cleartext = $derived(
+    streamUrlIsCleartext(
+      usingNew ? serverUrl : (destinations.find((d) => d.id === destinationId)?.serverUrl ?? '')
+    )
   );
   const canGoLive = $derived(
     !busy &&
@@ -238,6 +246,9 @@
           <button type="button" class="link" onclick={deleteDestination}>Delete</button>
         {/if}
       </div>
+      {#if !usingNew && cleartext}
+        <p class="hint warning" role="note">{STREAM_CLEARTEXT_URL_HINT}</p>
+      {/if}
       {#if usingNew}
         <label>
           Service
@@ -260,6 +271,9 @@
             spellcheck="false"
           />
         </label>
+        {#if cleartext}
+          <p class="hint warning" role="note">{STREAM_CLEARTEXT_URL_HINT}</p>
+        {/if}
         {#if service.hint}
           <p class="hint">{service.hint}</p>
         {/if}
@@ -475,6 +489,12 @@
     margin: 0;
     color: var(--text-dim);
     font-size: var(--text-caption);
+  }
+  .hint.warning {
+    padding: 8px 10px;
+    border-radius: var(--radius-control);
+    background: var(--warning-bg);
+    color: var(--warning);
   }
   .preview {
     margin: 0;
