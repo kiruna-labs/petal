@@ -17,8 +17,11 @@
 //!   LUID, which the tap learns from the first frames) and opens the pool
 //!   with `OpenSharedResource1` (`windows_encode::Converter::upload_texture`).
 //!   Until it has, frames take the CPU path.
-//! * The pool is rebuilt when the frame size changes and released with the
-//!   capture session (docs/WINDOWS_MEDIA_LIFECYCLE.md). If the adapters
+//! * The pool is rebuilt when the frame size changes, and released as soon
+//!   as the share stops feeding the encoder: the stream stopped, moved to
+//!   another share, or the encoder stopped taking GPU frames (#487: it used
+//!   to live until the capture session ended, holding [`POOL_DEPTH`]
+//!   full-size BGRA textures after Stop). If the adapters
 //!   differ, or a shared texture can't be created or opened, the stream
 //!   falls back to the CPU copy and says so once in the log.
 
@@ -113,6 +116,15 @@ struct SharedSlot {
     handle: isize,
 }
 
+impl Drop for SharedSlot {
+    // Per slot, so a pool that fails half-built closes the handles it made.
+    fn drop(&mut self) {
+        // SAFETY: the handle came from CreateSharedHandle and is closed
+        // exactly once, here.
+        let _ = unsafe { CloseHandle(HANDLE(self.handle as *mut core::ffi::c_void)) };
+    }
+}
+
 /// The pool on the capture device. Dropping it closes the NT handles;
 /// textures the encoder already opened stay valid on its side.
 pub struct SharedPool {
@@ -121,16 +133,6 @@ pub struct SharedPool {
     luid: Option<i64>,
     slots: Vec<SharedSlot>,
     states: SlotStates,
-}
-
-impl Drop for SharedPool {
-    fn drop(&mut self) {
-        for slot in &self.slots {
-            // SAFETY: each handle came from CreateSharedHandle and is closed
-            // exactly once, here.
-            let _ = unsafe { CloseHandle(HANDLE(slot.handle as *mut core::ffi::c_void)) };
-        }
-    }
 }
 
 impl SharedPool {
@@ -260,7 +262,11 @@ impl Producer {
         size: (u32, u32),
         excludes_petal: bool,
     ) {
-        let Some(tap) = super::tap::gpu_target(token) else { return };
+        let Some(tap) = super::tap::gpu_target(token) else {
+            // Not streaming this share (any more): let the pool go now.
+            self.pool = None;
+            return;
+        };
         let luid = *self.luid.get_or_insert_with(|| adapter_luid(device));
         if let Some(luid) = luid {
             tap.note_capture_adapter(luid);
@@ -268,7 +274,10 @@ impl Producer {
         if self.disabled {
             return;
         }
-        let Some(encoder) = tap.gpu_encoder_adapter() else { return };
+        let Some(encoder) = tap.gpu_encoder_adapter() else {
+            self.pool = None;
+            return;
+        };
         if luid != Some(encoder) {
             return self.fall_back(&tap, "the capture and encoder devices are on different adapters");
         }
@@ -288,6 +297,20 @@ impl Producer {
             Ok(true) => super::tap::offer_gpu_frame(&tap, token, self.window_target || excludes_petal, frame),
             Ok(false) => {}
             Err(error) => self.fall_back(&tap, &error),
+        }
+    }
+
+    /// Whether this capture holds a texture pool.
+    pub fn holds_pool(&self) -> bool {
+        self.pool.is_some()
+    }
+
+    /// Between frames (the capture thread's idle wake-up): drop the pool once
+    /// share `token` no longer feeds GPU frames to a stream, so a static
+    /// share that sends no more frames doesn't keep it after Stop.
+    pub fn release_if_idle(&mut self, token: u32) {
+        if self.pool.is_some() && super::tap::gpu_target(token).and_then(|tap| tap.gpu_encoder_adapter()).is_none() {
+            self.pool = None;
         }
     }
 
@@ -347,6 +370,108 @@ mod tests {
         states.release(0);
         states.release(POOL_DEPTH + 4);
         assert_eq!(states.in_use(), 1);
+    }
+
+    /// A WARP device (no GPU needed), when it can make the pool's shared
+    /// textures.
+    fn warp_device() -> Option<(ID3D11Device, ID3D11DeviceContext)> {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+        };
+        let (mut device, mut context) = (None, None);
+        // SAFETY: valid out-params.
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .ok()?;
+        Some((device?, context?))
+    }
+
+    /// A 64x32 BGRA texture on `device`, standing in for a captured frame.
+    fn source_texture(device: &ID3D11Device) -> ID3D11Resource {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: 64,
+            Height: 32,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            ..Default::default()
+        };
+        let mut texture = None;
+        // SAFETY: desc is fully initialized; no initial data.
+        unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }.unwrap();
+        texture.unwrap().cast().unwrap()
+    }
+
+    /// #487 (Windows memory after Stop): once its share isn't streaming, the
+    /// capture thread's next frame, or its idle wake-up, releases the pool
+    /// instead of keeping it for the rest of the capture session; a frame
+    /// still held downstream keeps it only until that lets go.
+    #[test]
+    fn the_pool_is_released_once_the_share_stops_streaming() {
+        let _guard = super::super::tap::test_lock();
+        super::super::tap::stop();
+        let Some((device, context)) = warp_device() else {
+            eprintln!("skipped: no WARP device");
+            return;
+        };
+        let new_pool = || match SharedPool::new(&device, (64, 32)) {
+            Ok(pool) => Some(Arc::new(pool)),
+            Err(error) => {
+                eprintln!("skipped: WARP can't share textures here: {error}");
+                None
+            }
+        };
+        let Some(pool) = new_pool() else { return };
+        let source = source_texture(&device);
+        let released = Arc::downgrade(&pool);
+        let mut producer = Producer { pool: Some(pool), ..Producer::default() };
+        // Live on another share: this one's next frame lets its pool go.
+        let live = super::super::tap::start(9);
+        producer.offer(7, &device, &context, &source, (64, 32), true);
+        assert!(released.upgrade().is_none(), "released while another share streams");
+        assert!(!producer.holds_pool());
+
+        // After Stop, with no further frame: the idle wake-up lets it go, but
+        // a frame still leased downstream keeps the pool until it drops.
+        let pool = new_pool().unwrap();
+        let released = Arc::downgrade(&pool);
+        let index = pool.states.acquire().unwrap();
+        let leased = GpuFrame { pool: pool.clone(), index };
+        producer.pool = Some(pool);
+        drop(live);
+        super::super::tap::stop();
+        producer.release_if_idle(7);
+        assert!(!producer.holds_pool());
+        assert!(released.upgrade().is_some(), "the leased frame still holds it");
+        drop(leased);
+        assert!(released.upgrade().is_none(), "released after Stop");
+
+        // A share still streaming GPU frames keeps its pool.
+        let pool = new_pool().unwrap();
+        let tap = super::super::tap::start(7);
+        tap.accept_gpu(42);
+        producer.pool = Some(pool);
+        producer.release_if_idle(7);
+        assert!(producer.holds_pool(), "kept while the encoder takes GPU frames");
+        super::super::tap::stop();
+        producer.release_if_idle(7);
+        assert!(!producer.holds_pool());
     }
 
     /// The lease side, on a real GPU: a frame holds its slot until the last

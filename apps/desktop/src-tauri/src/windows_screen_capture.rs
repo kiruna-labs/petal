@@ -65,6 +65,9 @@ const CAPTURE_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const BORDERLESS_ACCESS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Periodic arrival/delivery cadence log while the pump loop is idle.
 const CAPTURE_HEALTH_INTERVAL: Duration = Duration::from_secs(5);
+/// While a capture holds the live stream's GPU texture pool, how often it
+/// wakes without a frame to check the stream still wants it.
+const GPU_TAP_IDLE_CHECK: Duration = Duration::from_secs(1);
 #[cfg(any(test, debug_assertions))]
 const TEST_CAPTURE_STOP_AFTER_MS_ENV: &str = "PETAL_TEST_WINDOWS_CAPTURE_STOP_AFTER_MS";
 #[cfg(any(test, debug_assertions))]
@@ -732,7 +735,8 @@ struct CaptureSetup {
     closed_token: i64,
     arrival_token: i64,
     /// The live stream's GPU frame tap for this capture (idle unless this
-    /// share is the one streaming); its texture pool goes with the session.
+    /// share is the one streaming); its texture pool goes once the share
+    /// stops feeding a stream.
     gpu_tap: crate::streaming::gpu_tap::Producer,
 }
 
@@ -1018,6 +1022,10 @@ fn run_pump_loop(
             }
             let wait_timeout = if setup.region.is_some() {
                 crate::region_window::REGION_GEOMETRY_INTERVAL
+            } else if setup.gpu_tap.holds_pool() {
+                // A static share sends no frames after Stop: wake up to let
+                // the stream's texture pool go (#487).
+                GPU_TAP_IDLE_CHECK
             } else {
                 CAPTURE_HEALTH_INTERVAL
             };
@@ -1029,6 +1037,9 @@ fn run_pump_loop(
                 }
             };
             guard = next_guard;
+            if timed_out && setup.gpu_tap.holds_pool() {
+                setup.gpu_tap.release_if_idle(token);
+            }
             if timed_out && setup.region.is_some() {
                 // A region share must poll selector geometry even when the
                 // pinned owning display is static: WGC delivers no frames
