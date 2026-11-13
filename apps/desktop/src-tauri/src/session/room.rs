@@ -635,7 +635,16 @@ pub async fn join_room(
 
     // Joined to a DIFFERENT room -- leave it first (a process is a member of
     // at most one room at a time in this model).
-    cleanup_left_room(app, state, true, "room_switch", false, false).await;
+    cleanup_left_room(
+        app,
+        state,
+        true,
+        "room_switch",
+        false,
+        false,
+        Some(&room_record.id),
+    )
+    .await;
 
     // `can_subscribe: true` -- telepointers (SPEC.md §4.5) need this process
     // to *receive* other participants' cursor data-channel messages on this
@@ -943,6 +952,9 @@ pub async fn join_room(
         identity.clone(),
         room_generation.clone(),
     );
+    // #360: windows held across this rejoin now have a short grace to be
+    // re-bound by the feed's `TrackSubscribed`; the rest are torn down.
+    crate::compositor::rejoin_feed_started(app, &room_record.id);
 
     // Network/system diagnostics (issue #19 Phase A): stats poller +
     // event journal, exactly once per room connection -- same seam as the
@@ -1309,7 +1321,7 @@ fn spawn_local_publish_reconcile(app: &tauri::AppHandle, room_id: String) {
 /// unpublishes audio and closes the LiveKit room connection. Idempotent:
 /// leaving when not currently joined to anything is a clean no-op.
 pub async fn leave_room(app: &tauri::AppHandle, state: &SessionState) {
-    cleanup_left_room(app, state, true, "leave_room", false, true).await;
+    cleanup_left_room(app, state, true, "leave_room", false, true, None).await;
 }
 
 /// Cleanup shared by explicit leaves and forced LiveKit disconnects.
@@ -1322,7 +1334,16 @@ pub(crate) async fn cleanup_for_forced_disconnect(
     state: &SessionState,
     connection_lost: bool,
 ) {
-    cleanup_left_room(app, state, false, "forced_disconnect", connection_lost, false).await;
+    cleanup_left_room(
+        app,
+        state,
+        false,
+        "forced_disconnect",
+        connection_lost,
+        false,
+        None,
+    )
+    .await;
 }
 
 async fn cleanup_left_room(
@@ -1332,6 +1353,8 @@ async fn cleanup_left_room(
     reason: &str,
     connection_lost: bool,
     user_leave: bool,
+    // #360: the room a join is about to enter (room_switch only).
+    joining_room_id: Option<&str>,
 ) {
     crate::hover_tab::cancel_drag_for_lifecycle();
     crate::remote_control::revoke_all(app);
@@ -1349,6 +1372,14 @@ async fn cleanup_left_room(
         crate::ai_chat::room_auth::forget();
     }
     state.invalidate_room_generation();
+    let left_room = {
+        let guard = state.inner.lock_unpoisoned();
+        guard
+            .joined
+            .as_ref()
+            .map(|joined| (joined.room_record.id.clone(), joined.room_record.name.clone()))
+    };
+    let left_room_id = left_room.as_ref().map(|(id, _)| id.clone());
 
     // Snapshot the user's camera intent BEFORE tearing anything down, so a
     // rejoin of the SAME room can reconcile it back to what the user wanted
@@ -1359,14 +1390,7 @@ async fn cleanup_left_room(
     // snapshotted (#170): leaving stops them and rejoining must not resume
     // them.
     {
-        let room_id = {
-            let guard = state.inner.lock_unpoisoned();
-            guard
-                .joined
-                .as_ref()
-                .map(|joined| joined.room_record.id.clone())
-        };
-        if let Some(room_id) = room_id {
+        if let Some(room_id) = left_room_id.clone() {
             let camera_on = state.camera_intent();
             log::info!("session: {reason} recording publish carryover (camera_on={camera_on})");
             state.record_leave_publish_carryover(room_id, camera_on);
@@ -1426,7 +1450,36 @@ async fn cleanup_left_room(
     // participant disconnect events back to `compositor.rs`'s own state, so
     // this has to be done explicitly rather than relying on
     // `subscriber::start_compositor_feed`'s event loop to notice.
-    crate::compositor::remove_all_windows(app);
+    //
+    // #360: except across an automatic rejoin -- see `remote_window_exit`.
+    match remote_window_exit(
+        connection_lost,
+        user_leave,
+        left_room_id.as_deref(),
+        joining_room_id,
+        |room_id| crate::compositor::rejoin_hold_active_for(room_id),
+    ) {
+        RemoteWindowExit::HoldForRejoin(room_id) => {
+            let room = crate::compositor::RejoinRoom {
+                name: left_room
+                    .as_ref()
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_default(),
+                id: room_id,
+                // Already invalidated above: only a LATER feed may re-bind.
+                generation: state.current_room_generation().value(),
+            };
+            crate::compositor::hold_all_windows_for_rejoin(app, &room);
+        }
+        RemoteWindowExit::KeepRejoinHold => {
+            crate::compositor::remove_all_windows_except_rejoin_held(app);
+        }
+        RemoteWindowExit::RemoveAll => crate::compositor::remove_all_windows(app),
+    }
+    // The left room's publication records are meaningless now; clear them
+    // here rather than when its feed task notices the stale generation, by
+    // which time the rejoined feed may already have registered its own.
+    crate::transport::subscriber::forget_all_window_publications();
     // Petal View selectors are meeting-scoped too: close them so no hollow
     // window outlives the session (each close stops its share + unregisters).
     crate::region_window::close_all_region_windows(app).await;
@@ -1499,6 +1552,43 @@ async fn cleanup_left_room(
     }
 }
 
+/// #360: what leaving a room does to the remote windows it was rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemoteWindowExit {
+    /// The connection was lost and the meeting route will rejoin `room`:
+    /// hold every window on its last frame, with a deadline.
+    HoldForRejoin(String),
+    /// A join of the room a rejoin hold is for: leave the held windows for
+    /// the new feed to re-bind.
+    KeepRejoinHold,
+    /// A Leave, a deliberate end, or a different room: tear everything down
+    /// (which also ends any rejoin hold).
+    RemoveAll,
+}
+
+pub(crate) fn remote_window_exit(
+    connection_lost: bool,
+    user_leave: bool,
+    left_room_id: Option<&str>,
+    joining_room_id: Option<&str>,
+    rejoin_hold_active_for: impl Fn(&str) -> bool,
+) -> RemoteWindowExit {
+    if user_leave {
+        return RemoteWindowExit::RemoveAll;
+    }
+    if connection_lost {
+        if let Some(room_id) = left_room_id {
+            return RemoteWindowExit::HoldForRejoin(room_id.to_string());
+        }
+    }
+    match (left_room_id, joining_room_id) {
+        (None, Some(joining)) if rejoin_hold_active_for(joining) => {
+            RemoteWindowExit::KeepRejoinHold
+        }
+        _ => RemoteWindowExit::RemoveAll,
+    }
+}
+
 /// Payload of the `room-left` event (see `leave_room`).
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1532,6 +1622,94 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    /// #360: which leaves hold remote windows across a rejoin. A lost
+    /// connection holds; the rejoin's own room_switch cleanup keeps that hold;
+    /// a Leave, a deliberate end, or another room tears everything down.
+    #[test]
+    fn remote_window_exit_holds_only_across_an_automatic_rejoin() {
+        use super::{remote_window_exit, RemoteWindowExit};
+        let held = |room: &str| room == "room-a";
+        let none = |_: &str| false;
+        // forced disconnect, rejoinable
+        assert_eq!(
+            remote_window_exit(true, false, Some("room-a"), None, none),
+            RemoteWindowExit::HoldForRejoin("room-a".into())
+        );
+        // forced disconnect, deliberate end (removed, server shutdown, ...)
+        assert_eq!(
+            remote_window_exit(false, false, Some("room-a"), None, none),
+            RemoteWindowExit::RemoveAll
+        );
+        // the rejoin's join_room -> room_switch cleanup (nothing joined)
+        assert_eq!(
+            remote_window_exit(false, false, None, Some("room-a"), held),
+            RemoteWindowExit::KeepRejoinHold
+        );
+        // joining a different room while a hold is running
+        assert_eq!(
+            remote_window_exit(false, false, None, Some("room-b"), held),
+            RemoteWindowExit::RemoveAll
+        );
+        // a real room switch out of a joined room
+        assert_eq!(
+            remote_window_exit(false, false, Some("room-c"), Some("room-a"), held),
+            RemoteWindowExit::RemoveAll
+        );
+        // Leave from any surface, even mid-rejoin
+        assert_eq!(
+            remote_window_exit(false, true, None, None, held),
+            RemoteWindowExit::RemoveAll
+        );
+        assert_eq!(
+            remote_window_exit(true, true, Some("room-a"), None, held),
+            RemoteWindowExit::RemoveAll
+        );
+    }
+
+    /// #360 wiring: the real teardown seam routes through the decision above,
+    /// the rejoin's feed start shortens the hold, and the room_switch cleanup
+    /// names the room it is joining. (No tauri::test harness drives
+    /// `cleanup_left_room`/`join_room` themselves; the compositor tests drive
+    /// the lifecycle functions these call.)
+    #[test]
+    fn issue_360_leave_and_join_paths_are_wired_to_the_rejoin_hold() {
+        let source = include_str!("room.rs");
+        let cleanup = source
+            .split_once("async fn cleanup_left_room(")
+            .and_then(|(_, rest)| rest.split_once("pub(crate) enum RemoteWindowExit"))
+            .map(|(body, _)| body)
+            .expect("cleanup_left_room precedes RemoteWindowExit");
+        assert!(cleanup.contains("match remote_window_exit("));
+        assert!(cleanup.contains("crate::compositor::hold_all_windows_for_rejoin(app, &room);"));
+        assert!(cleanup.contains("generation: state.current_room_generation().value(),"));
+        assert!(cleanup.contains(
+"RemoteWindowExit::HoldForRejoin(room_id) => {"
+        ));
+        assert_eq!(
+            cleanup.matches("crate::compositor::remove_all_windows(app)").count(),
+            1,
+            "remove_all_windows must only run in the RemoveAll arm"
+        );
+        assert!(cleanup.contains(
+            "RemoteWindowExit::RemoveAll => crate::compositor::remove_all_windows(app),"
+        ));
+        assert!(cleanup.contains("crate::transport::subscriber::forget_all_window_publications();"));
+
+        let join = source
+            .split_once("pub async fn join_room(")
+            .and_then(|(_, rest)| rest.split_once("pub async fn leave_room("))
+            .map(|(body, _)| body)
+            .expect("join_room precedes leave_room");
+        let feed = join
+            .find("crate::transport::subscriber::start_compositor_feed(")
+            .expect("join starts the feed");
+        let rebind = join
+            .find("crate::compositor::rejoin_feed_started(app, &room_record.id);")
+            .expect("join shortens the rejoin hold once its feed runs");
+        assert!(feed < rebind);
+        assert!(join.contains("\"room_switch\",\n        false,\n        false,\n        Some(&room_record.id),"));
+    }
 
     #[test]
     fn room_left_event_tells_a_lost_connection_from_a_user_leave() {

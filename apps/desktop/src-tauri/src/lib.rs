@@ -1177,6 +1177,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             compositor::compositor_list_windows,
             #[cfg(target_os = "macos")]
+            compositor::compositor_release_rejoin_hold,
+            #[cfg(target_os = "macos")]
             compositor::compositor_window_debug_stats,
             #[cfg(target_os = "macos")]
             compositor::compositor_toggle_debug_panel,

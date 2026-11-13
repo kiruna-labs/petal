@@ -310,6 +310,12 @@ export async function leaveRoom(): Promise<void> {
   return invoke<void>(COMMANDS.leaveRoom);
 }
 
+/** #360: the automatic rejoin of `roomName` gave up -- remove the remote
+ * windows native held on their last frame across it. Room-scoped natively. */
+export async function releaseRejoinHold(roomName: string): Promise<number> {
+  return invoke<number>(COMMANDS.compositorReleaseRejoinHold, { roomName });
+}
+
 /** The real durable room name this process is currently joined to, if any. */
 export async function currentRoom(): Promise<string | null> {
   return invoke<string | null>(COMMANDS.currentRoom);

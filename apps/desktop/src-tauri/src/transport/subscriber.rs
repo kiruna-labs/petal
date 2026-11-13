@@ -879,8 +879,39 @@ fn forget_window_publications_for(owner_identity: &str) {
 
 /// Drop every recorded publication. Used at feed teardown and on a room
 /// disconnect, where no record from this generation is meaningful afterwards.
-fn forget_all_window_publications() {
+pub(crate) fn forget_all_window_publications() {
     window_publications().lock_unpoisoned().clear();
+}
+
+/// #360: bumped by every macOS compositor feed start. A feed exiting for a
+/// stale generation (it notices only on its next 5s tick) must not wipe the
+/// registry a newer feed -- an automatic rejoin's -- has already populated:
+/// that would untrack a window re-bound across the rejoin, and an untracked
+/// window is one no remover can reach.
+#[cfg(target_os = "macos")]
+static COMPOSITOR_FEED_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether a feed exiting with `own_epoch` still owns the shared registry.
+#[cfg(any(target_os = "macos", test))]
+fn feed_exit_owns_registry(own_epoch: u64, current_epoch: u64) -> bool {
+    own_epoch == current_epoch
+}
+
+/// Clear the registry only if no newer feed has started, deciding under the
+/// registry lock: a newer feed bumps the epoch before it can register
+/// anything, so it either sees its epoch already bumped (no clear) or its
+/// entries land after this clear.
+#[cfg(target_os = "macos")]
+fn forget_all_window_publications_if_feed_current(own_epoch: u64) -> bool {
+    let mut publications = window_publications().lock_unpoisoned();
+    let owns = feed_exit_owns_registry(
+        own_epoch,
+        COMPOSITOR_FEED_EPOCH.load(std::sync::atomic::Ordering::SeqCst),
+    );
+    if owns {
+        publications.clear();
+    }
+    owns
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1048,6 +1079,9 @@ pub(crate) fn start_compositor_feed(
     let window_states = Arc::new(Mutex::new(
         HashMap::<ReceiveWindowKey, ReceiveWindowState>::new(),
     ));
+    let feed_epoch = COMPOSITOR_FEED_EPOCH
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .wrapping_add(1);
 
     tauri::async_runtime::spawn(async move {
         let mut watchdog = tokio::time::interval(NO_FRAME_WATCHDOG_INTERVAL);
@@ -1214,12 +1248,25 @@ pub(crate) fn start_compositor_feed(
                             cancel_token.clone(),
                         ),
                     );
-                    crate::compositor::set_window_media_paused(
-                        &app,
+                    // #360: a window held across an automatic rejoin is
+                    // re-bound here: the registry entry written above tracks
+                    // it again, so the rejoin hold lets go and the
+                    // `already_open` republish path below reuses the window.
+                    // A re-bound window keeps its paused label until its
+                    // first new frame clears the hold (`push_frame`).
+                    let rebound_after_rejoin = crate::compositor::claim_rejoin_hold(
                         &owner_identity,
                         window_id,
-                        false,
+                        generation.value(),
                     );
+                    if !rebound_after_rejoin {
+                        crate::compositor::set_window_media_paused(
+                            &app,
+                            &owner_identity,
+                            window_id,
+                            false,
+                        );
+                    }
                     crate::diagnostics::record_native_video_stream_state(
                         &app,
                         &owner_identity,
@@ -2464,7 +2511,13 @@ pub(crate) fn start_compositor_feed(
             }
         }
         cancel_all_window_states(&window_states);
-        forget_all_window_publications();
+        if forget_all_window_publications_if_feed_current(feed_epoch) {
+            log::debug!("compositor feed: exiting; cleared its publication registry");
+        } else {
+            log::info!(
+                "compositor feed: stale feed exiting after a newer feed started; leaving its publication registry intact (#360)"
+            );
+        }
     });
 }
 
@@ -5544,6 +5597,47 @@ mod tests {
                 .is_none(),
             "misses must stay flat (absent) once the republished subscription is receiving"
         );
+    }
+
+    /// #360: a stale feed (it only notices the invalidated generation on its
+    /// next 5s tick) must not wipe a newer feed's registry -- that would
+    /// untrack a window the rejoin just re-bound.
+    #[test]
+    fn issue_360_stale_feed_exit_leaves_a_newer_feeds_registry_alone() {
+        assert!(feed_exit_owns_registry(7, 7));
+        assert!(!feed_exit_owns_registry(7, 8));
+        let source = include_str!("subscriber.rs");
+        let mac_feed = source
+            .split_once("#[cfg(target_os = \"macos\")]\npub(crate) fn start_compositor_feed(")
+            .and_then(|(_, rest)| rest.split_once("fn cancel_all_window_states("))
+            .map(|(body, _)| body)
+            .expect("macOS feed precedes cancel_all_window_states");
+        assert!(mac_feed.contains("if forget_all_window_publications_if_feed_current(feed_epoch) {"));
+        let guard = source
+            .split_once("fn forget_all_window_publications_if_feed_current(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("guarded clear exists");
+        let lock = guard.find("window_publications().lock_unpoisoned()").expect("locks first");
+        let check = guard.find("COMPOSITOR_FEED_EPOCH.load(").expect("checks the epoch");
+        assert!(lock < check, "the epoch must be read under the registry lock");
+        let feed_start = mac_feed
+            .find("COMPOSITOR_FEED_EPOCH\n        .fetch_add(")
+            .expect("a feed bumps the epoch");
+        let spawn = mac_feed.find("tauri::async_runtime::spawn(").expect("feed task");
+        assert!(feed_start < spawn, "the bump precedes any registration by the feed task");
+        // The TrackSubscribed arm re-binds a held window: it registers the
+        // publication, claims the hold, then takes the already-open path.
+        let register = mac_feed
+            .find("register_and_request_shared_window_subscription(")
+            .expect("arm registers the publication");
+        let claim = mac_feed
+            .find("crate::compositor::claim_rejoin_hold(\n                        &owner_identity,\n                        window_id,\n                        generation.value(),")
+            .expect("arm claims a rejoin hold with its own generation");
+        let already_open = mac_feed
+            .find("crate::compositor::is_open_for_owner(&owner_identity, window_id);")
+            .expect("arm checks for an open window");
+        assert!(register < claim && claim < already_open);
     }
 
     #[test]

@@ -14,6 +14,7 @@ import type { GalleryParticipant } from '#lib/components/Gallery.svelte';
 import { session } from '#lib/stores/session.svelte.js';
 import {
   currentRoom,
+  releaseRejoinHold,
   joinRoom,
   leaveRoom,
   listRooms,
@@ -612,6 +613,11 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
       // Room-scoped: never tear down a different room the user joined since.
       leave: async () => {
         if ((await currentRoom()) === roomName) await leaveRoom();
+      },
+      // #360: end the native hold on remote windows kept across the rejoin.
+      // Room-scoped natively, so it can never touch a room joined since.
+      release: async () => {
+        await releaseRejoinHold(roomName);
       },
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       cancelled: () => stale() || selfLeaveRequested || rejoinCancelled,

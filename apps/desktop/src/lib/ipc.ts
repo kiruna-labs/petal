@@ -52,6 +52,7 @@ export const COMMANDS = {
   compositorFitToSource: 'compositor_fit_to_source',
   compositorHideWindow: 'compositor_hide_window',
   compositorListWindows: 'compositor_list_windows',
+  compositorReleaseRejoinHold: 'compositor_release_rejoin_hold',
   compositorPopOut: 'compositor_pop_out',
   compositorResizeWindow: 'compositor_resize_window',
   /** #844: current open/closed state of the receiver-side AI-chat overlay --
@@ -1927,6 +1928,7 @@ export interface CommandReturns {
   [COMMANDS.pluginUninstall]: void;
   [COMMANDS.pluginReadBundle]: string;
   [COMMANDS.currentRoom]: string | null;
+  [COMMANDS.compositorReleaseRejoinHold]: number;
   [COMMANDS.downloadAndInstallCompatibleUpdate]: {
     status: 'up-to-date' | 'installed';
     version: string | null;

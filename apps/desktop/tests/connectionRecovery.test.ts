@@ -58,6 +58,44 @@ test('the rejoin is bounded: every attempt failing ends in a terminal failure', 
   assert.equal(log.filter((l) => l === 'join').length, 3);
 });
 
+test('a terminal failure releases the rejoin hold exactly once; success and cancel do not', async () => {
+  // #360: native holds remote windows on their last frame across the rejoin;
+  // giving up must end that hold now, not at its backstop deadline.
+  const failed = fakeSeams([new Error('a'), new Error('b')], {
+    release: async () => {
+      failed.log.push('release');
+    }
+  });
+  await runBoundedRejoin(failed.seams, [1, 2]);
+  assert.equal(failed.log.filter((l) => l === 'release').length, 1);
+  assert.equal(failed.log.at(-1), 'release');
+
+  const rejoined = fakeSeams(['ok'], {
+    release: async () => {
+      rejoined.log.push('release');
+    }
+  });
+  await runBoundedRejoin(rejoined.seams, [1]);
+  assert.ok(!rejoined.log.includes('release'));
+
+  const cancelled = fakeSeams([], {
+    cancelled: () => true,
+    release: async () => {
+      cancelled.log.push('release');
+    }
+  });
+  await runBoundedRejoin(cancelled.seams, [1]);
+  assert.ok(!cancelled.log.includes('release'));
+
+  // A failing release must not turn the outcome into a rejection.
+  const throwing = fakeSeams([new Error('a')], {
+    release: async () => {
+      throw new Error('leave failed');
+    }
+  });
+  assert.equal((await runBoundedRejoin(throwing.seams, [1])).kind, 'failed');
+});
+
 test('Leave during the backoff stops the rejoin before any join', async () => {
   let cancelled = false;
   const { seams, log } = fakeSeams(['ok'], {
@@ -128,6 +166,8 @@ test('the rejoin is cancellable from any surface, room-scoped on undo, and epoch
   const recover = meetingSessionSource.match(/async function recoverLostConnection\([\s\S]*?\n  \}/)?.[0] ?? '';
   assert.match(recover, /cancelled: \(\) => stale\(\) \|\| selfLeaveRequested \|\| rejoinCancelled/);
   assert.match(recover, /if \(\(await currentRoom\(\)\) === roomName\) await leaveRoom\(\);/);
+  // #360: the terminal release is room-scoped too.
+  assert.match(recover, /release: async \(\) => \{\s*await releaseRejoinHold\(roomName\);/);
   assert.match(recover, /const epoch = \+\+recoveryEpoch;/);
   // `reconnecting` is cleared on the success path only after the stash is
   // checked, and the dead-room replay happens before 'connected'.
