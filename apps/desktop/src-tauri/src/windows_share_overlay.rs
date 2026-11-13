@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 
 use crate::sync_ext::MutexExt;
 use crate::windows_capture_target::TargetKind;
@@ -1343,8 +1344,11 @@ pub(crate) fn create_share_overlay(
                 page_loaded_callback.store(true, Ordering::Release);
             }
         });
-    let overlay = builder
-        .build()
+    // Display and region overlays stay out of every capture for their whole
+    // life (#487: excluded before first shown, and kept so when a stream
+    // stops); a window share's overlay only while this computer is live.
+    let always_excluded = target.kind() == TargetKind::Display || region_share;
+    let overlay = if always_excluded { builder.build_petal_excluded() } else { builder.build_petal() }
         .map_err(|error| format!("failed to build overlay for window {window_id}: {error}"))?;
     if let Err(error) = overlay.set_ignore_cursor_events(true) {
         let _ = overlay.close();
@@ -1367,7 +1371,7 @@ pub(crate) fn create_share_overlay(
         ));
     }
 
-    let capture_excluded = if target.kind() == TargetKind::Display || region_share {
+    let capture_excluded = if always_excluded {
         let hwnd = windows::Win32::Foundation::HWND(overlay_hwnd as *mut core::ffi::c_void);
         let excluded = crate::platform::windows::set_capture_exclusion(hwnd);
         if !excluded {

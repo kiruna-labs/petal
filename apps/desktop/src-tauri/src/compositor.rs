@@ -59,6 +59,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 use tauri_nspanel::{tauri_panel, CollectionBehavior, PanelBuilder, PanelLevel};
 
 use crate::native_display::DisplayLayer;
@@ -3355,7 +3356,7 @@ fn create_chrome_webview(app: &AppHandle, parent_label: &str, spec: ChromeWebvie
         builder = builder.always_on_top(always_on_top);
     }
     let result = match builder.parent(&parent) {
-        Ok(builder) => builder.build(),
+        Ok(builder) => builder.build_petal(),
         Err(e) => Err(e),
     };
     match result {

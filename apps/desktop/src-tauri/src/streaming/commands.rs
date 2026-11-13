@@ -78,6 +78,7 @@ pub fn go_live_target() -> u32 {
 #[tauri::command]
 pub async fn open_go_live_window(app: AppHandle, window_id: u32) -> Result<(), String> {
     use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+    use crate::streaming::streamer_mode::BuildPetalWindow;
     go_live_target_slot().store(window_id, std::sync::atomic::Ordering::Relaxed);
     if let Some(window) = app.get_webview_window(GO_LIVE_WINDOW_LABEL) {
         let _ = window.emit("go-live-target", window_id);
@@ -106,7 +107,7 @@ pub async fn open_go_live_window(app: AppHandle, window_id: u32) -> Result<(), S
     #[cfg(target_os = "windows")]
     let builder = builder.additional_browser_args(crate::webview2_args::WEBVIEW2_ACCEL_ARGS);
     let window = builder
-        .build()
+        .build_petal()
         .map_err(|error| format!("couldn't open the go-live window: {error}"))?;
     // The page's own close() and the title bar's close button both arrive
     // here as a close request.

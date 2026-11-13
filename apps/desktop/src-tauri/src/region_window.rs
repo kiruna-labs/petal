@@ -93,6 +93,7 @@ pub async fn open_region_window(
     follow_cursor: Option<bool>,
 ) -> Result<String, String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
+    use crate::streaming::streamer_mode::BuildPetalWindow;
 
     let id = NEXT_REGION_WINDOW_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let label = format!("{REGION_WINDOW_LABEL_PREFIX}{id}");
@@ -133,7 +134,7 @@ pub async fn open_region_window(
     // 0x8007139F and no selector appears.
     #[cfg(target_os = "windows")]
     let builder = builder.additional_browser_args(crate::webview2_args::WEBVIEW2_ACCEL_ARGS);
-    let window = builder.build().map_err(|error| {
+    let window = builder.build_petal().map_err(|error| {
         clear_placement_state(&label);
         format!("region window: create failed: {error}")
     })?;

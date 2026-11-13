@@ -27,6 +27,7 @@
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 
 /// The probe window's label. It is also listed in
 /// `src-tauri/capabilities/default.json` so `getVersion()` resolves the real
@@ -197,7 +198,7 @@ pub fn open_probe_window(app: &AppHandle) -> Result<(), String> {
         // would disturb the share scenarios that follow.
         .focused(false)
         .skip_taskbar(true)
-        .build()
+        .build_petal()
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
