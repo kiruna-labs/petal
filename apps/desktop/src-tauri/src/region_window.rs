@@ -1050,6 +1050,12 @@ impl SelectorCaptureExclusionLease {
             );
             return;
         }
+        // While this computer is live, streamer mode keeps every Petal window
+        // out of captures, this selector included (#487).
+        if crate::streaming::streamer_mode::adopt_selector_exclusion(raw.0 as isize) {
+            owners.remove(&self.window_label);
+            return;
+        }
         let hwnd = windows::Win32::Foundation::HWND(raw.0 as *mut core::ffi::c_void);
         if !crate::platform::windows::clear_capture_exclusion(hwnd) {
             log::warn!(
@@ -1068,6 +1074,19 @@ impl Drop for SelectorCaptureExclusionLease {
     fn drop(&mut self) {
         self.restore_captureability();
     }
+}
+
+/// The selectors whose share holds an exclusion lease right now: streamer
+/// mode leaves them excluded when a stream stops.
+#[cfg(target_os = "windows")]
+pub(crate) fn leased_selector_hwnds(app: &tauri::AppHandle) -> Vec<isize> {
+    use tauri::Manager;
+    let labels: Vec<String> = capture_exclusion_owners().lock_unpoisoned().keys().cloned().collect();
+    labels
+        .into_iter()
+        .filter_map(|label| app.get_webview_window(&label))
+        .filter_map(|window| window.hwnd().ok().map(|hwnd| hwnd.0 as isize))
+        .collect()
 }
 
 /// Acquire exclusion for an active Petal View share. Returning `None` keeps

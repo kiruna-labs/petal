@@ -238,9 +238,16 @@ pub struct Producer {
     luid: Option<Option<i64>>,
     /// The GPU path failed for this capture: the CPU copy carries on.
     disabled: bool,
+    /// A window capture: never contains Petal's other windows, so every
+    /// frame may stream.
+    window_target: bool,
 }
 
 impl Producer {
+    pub fn for_target(window_target: bool) -> Self {
+        Self { window_target, ..Self::default() }
+    }
+
     /// Offer the frame in `source` (`size`, at its top-left) to the live tap,
     /// if share `token` is the one streaming and the encoder takes GPU
     /// frames. Otherwise the share's CPU copy feeds the tap as before.
@@ -251,6 +258,7 @@ impl Producer {
         context: &ID3D11DeviceContext,
         source: &ID3D11Resource,
         size: (u32, u32),
+        excludes_petal: bool,
     ) {
         let Some(tap) = super::tap::gpu_target(token) else { return };
         let luid = *self.luid.get_or_insert_with(|| adapter_luid(device));
@@ -277,7 +285,7 @@ impl Producer {
         let Some(index) = pool.states.acquire() else { return };
         let frame = GpuFrame { pool, index };
         match frame.pool.copy_into(context, index, source) {
-            Ok(true) => super::tap::offer_gpu_frame(&tap, token, frame),
+            Ok(true) => super::tap::offer_gpu_frame(&tap, token, self.window_target || excludes_petal, frame),
             Ok(false) => {}
             Err(error) => self.fall_back(&tap, &error),
         }

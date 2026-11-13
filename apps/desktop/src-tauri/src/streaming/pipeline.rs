@@ -484,7 +484,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
         // Now the share delivers frames (a 4:3 window into the 16:9 canvas).
         for i in 0..30u8 {
-            tap::offer_frame(77, || Some(share_frame(i)));
+            tap::offer_frame(77, true, || Some(share_frame(i)));
             mixer.lock_unpoisoned().push("mic", &vec![1000i16; 960 * 2], 2);
             tokio::time::sleep(Duration::from_millis(33)).await;
         }
@@ -567,7 +567,7 @@ mod tests {
         // The capture's first frame tells the tap its adapter; the encoder
         // hasn't taken GPU frames yet, so nothing is copied.
         let mut producer = Producer::default();
-        producer.offer(77, &device, &context, &source, (width, height));
+        producer.offer(77, &device, &context, &source, (width, height), true);
         assert!(live_tap.capture_adapter().is_some());
         assert!(live_tap.mailbox.latest().is_none());
 
@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(live_tap.gpu_encoder_adapter(), live_tap.capture_adapter(), "encoder on the capture adapter");
 
         for _ in 0..60 {
-            producer.offer(77, &device, &context, &source, (width, height));
+            producer.offer(77, &device, &context, &source, (width, height), true);
             tokio::time::sleep(Duration::from_millis(33)).await;
         }
         assert!(!pipeline.stats.on_slate.load(Ordering::Relaxed));

@@ -2687,7 +2687,12 @@ fn start_share_frame_pump(
                     let captured = share_captured_frame(previous, sequence);
                     // Live stream (client mode): the re-push also seeds a tap
                     // that was bound after the content went static.
-                    crate::streaming::tap::offer_frame(token, || Some(stream_tap_frame(previous)));
+                    crate::streaming::tap::offer_frame(
+                        token,
+                        kind == SharedSourceKind::Window
+                            || crate::streaming::streamer_mode::frame_excludes_petal(previous.captured_at_100ns),
+                        || Some(stream_tap_frame(previous)),
+                    );
                     let published = shared.published.lock_unpoisoned().clone();
                     // A refresh re-push is not a capture: `previous` is a frame
                     // whose `capture_wall_time_us` is frozen at the LAST real
@@ -2796,7 +2801,12 @@ fn start_share_frame_pump(
             let captured = share_captured_frame(&frame, sequence);
             // Live stream (client mode): the bound share's frames, at the
             // share's own cadence, before the WebRTC conversion.
-            crate::streaming::tap::offer_frame(token, || Some(stream_tap_frame(&frame)));
+            crate::streaming::tap::offer_frame(
+                token,
+                kind == SharedSourceKind::Window
+                    || crate::streaming::streamer_mode::frame_excludes_petal(frame.captured_at_100ns),
+                || Some(stream_tap_frame(&frame)),
+            );
             let published = shared.published.lock_unpoisoned().clone();
             let push_result = published.push_frame(&captured, published_wall_time_us);
             if let Some(timing) = push_result {

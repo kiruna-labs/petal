@@ -215,6 +215,10 @@ pub struct BgraFrame {
     pub height: u32,
     pub capture_wall_time_us: u64,
     pub region_generation: Option<u64>,
+    /// When WGC composed the frame (`SystemRelativeTime`, QPC in 100 ns
+    /// units; `i64::MIN` if unknown). A live stream takes only frames
+    /// composed after Petal's windows were excluded (#487).
+    pub captured_at_100ns: i64,
 }
 
 #[derive(Clone, Copy)]
@@ -981,7 +985,7 @@ fn setup_capture(
         region_paused: false,
         closed_token,
         arrival_token,
-        gpu_tap: crate::streaming::gpu_tap::Producer::default(),
+        gpu_tap: crate::streaming::gpu_tap::Producer::for_target(target.kind() == TargetKind::Window),
     })
 }
 
@@ -1235,6 +1239,7 @@ fn copy_frame_to_bgra(
     canvas_texture: &mut Option<(ID3D11Resource, ID3D11RenderTargetView)>,
     gpu_tap: Option<(&mut crate::streaming::gpu_tap::Producer, u32)>,
 ) -> Result<BgraFrame, String> {
+    let captured_at_100ns = frame.SystemRelativeTime().map_or(i64::MIN, |time| time.Duration);
     let content_size = frame
         .ContentSize()
         .map_err(|error| format!("frame ContentSize failed: {error}"))?;
@@ -1363,6 +1368,7 @@ fn copy_frame_to_bgra(
             context,
             tap_source,
             (output_width as u32, output_height as u32),
+            crate::streaming::streamer_mode::frame_excludes_petal(captured_at_100ns),
         );
     }
 
@@ -1405,6 +1411,7 @@ fn copy_frame_to_bgra(
         height: frame_height,
         capture_wall_time_us: crate::time_util::now_us(),
         region_generation,
+        captured_at_100ns,
     })
 }
 

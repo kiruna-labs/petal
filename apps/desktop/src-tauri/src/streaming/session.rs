@@ -427,9 +427,23 @@ async fn start_client(
     use super::pipeline::{spawn, PipelineConfig};
 
     let window_id = request.window_id;
+    // Petal's own windows leave every capture before anything is tapped; the
+    // tap takes only frames taken after that (`streamer_mode`, `tap`).
+    super::streamer_mode::begin_live(app, window_id).await?;
     let tap = super::tap::start(window_id);
-    let Some((capture_width, capture_height)) = wait_for_first_frame(&tap).await else {
+    let first_frame = match wait_for_first_frame(&tap).await {
+        Some(size) => Some(size),
+        // A static share sends only frames captured before the exclusion,
+        // which never stream: go live on the slate until it changes.
+        None if tap.only_unexcluded_frames() => {
+            log::info!("streaming: window={window_id} has no frame since Petal was excluded yet; starting on the slate");
+            capture_geometry(app, window_id)
+        }
+        None => None,
+    };
+    let Some((capture_width, capture_height)) = first_frame else {
         super::tap::stop();
+        super::streamer_mode::set_live(app, false);
         return Err("This share isn't sending frames yet. Try again in a moment.".into());
     };
     let plan = plan_stream_output(&StreamPlanInput {
@@ -461,6 +475,7 @@ async fn start_client(
     };
     if !announce(&room, announced).await {
         super::tap::stop();
+        super::streamer_mode::set_live(app, false);
         return Err(ANNOUNCE_FAILED_ERROR.into());
     }
     super::live_state::refresh(app, &room);
@@ -495,6 +510,7 @@ async fn start_client(
             cancel.cancel();
             release_mic(mic).await;
             super::tap::stop();
+            super::streamer_mode::set_live(app, false);
             set_live_attribute(&room, None);
             super::live_state::refresh(app, &room);
             return Err(error);
@@ -548,7 +564,6 @@ async fn start_client(
     };
     *last_snapshot.lock_unpoisoned() = Some(snapshot.clone());
     let _ = app.emit(STREAM_SESSION_CHANGED_EVENT, &snapshot);
-    super::streamer_mode::set_live(app, true);
     tokio::spawn(monitor(
         app.clone(),
         room,

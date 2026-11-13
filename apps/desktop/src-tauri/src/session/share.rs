@@ -5873,11 +5873,7 @@ async fn start_share_with_capture_source(
     }
     // A stream may have started or ended while this capture was starting; a
     // filter already in the right state is left alone.
-    apply_streamer_capture_exclusion(
-        state,
-        crate::streaming::streamer_mode::capture_exclusion_active(),
-    )
-    .await;
+    crate::streaming::streamer_mode::reapply_capture_exclusion(state).await;
 
     // SPEC.md §4.2's global-shortcut target: record this as "the last window
     // toggled," so the shortcut has something to act on -- see
@@ -5946,7 +5942,7 @@ fn offer_live_stream_frame(window_id: u32, frame: &crate::capture::CapturedFrame
     use crate::capture::CapturedFramePayload;
     use crate::streaming::macos_encode::PixelBuffer;
     static FAILED_COPIES: AtomicU64 = AtomicU64::new(0);
-    crate::streaming::tap::offer_frame(window_id, || {
+    crate::streaming::tap::offer_frame(window_id, frame.excludes_petal_windows, || {
         let copy = match &frame.payload {
             // SAFETY: `frame` keeps its capture buffer alive for the copy.
             CapturedFramePayload::Native { pixel_buffer } => unsafe { PixelBuffer::copy_of(pixel_buffer.as_ptr()) },
@@ -7696,11 +7692,7 @@ fn spawn_pump_failure_recovery(
         log::info!(
             "session: window {window_id} capture restarted in place after pump failure (seq {started_seq}, restart_generation {next_restart_generation})"
         );
-        apply_streamer_capture_exclusion(
-            state.inner(),
-            crate::streaming::streamer_mode::capture_exclusion_active(),
-        )
-        .await;
+        crate::streaming::streamer_mode::reapply_capture_exclusion(state.inner()).await;
         crate::analytics::capture_restarted(crate::analytics::RestartOutcome::Recovered);
     });
 }
@@ -9154,7 +9146,10 @@ pub async fn reconcile_quality_for_window(state: &SessionState, window_id: u32) 
 /// Streamer mode (this computer is live): every whole-display share drops
 /// Petal's own windows from its capture, or gets them back. Region shares
 /// already exclude them; window shares never contain them.
-pub async fn apply_streamer_capture_exclusion(state: &SessionState, excluded: bool) {
+/// Rebuild every whole-display share with or without Petal's windows; the
+/// shares whose filter couldn't be updated are returned.
+pub async fn apply_streamer_capture_exclusion(state: &SessionState, excluded: bool) -> Vec<u32> {
+    let mut failed = Vec::new();
     let configs: Vec<(u32, crate::capture::WindowCaptureConfig)> = {
         let guard = state.inner.lock_unpoisoned();
         guard
@@ -9173,10 +9168,15 @@ pub async fn apply_streamer_capture_exclusion(state: &SessionState, excluded: bo
             Ok(Ok(false)) => {}
             Ok(Err(error)) => {
                 log::warn!("streaming: couldn't update display share {window_id}'s filter: {error}");
+                failed.push(window_id);
             }
-            Err(error) => log::warn!("streaming: display share {window_id} filter task failed: {error}"),
+            Err(error) => {
+                log::warn!("streaming: display share {window_id} filter task failed: {error}");
+                failed.push(window_id);
+            }
         }
     }
+    failed
 }
 
 async fn retry_post_wake_software_encoder_fallback(
@@ -14073,6 +14073,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             dirty_rects_known: true,
             lock_copy_ms: 0.25,
             region_generation: None,
+            excludes_petal_windows: true,
         }
     }
 
@@ -14119,6 +14120,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             dirty_rects_known: true,
             lock_copy_ms: 0.25,
             region_generation: None,
+            excludes_petal_windows: true,
         }
     }
 
@@ -14145,6 +14147,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             dirty_rects_known: true,
             lock_copy_ms: 0.25,
             region_generation: None,
+            excludes_petal_windows: true,
         }
     }
 
@@ -14175,6 +14178,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             dirty_rects_known: true,
             lock_copy_ms: 0.0,
             region_generation: None,
+            excludes_petal_windows: true,
         }
     }
 
@@ -15106,6 +15110,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
                 dirty_rects_known: true,
                 lock_copy_ms: 0.25,
                 region_generation: None,
+                excludes_petal_windows: true,
             }
         };
 
