@@ -451,25 +451,37 @@ pub fn check_camera() -> String {
     macos::check_camera()
 }
 
-/// Microphone — triggers the OS prompt (if not yet decided), blocks until the
-/// user answers (or a 60s timeout), then returns the resulting auth status
-/// string. `async`: Tauri runs a plain sync command on the main thread, and
-/// this wait would freeze every Petal window until the prompt is answered.
-#[tauri::command(async)]
-pub fn request_microphone() -> String {
-    let status = macos::request_microphone();
+/// Runs a blocking OS permission request on Tokio's blocking pool. A plain sync
+/// command runs on the main thread and froze every Petal window for the up to
+/// 60 s prompt wait; `#[tauri::command(async)]` would instead pin a core runtime
+/// worker that LiveKit shares. A panicked request falls back to `current`.
+async fn run_blocking_request(request: fn() -> String, current: fn() -> String) -> String {
+    tauri::async_runtime::spawn_blocking(request)
+        .await
+        .unwrap_or_else(|error| {
+            log::warn!("permissions: blocking request failed: {error}");
+            current()
+        })
+}
+
+/// Microphone — triggers the OS prompt (if not yet decided), waits off the main
+/// thread until the user answers (or a 60s timeout), then returns the resulting
+/// auth status string.
+#[tauri::command]
+pub async fn request_microphone() -> String {
+    let status = run_blocking_request(macos::request_microphone, macos::check_microphone).await;
     if status == "denied" || status == "restricted" {
         crate::analytics::permission_denied(crate::analytics::PermissionKind::Mic);
     }
     status
 }
 
-/// Camera — triggers the OS prompt (if not yet decided), blocks until the user
-/// answers (or a 60s timeout), then returns the resulting auth status string.
-/// `async` for the same reason as `request_microphone`.
-#[tauri::command(async)]
-pub fn request_camera() -> String {
-    let status = macos::request_camera();
+/// Camera — triggers the OS prompt (if not yet decided), waits off the main
+/// thread until the user answers (or a 60s timeout), then returns the resulting
+/// auth status string.
+#[tauri::command]
+pub async fn request_camera() -> String {
+    let status = run_blocking_request(macos::request_camera, macos::check_camera).await;
     if status == "denied" || status == "restricted" {
         crate::analytics::permission_denied(crate::analytics::PermissionKind::Camera);
     }
@@ -509,9 +521,15 @@ mod tests {
             PermissionRequestOutcome::new(true, true)
         );
         assert_eq!(super::check_microphone(), "authorized");
-        assert_eq!(super::request_microphone(), "authorized");
+        assert_eq!(
+            tauri::async_runtime::block_on(super::request_microphone()),
+            "authorized"
+        );
         assert_eq!(super::check_camera(), "authorized");
-        assert_eq!(super::request_camera(), "authorized");
+        assert_eq!(
+            tauri::async_runtime::block_on(super::request_camera()),
+            "authorized"
+        );
         assert!(super::check_accessibility());
         assert_eq!(
             super::request_accessibility(),
@@ -562,6 +580,43 @@ mod tests {
                 auto_relaunch_recommended: false,
             }
         );
+    }
+
+    #[test]
+    fn blocking_requests_run_off_the_calling_thread() {
+        // The camera/microphone commands wait up to 60 s for the OS prompt.
+        // That wait must leave the thread that awaits it (the main thread
+        // froze every Petal window) and must not pin a core runtime worker.
+        use std::sync::Mutex;
+        use std::thread::ThreadId;
+        static RAN_ON: Mutex<Option<ThreadId>> = Mutex::new(None);
+        fn request() -> String {
+            *RAN_ON.lock().unwrap() = Some(std::thread::current().id());
+            "authorized".to_string()
+        }
+        fn current() -> String {
+            "not-determined".to_string()
+        }
+
+        let status = tauri::async_runtime::block_on(super::run_blocking_request(request, current));
+
+        assert_eq!(status, "authorized");
+        let ran_on = RAN_ON.lock().unwrap().expect("request ran");
+        assert_ne!(ran_on, std::thread::current().id());
+    }
+
+    #[test]
+    fn a_panicked_request_falls_back_to_the_current_status() {
+        fn request() -> String {
+            panic!("simulated AVFoundation failure");
+        }
+        fn current() -> String {
+            "denied".to_string()
+        }
+
+        let status = tauri::async_runtime::block_on(super::run_blocking_request(request, current));
+
+        assert_eq!(status, "denied");
     }
 
     #[test]
