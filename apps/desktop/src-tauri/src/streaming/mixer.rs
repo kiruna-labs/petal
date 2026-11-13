@@ -4,11 +4,18 @@
 //! all sources through a peak limiter.
 //!
 //! A muted or silent source simply pushes nothing (or zeros) and contributes
-//! silence. Each source is jitter-buffered: it joins the mix once it has
+//! silence. A source with a mute gate (the stream mic, [`AudioMixer::set_mute_gate`])
+//! is also muted here, at the mix: while its gate reads muted, whatever it
+//! has queued is dropped, from the next block on, however late its own
+//! capture notices; and audio it queued while muted is dropped when it
+//! unmutes (#487). Each source is jitter-buffered: it joins the mix once it has
 //! [`PRIME_FRAMES`] queued, drops back out on underrun rather than clicking,
 //! and sheds its oldest audio past [`MAX_BUFFER_FRAMES`] to bound latency.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
+
+use crate::sync_ext::MutexExt;
 
 pub const MIX_SAMPLE_RATE: u32 = 48_000;
 pub const MIX_CHANNELS: usize = 2;
@@ -28,13 +35,40 @@ struct Source {
     /// Interleaved stereo samples.
     samples: VecDeque<i16>,
     primed: bool,
+    /// Muted at the last pull (its gate said so).
+    muted: bool,
 }
 
-#[derive(Debug)]
+/// Whether a source is muted right now. Read outside the mixer's lock.
+pub type MuteGate = Arc<dyn Fn() -> bool + Send + Sync>;
+
 pub struct AudioMixer {
     sources: HashMap<String, Source>,
+    gates: HashMap<String, MuteGate>,
     envelope: f32,
     prime_frames: usize,
+}
+
+impl std::fmt::Debug for AudioMixer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudioMixer")
+            .field("sources", &self.sources)
+            .field("gates", &self.gates.keys().collect::<Vec<_>>())
+            .field("envelope", &self.envelope)
+            .field("prime_frames", &self.prime_frames)
+            .finish()
+    }
+}
+
+/// The next block from `mixer` with every gated source's mute applied: the
+/// gates are read first, outside the mixer's lock (a gate may take others),
+/// so a mute is in effect from the next block.
+pub fn pull_block_gated(mixer: &Mutex<AudioMixer>) -> (Vec<i16>, usize) {
+    let gates: Vec<(String, MuteGate)> =
+        mixer.lock_unpoisoned().gates.iter().map(|(source, gate)| (source.clone(), gate.clone())).collect();
+    let muted: HashSet<String> = gates.into_iter().filter(|(_, gate)| gate()).map(|(source, _)| source).collect();
+    let mut mixer = mixer.lock_unpoisoned();
+    (mixer.pull_muting(MIX_BLOCK_FRAMES, &muted), mixer.source_count())
 }
 
 impl Default for AudioMixer {
@@ -51,7 +85,17 @@ impl AudioMixer {
     /// A mixer whose sources join after `prime_frames` queued frames. The
     /// stream mic's echo reference uses 0: it must never lag the echo.
     pub fn with_prime(prime_frames: usize) -> Self {
-        Self { sources: HashMap::new(), envelope: 0.0, prime_frames }
+        Self { sources: HashMap::new(), gates: HashMap::new(), envelope: 0.0, prime_frames }
+    }
+
+    /// Mute `source` at the mix whenever `gate` reads true
+    /// ([`pull_block_gated`]).
+    pub fn set_mute_gate(&mut self, source: &str, gate: MuteGate) {
+        self.gates.insert(source.to_string(), gate);
+    }
+
+    pub fn clear_mute_gate(&mut self, source: &str) {
+        self.gates.remove(source);
     }
 
     /// Append interleaved stereo PCM for `source`. Mono input is accepted
@@ -97,9 +141,23 @@ impl AudioMixer {
 
     /// The next `frames` interleaved stereo frames.
     pub fn pull(&mut self, frames: usize) -> Vec<i16> {
+        self.pull_muting(frames, &HashSet::new())
+    }
+
+    /// [`Self::pull`] with the sources in `muted` muted: what they have
+    /// queued is dropped, not mixed and not delayed. A source unmuting since
+    /// the last pull also drops what it queued meanwhile (captured while
+    /// muted) and re-primes from fresh audio.
+    pub fn pull_muting(&mut self, frames: usize, muted: &HashSet<String>) -> Vec<i16> {
         let block_samples = frames * MIX_CHANNELS;
         let mut mix = vec![0f32; block_samples];
-        for source in self.sources.values_mut() {
+        for (name, source) in &mut self.sources {
+            let now_muted = muted.contains(name);
+            if now_muted || source.muted {
+                source.samples.clear();
+                source.primed = false;
+            }
+            source.muted = now_muted;
             if !source.primed {
                 continue;
             }
@@ -235,6 +293,54 @@ mod tests {
         assert!(mixer.pull_block().iter().all(|s| *s == 100));
         // 896 frames left: less than a block, so the source sits out.
         assert!(mixer.pull_block().iter().all(|s| *s == 0));
+    }
+
+    fn gate(flag: &Arc<std::sync::atomic::AtomicBool>) -> MuteGate {
+        let flag = flag.clone();
+        Arc::new(move || flag.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// #487: speech the mic queued before its capture noticed the mute never
+    /// reaches the stream; the next block is already silent.
+    #[test]
+    fn a_mute_takes_effect_at_the_mix_on_the_next_block() {
+        let muted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mixer = Mutex::new(AudioMixer::new());
+        mixer.lock_unpoisoned().set_mute_gate("mic", gate(&muted));
+        mixer.lock_unpoisoned().push("remote", &constant(1000, MAX_BUFFER_FRAMES), 2);
+        mixer.lock_unpoisoned().push("mic", &constant(2000, MAX_BUFFER_FRAMES), 2);
+        let (block, sources) = pull_block_gated(&mixer);
+        assert_eq!(sources, 2);
+        assert!(block.iter().all(|s| (*s - 3000).abs() <= 1), "both heard: {:?}", &block[..4]);
+        // Muted; the mic's capture is late and keeps pushing speech.
+        muted.store(true, std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..4 {
+            mixer.lock_unpoisoned().push("mic", &constant(2000, MIX_BLOCK_FRAMES), 2);
+            let (block, _) = pull_block_gated(&mixer);
+            assert!(block.iter().all(|s| (*s - 1000).abs() <= 1), "only the remote: {:?}", &block[..4]);
+        }
+    }
+
+    /// Audio queued while muted (a capture that is behind) is dropped on
+    /// unmute, never played late; fresh audio is heard once primed.
+    #[test]
+    fn unmuting_drops_what_was_queued_while_muted() {
+        let muted = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mixer = Mutex::new(AudioMixer::new());
+        mixer.lock_unpoisoned().set_mute_gate("mic", gate(&muted));
+        mixer.lock_unpoisoned().push("mic", &constant(2000, MIX_BLOCK_FRAMES), 2);
+        assert!(pull_block_gated(&mixer).0.iter().all(|s| *s == 0));
+        // Speech captured while muted, still queued when the mute lifts.
+        mixer.lock_unpoisoned().push("mic", &constant(2000, MAX_BUFFER_FRAMES), 2);
+        muted.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(pull_block_gated(&mixer).0.iter().all(|s| *s == 0), "queued-while-muted audio dropped");
+        mixer.lock_unpoisoned().push("mic", &constant(700, PRIME_FRAMES), 2);
+        assert!(pull_block_gated(&mixer).0.iter().all(|s| *s == 700), "fresh audio heard");
+        // Without a gate nothing changes.
+        mixer.lock_unpoisoned().clear_mute_gate("mic");
+        muted.store(true, std::sync::atomic::Ordering::SeqCst);
+        mixer.lock_unpoisoned().push("mic", &constant(700, PRIME_FRAMES), 2);
+        assert!(pull_block_gated(&mixer).0.iter().all(|s| *s == 700));
     }
 
     #[test]

@@ -10,8 +10,13 @@
 //! level) and then into the stream mix.
 //!
 //! It follows the meeting: the selected recording device (reopened on a
-//! switch) and mute (silence while muted). Platform-neutral; client mode uses
-//! it on Windows and macOS.
+//! switch) and mute. Mute is applied twice: at the mix, from the next block
+//! (a mute gate on [`MIC_SOURCE`], so audio already captured or queued never
+//! goes out), and here, read per chunk: silence while muted, and after an
+//! unmute, silence for every chunk captured before it (each chunk carries
+//! its capture time), so a backlog or a partial block from the muted span
+//! never goes out late. #487.
+//! Platform-neutral; client mode uses it on Windows and macOS.
 #![cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 
 use std::collections::VecDeque;
@@ -41,6 +46,19 @@ const RETRY_AFTER: Duration = Duration::from_secs(2);
 const LEVEL_LOG_EVERY: Duration = Duration::from_secs(30);
 /// Captured chunks waiting for the processing thread (~1 s at 10 ms).
 const CAPTURE_QUEUE: usize = 100;
+/// Margin on top of a chunk's reported capture latency and its own length
+/// when deciding whether any of it predates an unmute.
+const CAPTURE_SLACK: Duration = Duration::from_millis(20);
+
+/// One device callback's samples (mono, 48 kHz).
+struct Chunk {
+    /// When the callback ran.
+    at: Instant,
+    /// How long before the callback the device captured the data (cpal's
+    /// capture vs. callback timestamps).
+    latency: Duration,
+    samples: Vec<i16>,
+}
 
 /// The meeting's microphone, as the stream sees it. Read-only.
 pub trait MeetingMic: Send + Sync {
@@ -48,12 +66,19 @@ pub trait MeetingMic: Send + Sync {
     fn muted(&self) -> Option<bool>;
     /// The selected recording device's name; `None` means the system default.
     fn device_name(&self) -> Option<String>;
+    /// When the mic was last unmuted, recorded as it happened: a mute the
+    /// stream mic never got to see still bounds what it may send.
+    fn last_unmuted(&self) -> Option<Instant> {
+        None
+    }
 }
 
 /// Mono 48 kHz capture in, processed 10 ms blocks out to the stream mix.
 pub struct MicProcessor {
     apm: Option<AudioProcessingModule>,
     pending: VecDeque<i16>,
+    /// `pending` holds samples fed as muted: the block they complete is muted.
+    pending_muted: bool,
     /// What the device delivered, and what went to the mix.
     raw: LevelMeter,
     processed: LevelMeter,
@@ -65,6 +90,7 @@ impl MicProcessor {
         Self {
             apm: processing.then(|| AudioProcessingModule::new(true, true, true, true)),
             pending: VecDeque::new(),
+            pending_muted: false,
             raw: LevelMeter::default(),
             processed: LevelMeter::default(),
         }
@@ -87,7 +113,9 @@ impl MicProcessor {
     ) -> u16 {
         self.pending.extend(samples);
         let mut peak = 0u16;
+        let mut carried_muted = std::mem::take(&mut self.pending_muted);
         while self.pending.len() >= APM_FRAMES {
+            let block_muted = muted || std::mem::take(&mut carried_muted);
             let mut block: Vec<i16> = self.pending.drain(..APM_FRAMES).collect();
             self.raw.add(&block);
             let mut far = reference.lock_unpoisoned().pull(APM_FRAMES);
@@ -100,14 +128,60 @@ impl MicProcessor {
                     log::debug!("streaming: mic processing failed: {}", error.message);
                 }
             }
-            if muted {
+            if block_muted {
                 block.fill(0);
             }
             self.processed.add(&block);
             peak = peak.max(block.iter().map(|sample| sample.unsigned_abs()).max().unwrap_or(0));
             mixer.lock_unpoisoned().push(MIC_SOURCE, &block, 1);
         }
+        self.pending_muted = carried_muted || (muted && !self.pending.is_empty());
         peak
+    }
+}
+
+/// Follows the meeting's mute for captured chunks: a chunk is fed muted
+/// while the meeting is muted, and after an unmute, if any of it may have
+/// been captured before the unmute was seen.
+#[derive(Debug)]
+struct MuteFollower {
+    muted: bool,
+    /// When the last unmute was seen.
+    unmuted_at: Option<Instant>,
+}
+
+impl MuteFollower {
+    fn new(muted: bool) -> Self {
+        Self { muted, unmuted_at: None }
+    }
+
+    /// The meeting's mute now (`now`; last unmuted at `meeting_unmuted`, as
+    /// the meeting recorded it), for a chunk of `samples` delivered by a
+    /// callback at `stamp`, `latency` after the device captured it: whether
+    /// to feed it as muted.
+    #[allow(clippy::too_many_arguments)]
+    fn chunk_muted(
+        &mut self,
+        muted: bool,
+        meeting_unmuted: Option<Instant>,
+        now: Instant,
+        stamp: Instant,
+        latency: Duration,
+        samples: usize,
+    ) -> bool {
+        if self.muted && !muted {
+            self.unmuted_at = Some(now);
+        }
+        // A whole mute this thread never saw (it was busy or stalled).
+        self.unmuted_at = self.unmuted_at.max(meeting_unmuted);
+        self.muted = muted;
+        if muted {
+            return true;
+        }
+        let length = Duration::from_secs_f64(samples as f64 / f64::from(MIX_SAMPLE_RATE));
+        // Its earliest sample, conservatively; before the unmute: muted.
+        let reach = latency + length + CAPTURE_SLACK;
+        self.unmuted_at.is_some_and(|unmuted| stamp.checked_sub(reach).is_none_or(|first| first < unmuted))
     }
 }
 
@@ -151,7 +225,7 @@ impl Converter {
 
 struct OpenCapture {
     _stream: cpal::Stream,
-    chunks: Receiver<Vec<i16>>,
+    chunks: Receiver<Chunk>,
     failed: Arc<AtomicBool>,
     /// Buffer under/overruns: a glitch at worst, the stream keeps running.
     glitches: Arc<AtomicU64>,
@@ -166,6 +240,12 @@ fn is_fatal(kind: cpal::ErrorKind) -> bool {
 
 fn device_label(device: &cpal::Device) -> String {
     device.description().map(|d| d.name().to_string()).unwrap_or_default()
+}
+
+/// How long before its callback a chunk's data was captured.
+fn capture_latency(info: &cpal::InputCallbackInfo) -> Duration {
+    let timestamp = info.timestamp();
+    timestamp.callback.duration_since(timestamp.capture)
 }
 
 fn open_capture(wanted: Option<&str>) -> Result<OpenCapture, String> {
@@ -190,7 +270,7 @@ fn open_capture(wanted: Option<&str>) -> Result<OpenCapture, String> {
         .map_err(|error| format!("no input format for '{name}': {error}"))?;
     let channels = usize::from(config.channels()).max(1);
     let rate = config.sample_rate();
-    let (sender, chunks) = sync_channel::<Vec<i16>>(CAPTURE_QUEUE);
+    let (sender, chunks) = sync_channel::<Chunk>(CAPTURE_QUEUE);
     let failed = Arc::new(AtomicBool::new(false));
     let glitches = Arc::new(AtomicU64::new(0));
     let on_error = {
@@ -209,18 +289,18 @@ fn open_capture(wanted: Option<&str>) -> Result<OpenCapture, String> {
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
             config.config(),
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            move |data: &[f32], info: &cpal::InputCallbackInfo| {
                 // Never block the device's thread: a full queue drops audio.
-                let _ = sender.try_send(converter.run(data));
+                let _ = sender.try_send(Chunk { at: Instant::now(), latency: capture_latency(info), samples: converter.run(data) });
             },
             on_error,
             None,
         ),
         cpal::SampleFormat::I16 => device.build_input_stream(
             config.config(),
-            move |data: &[i16], _: &cpal::InputCallbackInfo| {
+            move |data: &[i16], info: &cpal::InputCallbackInfo| {
                 let as_f32: Vec<f32> = data.iter().map(|sample| f32::from(*sample) / 32768.0).collect();
-                let _ = sender.try_send(converter.run(&as_f32));
+                let _ = sender.try_send(Chunk { at: Instant::now(), latency: capture_latency(info), samples: converter.run(&as_f32) });
             },
             on_error,
             None,
@@ -247,13 +327,22 @@ impl StreamMic {
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
+        let gate_meeting = meeting.clone();
+        // No meeting mic (`None`) counts as muted.
+        mixer.lock_unpoisoned().set_mute_gate(MIC_SOURCE, Arc::new(move || gate_meeting.muted() != Some(false)));
+        let thread_mixer = mixer.clone();
         let thread = std::thread::Builder::new()
             .name("petal-stream-mic".into())
             .spawn(move || {
-                run(meeting.as_ref(), &mixer, &reference, &thread_stop);
-                mixer.lock_unpoisoned().remove_source(MIC_SOURCE);
+                run(meeting.as_ref(), &thread_mixer, &reference, &thread_stop);
+                let mut mixer = thread_mixer.lock_unpoisoned();
+                mixer.remove_source(MIC_SOURCE);
+                mixer.clear_mute_gate(MIC_SOURCE);
             })
-            .map_err(|error| log::warn!("streaming: couldn't start the stream mic thread: {error}"))
+            .map_err(|error| {
+                log::warn!("streaming: couldn't start the stream mic thread: {error}");
+                mixer.lock_unpoisoned().clear_mute_gate(MIC_SOURCE);
+            })
             .ok();
         Self { stop, thread }
     }
@@ -274,6 +363,7 @@ fn run(meeting: &dyn MeetingMic, mixer: &Mutex<AudioMixer>, reference: &Mutex<Au
     let mut processor = MicProcessor::new(true);
     let mut capture: Option<OpenCapture> = None;
     let mut muted = meeting.muted();
+    let mut follower = MuteFollower::new(muted.unwrap_or(true));
     let mut device = meeting.device_name();
     let mut muted_at = Instant::now();
     let mut device_at = Instant::now();
@@ -298,8 +388,10 @@ fn run(meeting: &dyn MeetingMic, mixer: &Mutex<AudioMixer>, reference: &Mutex<Au
             device_at = now;
         }
         let Some(is_muted) = muted else {
-            // No meeting mic: nothing to capture.
+            // No meeting mic: nothing to capture, and the next mic starts
+            // from a mute boundary.
             capture = None;
+            follower = MuteFollower::new(true);
             std::thread::sleep(MUTE_POLL);
             continue;
         };
@@ -325,7 +417,17 @@ fn run(meeting: &dyn MeetingMic, mixer: &Mutex<AudioMixer>, reference: &Mutex<Au
         match capture.as_ref() {
             Some(open) => match open.chunks.recv_timeout(MUTE_POLL) {
                 Ok(chunk) => {
-                    processor.feed(&chunk, is_muted, reference, mixer);
+                    // Mute as of this chunk, not the last poll.
+                    let now_muted = meeting.muted().unwrap_or(true);
+                    let chunk_muted = follower.chunk_muted(
+                        now_muted,
+                        meeting.last_unmuted(),
+                        Instant::now(),
+                        chunk.at,
+                        chunk.latency,
+                        chunk.samples.len(),
+                    );
+                    processor.feed(&chunk.samples, chunk_muted, reference, mixer);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => capture = None,
@@ -391,6 +493,84 @@ mod tests {
         // Muted: the stream gets silence, whatever the mic hears.
         assert_eq!(processor.feed(&[9000; 720], true, &reference, &mixer), 0);
         assert!(mixer.lock_unpoisoned().pull(2 * APM_FRAMES).iter().all(|sample| *sample == 0));
+    }
+
+    /// #487: after an unmute, chunks captured before it (a backlog read
+    /// late, or one queued just after the unmute was seen) go out silent.
+    #[test]
+    fn chunks_captured_before_an_unmute_stay_silent() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let none = Duration::ZERO;
+        let mut follower = MuteFollower::new(true);
+        assert!(follower.chunk_muted(true, None, at(100), at(100), none, 480), "muted");
+        // Unmute seen at 500 ms while reading a backlog captured at 300 ms.
+        assert!(follower.chunk_muted(false, None, at(500), at(300), none, 480));
+        // Captured around the unmute, queued after it was seen.
+        assert!(follower.chunk_muted(false, None, at(510), at(505), none, 480));
+        // Delivered well after, but the device reports it captured 60 ms
+        // before its callback: from before the unmute.
+        assert!(follower.chunk_muted(false, None, at(560), at(560), Duration::from_millis(60), 480));
+        // Captured wholly after it.
+        assert!(!follower.chunk_muted(false, None, at(540), at(535), none, 480));
+        assert!(!follower.chunk_muted(false, None, at(600), at(600), Duration::from_millis(60), 480));
+        // Mute again: silent at once, and the next unmute starts over.
+        assert!(follower.chunk_muted(true, None, at(700), at(700), none, 480));
+        assert!(follower.chunk_muted(false, None, at(800), at(750), none, 480));
+        assert!(!follower.chunk_muted(false, None, at(850), at(845), none, 480));
+        // A whole mute the thread never saw: the meeting's record still
+        // bounds it (captured at 880-900 ms, unmuted at 950 ms, read at 990).
+        let mut stalled = MuteFollower::new(false);
+        assert!(stalled.chunk_muted(false, Some(at(950)), at(990), at(900), none, 960));
+        assert!(!stalled.chunk_muted(false, Some(at(950)), at(1000), at(1000), none, 480));
+        // Never muted: nothing held back.
+        let mut open = MuteFollower::new(false);
+        assert!(!open.chunk_muted(false, None, at(10), at(0), none, 480));
+    }
+
+    /// A partial block left over from a muted chunk never goes out with the
+    /// next, unmuted one, and the echo reference stays aligned.
+    #[test]
+    fn a_partial_block_fed_muted_stays_muted() {
+        let mut processor = MicProcessor::new(false);
+        let reference = Mutex::new(AudioMixer::with_prime(0));
+        let mixer = Mutex::new(AudioMixer::with_prime(0));
+        // 15 ms muted: one silent block, 5 ms held over.
+        processor.feed(&[9000; 720], true, &reference, &mixer);
+        // 5 ms unmuted completes the held block: still silent.
+        processor.feed(&[1200; 240], false, &reference, &mixer);
+        assert!(mixer.lock_unpoisoned().pull(2 * APM_FRAMES).iter().all(|s| *s == 0));
+        // The next whole block is heard.
+        processor.feed(&[1200; 480], false, &reference, &mixer);
+        assert!(mixer.lock_unpoisoned().pull(APM_FRAMES).iter().all(|s| (1199..=1201).contains(s)));
+    }
+
+    #[test]
+    fn the_stream_mic_gates_its_source_at_the_mix() {
+        // No meeting mic: nothing is opened, and it counts as muted.
+        struct NoMic;
+        impl MeetingMic for NoMic {
+            fn muted(&self) -> Option<bool> {
+                None
+            }
+            fn device_name(&self) -> Option<String> {
+                None
+            }
+        }
+        let loud = || vec![5000i16; 4 * 1024 * MIX_CHANNELS];
+        let mixer = Arc::new(Mutex::new(AudioMixer::new()));
+        let reference = Arc::new(Mutex::new(AudioMixer::with_prime(0)));
+        let mic = StreamMic::start(Arc::new(NoMic), mixer.clone(), reference);
+        // Speech in the mic's slot, as a capture behind the mute would push.
+        mixer.lock_unpoisoned().push(MIC_SOURCE, &loud(), MIX_CHANNELS);
+        let (block, _) = crate::streaming::mixer::pull_block_gated(&mixer);
+        assert!(block.iter().all(|s| *s == 0), "muted at the mix");
+        drop(mic);
+        assert_eq!(mixer.lock_unpoisoned().source_count(), 0, "removed on stop");
+        // The gate leaves with the mic.
+        mixer.lock_unpoisoned().push(MIC_SOURCE, &loud(), MIX_CHANNELS);
+        let (block, _) = crate::streaming::mixer::pull_block_gated(&mixer);
+        assert!(block.iter().all(|s| *s == 5000));
     }
 
     #[test]

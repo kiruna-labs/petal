@@ -753,6 +753,14 @@ impl SessionState {
         self.apply_effective_mic_mute();
     }
 
+    /// Whether the mic is meant to be muted right now (the user's mute or
+    /// AI-chat ducking), as soon as it is asked: the live track follows a
+    /// moment later (`apply_effective_mic_mute`). The live stream mutes on
+    /// this (#487).
+    pub(crate) fn mic_mute_intended(&self) -> bool {
+        self.desired_mic_muted.load(Ordering::SeqCst) || self.ai_chat_ducking.load(Ordering::SeqCst)
+    }
+
     #[cfg(test)]
     pub(crate) fn ai_chat_ducking(&self) -> bool {
         self.ai_chat_ducking.load(Ordering::SeqCst)

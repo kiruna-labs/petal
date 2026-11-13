@@ -532,6 +532,9 @@ pub struct MicTrack {
     audio: PlatformAudio,
     track: LocalAudioTrack,
     muted: AtomicBool,
+    /// When the mic was last unmuted: the live stream silences any audio
+    /// captured before it, however late it reads it (#487).
+    unmuted_at: Mutex<Option<std::time::Instant>>,
     /// The recording device id this track was (re-)pinned to, as of the last
     /// successful enumeration -- read+compared by
     /// `refresh_default_recording_device` to detect "the default device
@@ -682,7 +685,14 @@ impl MicTrack {
     /// Record the user's latest mute intent synchronously so UI reads stay
     /// immediate even when the SDK call is dispatched onto Tauri's runtime.
     pub fn cache_muted_state(&self, muted: bool) {
-        self.muted.store(muted, Ordering::SeqCst);
+        if self.muted.swap(muted, Ordering::SeqCst) && !muted {
+            *self.unmuted_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
+        }
+    }
+
+    /// When this mic was last unmuted, if it has been.
+    pub fn last_unmuted_at(&self) -> Option<std::time::Instant> {
+        *self.unmuted_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Mute or unmute the published mic track in place -- see module doc
@@ -1336,6 +1346,7 @@ impl PreparedMicrophone {
             audio: self.audio,
             track: self.track,
             muted: AtomicBool::new(self.muted),
+            unmuted_at: Mutex::new(None),
             current_device: Mutex::new(self.current_device),
             user_pinned: AtomicBool::new(self.user_pinned),
             do_not_retry: Mutex::new(self.failed_switch.into_iter().collect()),

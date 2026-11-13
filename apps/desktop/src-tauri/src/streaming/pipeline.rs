@@ -38,7 +38,6 @@ use super::tap::TapPixels;
 use super::windows_encode::{
     AacEncoder, BgraView, Converter, EncodedVideo, EncoderDevice, H264Encoder, MediaRuntime,
 };
-use crate::sync_ext::MutexExt;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineConfig {
@@ -307,10 +306,8 @@ fn run(
 
         // Audio: every due block, in order.
         while audio_pts(audio_blocks) <= elapsed {
-            let (pcm, sources) = {
-                let mut mixer = mixer.lock_unpoisoned();
-                (mixer.pull_block(), mixer.source_count())
-            };
+            // Mutes apply here, at the mix (#487): `pull_block_gated`.
+            let (pcm, sources) = super::mixer::pull_block_gated(mixer);
             mix_level.add(&pcm);
             // ~30 s: what the stream actually carries.
             if audio_blocks % 1_400 == 1_399 {
@@ -398,6 +395,7 @@ fn run(
 mod tests {
     use super::*;
     use crate::streaming::rtmp::test_server::{serve, Received};
+    use crate::sync_ext::MutexExt;
     use crate::streaming::rtmp::{run_publisher, PublisherState, PublisherStats, RtmpDestination};
     use crate::streaming::tap::{self, TapFrame};
     use shiguredo_rtmp::{AvcPacketType, AvcSequenceHeader, VideoCodec};
