@@ -10,12 +10,12 @@
 //! (the "gutter"), and the page pads its card by the same amount.
 //!
 //! The gutter is transparent but would still swallow clicks (a transparent
-//! WKWebView panel hit-tests its whole frame), so while a gutter panel is
-//! visible a light main-thread poll makes the window ignore cursor events
-//! whenever the cursor is outside the card, and take them again inside it.
-//! The poll is parked (no thread wakeups, no main-thread hops) while every
-//! gutter panel is hidden: each panel's show path calls [`panel_shown`],
-//! and the first tick that sees no gutter panel on screen parks it again.
+//! WKWebView panel hit-tests its whole frame), so the window ignores cursor
+//! events whenever the cursor is outside the card and takes them again inside
+//! it. That flip is driven by pointer `NSEvent` monitors (installed when a
+//! gutter panel is shown, removed on the first pointer event that finds none
+//! on screen; no events while the cursor is still), plus re-evaluation on
+//! [`panel_shown`] and on a tracked panel's move/resize; see [`Passthrough`].
 //!
 //! The extents mirror `shared/ui/tokens.css` (`--shadow-float`,
 //! `--shadow-panel`); `tests/shadowGutter.test.ts` fails if they drift.
@@ -82,201 +82,301 @@ pub fn route_with_gutter(route: &str, gutter: ShadowGutter) -> String {
     format!("{route}{separator}shadowGutter={}", gutter.query_value())
 }
 
-/// When the pass-through poll runs. Pure, so the park/wake transitions are
-/// unit-tested without AppKit.
-///
-/// The poll costs nothing while every gutter panel is hidden: its thread is
-/// parked until a panel's show path calls [`panel_shown`], polls only while a
-/// tick still sees a gutter panel on screen, and parks again on the first
-/// tick that sees none. `wakes` counts `panel_shown` calls so a show that
-/// lands while a tick is deciding is never lost to that tick parking.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PollGate {
-    awake: bool,
-    wakes: u64,
+/// What the caller must do with the pointer-motion monitors after a
+/// [`Passthrough`] transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonitorAction {
+    None,
+    /// A gutter panel was shown: start observing pointer motion.
+    Install,
+    /// No gutter panel is on screen: stop observing.
+    Remove,
 }
 
-impl PollGate {
-    /// A tracked panel was just shown: poll.
-    pub fn wake(&mut self) {
-        self.awake = true;
-        self.wakes = self.wakes.wrapping_add(1);
-    }
-
-    /// Whether the poll thread should run a tick now (otherwise it parks).
-    pub fn should_poll(&self) -> bool {
-        self.awake
-    }
-
-    /// Snapshot taken when a tick starts, passed back to [`Self::after_tick`].
-    pub fn tick_started(&self) -> u64 {
-        self.wakes
-    }
-
-    /// A tick that started at `started` saw `any_visible` gutter panels on
-    /// screen. Park only if nothing was visible AND no panel was shown since
-    /// the tick started.
-    pub fn after_tick(&mut self, started: u64, any_visible: bool) {
-        if !any_visible && self.wakes == started {
-            self.awake = false;
-        }
-    }
+/// A tracked panel window, as the pass-through state machine sees it. The
+/// app implements it for `tauri::WebviewWindow`; tests use a fake.
+pub trait GutterWindow {
+    fn is_visible(&self) -> bool;
+    /// Frame in global top-left logical points: `(x, y, width, height)`.
+    fn frame(&self) -> Option<(f64, f64, f64, f64)>;
+    fn set_ignore_cursor_events(&self, ignore: bool);
 }
 
-#[cfg(target_os = "macos")]
-mod passthrough {
-    use super::{PollGate, ShadowGutter};
-    use crate::sync_ext::MutexExt;
-    use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Condvar, Mutex, OnceLock};
-    use std::time::Duration;
-    use tauri::{AppHandle, Manager, WebviewWindow};
+struct Tracked {
+    gutter: ShadowGutter,
+    /// Last value handed to `set_ignore_cursor_events`; `None` = unknown.
+    ignoring: Option<bool>,
+    /// Shown and not yet seen hidden. Only these are re-evaluated, so a
+    /// hidden (e.g. retired) panel costs no window lookups per event.
+    on_screen: bool,
+}
 
-    struct Tracked {
-        gutter: ShadowGutter,
-        /// Last value handed to `set_ignore_cursor_events`; `None` until the
-        /// panel is first shown.
-        ignoring: Option<bool>,
-    }
+/// Which gutter panels are click-through, re-evaluated on pointer events and
+/// on a tracked panel's move/resize rather than on a timer: a 30 ms poll left
+/// the card deaf to a fast move-and-click and never parked while an overlay
+/// stayed open (#415). `ignoresMouseEvents` is per window, and `hitTest:`
+/// returning nil drops a click instead of passing it to the window behind, so
+/// the whole window is flipped as soon as the cursor crosses the card edge.
+#[derive(Default)]
+pub struct Passthrough {
+    tracked: std::collections::HashMap<String, Tracked>,
+    monitors_installed: bool,
+}
 
-    fn registry() -> &'static Mutex<HashMap<String, Tracked>> {
-        static REGISTRY: OnceLock<Mutex<HashMap<String, Tracked>>> = OnceLock::new();
-        REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
-    }
-
-    fn gate() -> &'static (Mutex<PollGate>, Condvar) {
-        static GATE: OnceLock<(Mutex<PollGate>, Condvar)> = OnceLock::new();
-        GATE.get_or_init(|| (Mutex::new(PollGate::default()), Condvar::new()))
-    }
-
-    static POLL_STARTED: AtomicBool = AtomicBool::new(false);
-
-    /// Set while a tick is queued on or running on the main thread. The poll
-    /// posts no new tick until it clears, so a stalled main thread never
-    /// accumulates a backlog of ticks.
-    static TICK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
-    /// Poll period while a gutter panel is on screen: fast enough that the
-    /// card takes the click before the user's press lands on it. There is no
-    /// idle period: with every panel hidden the thread is parked.
-    const ACTIVE_PERIOD: Duration = Duration::from_millis(30);
-
-    /// Make the gutter of the window `label` click-through while it is
-    /// visible. Idempotent; call once after creating the panel. Starts the
-    /// (parked) poll thread on first use; it does no work until
-    /// [`panel_shown`].
-    pub fn track(app: &AppHandle, label: &str, gutter: ShadowGutter) {
-        registry().lock_unpoisoned().insert(
+impl Passthrough {
+    pub fn track(&mut self, label: &str, gutter: ShadowGutter) {
+        self.tracked.insert(
             label.to_string(),
             Tracked {
                 gutter,
                 ignoring: None,
+                on_screen: false,
             },
         );
-        if POLL_STARTED.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let app = app.clone();
-        let spawned = std::thread::Builder::new()
-            .name("shadow-gutter".into())
-            .spawn(move || poll_loop(app));
-        if let Err(e) = spawned {
-            POLL_STARTED.store(false, Ordering::Release);
-            log::warn!("shadow_gutter: failed to start pass-through poll: {e}");
+    }
+
+    /// The panel `label` was just shown. Its pass-through is set for the
+    /// cursor's position NOW, unconditionally (it may have hidden while
+    /// click-through); with an unknown cursor or frame it takes clicks.
+    pub fn shown(
+        &mut self,
+        label: &str,
+        window: &impl GutterWindow,
+        cursor: Option<(f64, f64)>,
+    ) -> MonitorAction {
+        let Some(tracked) = self.tracked.get_mut(label) else {
+            return MonitorAction::None;
+        };
+        let ignore = match (cursor, window.frame()) {
+            (Some(cursor), Some(frame)) => !tracked.gutter.cursor_over_card(cursor, frame),
+            _ => false,
+        };
+        window.set_ignore_cursor_events(ignore);
+        tracked.ignoring = Some(ignore);
+        tracked.on_screen = true;
+        if self.monitors_installed {
+            MonitorAction::None
+        } else {
+            self.monitors_installed = true;
+            MonitorAction::Install
         }
     }
 
-    /// Main thread, right where a tracked panel is shown. The panel takes
-    /// clicks again at once (it may have hidden while its gutter was
-    /// click-through), and the parked poll wakes to manage the gutter while
-    /// it is on screen. A no-op for a window that is not tracked.
-    pub fn panel_shown(window: &WebviewWindow) {
-        {
-            let mut registry = registry().lock_unpoisoned();
-            let Some(tracked) = registry.get_mut(window.label()) else {
-                return;
-            };
-            if tracked.ignoring != Some(false) {
-                let _ = window.set_ignore_cursor_events(false);
-                tracked.ignoring = Some(false);
-            }
-        }
-        let (lock, condvar) = gate();
-        lock.lock_unpoisoned().wake();
-        condvar.notify_one();
-    }
-
-    fn poll_loop(app: AppHandle) {
-        let (lock, condvar) = gate();
-        loop {
-            {
-                let mut state = lock.lock_unpoisoned();
-                while !state.should_poll() {
-                    state = condvar.wait(state).unwrap_or_else(|e| e.into_inner());
-                }
-            }
-            std::thread::sleep(ACTIVE_PERIOD);
-            if TICK_IN_FLIGHT.swap(true, Ordering::AcqRel) {
-                continue;
-            }
-            let app_main = app.clone();
-            if app
-                .run_on_main_thread(move || {
-                    tick(&app_main);
-                    TICK_IN_FLIGHT.store(false, Ordering::Release);
-                })
-                .is_err()
-            {
-                TICK_IN_FLIGHT.store(false, Ordering::Release);
-            }
+    /// Installing the monitors failed after showing `label`. Nothing would
+    /// flip it back, so it takes clicks (a swallowed gutter click beats a
+    /// click-through card) and is left out of re-evaluation until the next
+    /// show, which retries.
+    pub fn install_failed(&mut self, label: &str, window: &impl GutterWindow) {
+        self.monitors_installed = false;
+        if let Some(tracked) = self.tracked.get_mut(label) {
+            window.set_ignore_cursor_events(false);
+            tracked.ignoring = Some(false);
+            tracked.on_screen = false;
         }
     }
 
-    /// Main thread: flip each visible gutter panel's cursor pass-through to
-    /// match whether the cursor is over its card, then park the poll if no
-    /// gutter panel is on screen.
-    fn tick(app: &AppHandle) {
-        let started = gate().0.lock_unpoisoned().tick_started();
-        let cursor = crate::platform::cg::cursor_position();
+    /// Re-evaluate every on-screen panel for the cursor at `cursor` (it
+    /// moved, or a panel moved/resized under it); flip each one whose card
+    /// edge it is now on the other side of. Untracks panels whose window is
+    /// gone; once no tracked panel is on screen, stop observing.
+    pub fn reevaluate<W: GutterWindow>(
+        &mut self,
+        cursor: Option<(f64, f64)>,
+        mut window: impl FnMut(&str) -> Option<W>,
+    ) -> MonitorAction {
         let mut any_visible = false;
-        {
-            let mut registry = registry().lock_unpoisoned();
-            for (label, tracked) in registry.iter_mut() {
-                let Some(window) = app.get_webview_window(label) else {
-                    continue;
-                };
-                if !window.is_visible().unwrap_or(false) {
-                    continue;
-                }
-                any_visible = true;
-                let (Some(cursor), Ok(position), Ok(size), Ok(scale)) = (
-                    cursor,
-                    window.outer_position(),
-                    window.outer_size(),
-                    window.scale_factor(),
-                ) else {
-                    continue;
-                };
-                let scale = scale.max(1.0);
-                let frame = (
-                    position.x as f64 / scale,
-                    position.y as f64 / scale,
-                    size.width as f64 / scale,
-                    size.height as f64 / scale,
-                );
-                let ignore = !tracked.gutter.cursor_over_card(cursor, frame);
-                if tracked.ignoring != Some(ignore) {
-                    let _ = window.set_ignore_cursor_events(ignore);
-                    tracked.ignoring = Some(ignore);
-                }
+        self.tracked.retain(|label, tracked| {
+            if !tracked.on_screen {
+                return true;
             }
+            let Some(win) = window(label) else {
+                return false;
+            };
+            if !win.is_visible() {
+                tracked.on_screen = false;
+                return true;
+            }
+            any_visible = true;
+            let (Some(cursor), Some(frame)) = (cursor, win.frame()) else {
+                return true;
+            };
+            let ignore = !tracked.gutter.cursor_over_card(cursor, frame);
+            if tracked.ignoring != Some(ignore) {
+                win.set_ignore_cursor_events(ignore);
+                tracked.ignoring = Some(ignore);
+            }
+            true
+        });
+        if !any_visible && self.monitors_installed {
+            self.monitors_installed = false;
+            MonitorAction::Remove
+        } else {
+            MonitorAction::None
         }
-        gate().0.lock_unpoisoned().after_tick(started, any_visible);
     }
 }
 
-#[cfg(target_os = "macos")]
+mod passthrough {
+    use super::{GutterWindow, MonitorAction, Passthrough, ShadowGutter};
+    use crate::sync_ext::MutexExt;
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSEvent, NSEventMask};
+    use std::cell::RefCell;
+    use std::ptr::NonNull;
+    use std::sync::{Mutex, OnceLock};
+    use tauri::{AppHandle, Manager, WebviewWindow, WindowEvent};
+
+    fn state() -> &'static Mutex<Passthrough> {
+        static STATE: OnceLock<Mutex<Passthrough>> = OnceLock::new();
+        STATE.get_or_init(|| Mutex::new(Passthrough::default()))
+    }
+
+    thread_local! {
+        /// Main thread only: the global + local monitor tokens while installed.
+        static MONITORS: RefCell<Vec<Retained<AnyObject>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    impl GutterWindow for WebviewWindow {
+        fn is_visible(&self) -> bool {
+            WebviewWindow::is_visible(self).unwrap_or(false)
+        }
+
+        fn frame(&self) -> Option<(f64, f64, f64, f64)> {
+            let position = self.outer_position().ok()?;
+            let size = self.outer_size().ok()?;
+            let scale = self.scale_factor().ok()?.max(1.0);
+            Some((
+                position.x as f64 / scale,
+                position.y as f64 / scale,
+                size.width as f64 / scale,
+                size.height as f64 / scale,
+            ))
+        }
+
+        fn set_ignore_cursor_events(&self, ignore: bool) {
+            let _ = WebviewWindow::set_ignore_cursor_events(self, ignore);
+        }
+    }
+
+    /// Make the gutter of the window `label` click-through while it is
+    /// visible. Call once after creating the panel. A move or resize of the
+    /// panel re-evaluates it, so a card that slides under a still cursor
+    /// takes the click.
+    pub fn track(app: &AppHandle, label: &str, gutter: ShadowGutter) {
+        state().lock_unpoisoned().track(label, gutter);
+        let Some(window) = app.get_webview_window(label) else {
+            return;
+        };
+        let app = app.clone();
+        window.on_window_event(move |event| {
+            if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
+                reevaluate(&app);
+            }
+        });
+    }
+
+    /// Main thread, right after a tracked panel is shown and positioned: set
+    /// its pass-through for the current cursor before it can take a click,
+    /// and observe pointer events while it is on screen. No-op if untracked.
+    pub fn panel_shown(window: &WebviewWindow) {
+        let cursor = crate::platform::cg::cursor_position();
+        let action = state()
+            .lock_unpoisoned()
+            .shown(window.label(), window, cursor);
+        if action == MonitorAction::Install && !install_monitors(window.app_handle()) {
+            state()
+                .lock_unpoisoned()
+                .install_failed(window.label(), window);
+        }
+    }
+
+    /// Main thread: from either monitor, or a tracked panel's move/resize.
+    fn reevaluate(app: &AppHandle) {
+        if objc2::MainThreadMarker::new().is_none() {
+            return;
+        }
+        let cursor = crate::platform::cg::cursor_position();
+        let action = state()
+            .lock_unpoisoned()
+            .reevaluate(cursor, |label| app.get_webview_window(label));
+        if action == MonitorAction::Remove {
+            remove_monitors();
+        }
+    }
+
+    /// Motion, drags and button releases (a release that reaches a monitor
+    /// settles a drag whose motion a tracking loop consumed).
+    fn pointer_mask() -> NSEventMask {
+        NSEventMask::MouseMoved
+            | NSEventMask::LeftMouseDragged
+            | NSEventMask::RightMouseDragged
+            | NSEventMask::OtherMouseDragged
+            | NSEventMask::LeftMouseUp
+            | NSEventMask::RightMouseUp
+            | NSEventMask::OtherMouseUp
+    }
+
+    /// Global monitor: events delivered to other apps (the cursor is over a
+    /// click-through gutter or outside our windows). Local monitor: events
+    /// delivered to us. Both handlers run on the main thread. Installs both
+    /// or neither; returns whether they are installed.
+    fn install_monitors(app: &AppHandle) -> bool {
+        if objc2::MainThreadMarker::new().is_none() {
+            log::warn!("shadow_gutter: pointer monitors must be installed on the main thread");
+            return false;
+        }
+        MONITORS.with(|cell| {
+            let mut monitors = cell.borrow_mut();
+            if !monitors.is_empty() {
+                return true;
+            }
+            let global_app = app.clone();
+            let global = RcBlock::new(move |_event: NonNull<NSEvent>| {
+                reevaluate(&global_app);
+            });
+            let local_app = app.clone();
+            let local = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+                reevaluate(&local_app);
+                event.as_ptr()
+            });
+            if let Some(token) =
+                NSEvent::addGlobalMonitorForEventsMatchingMask_handler(pointer_mask(), &global)
+            {
+                monitors.push(token);
+            }
+            // SAFETY: the handler returns the event it was given, unchanged.
+            if let Some(token) = unsafe {
+                NSEvent::addLocalMonitorForEventsMatchingMask_handler(pointer_mask(), &local)
+            } {
+                monitors.push(token);
+            }
+            if monitors.len() == 2 {
+                return true;
+            }
+            log::warn!(
+                "shadow_gutter: installed {} of 2 pointer monitors; retrying on next show",
+                monitors.len()
+            );
+            for token in monitors.drain(..) {
+                // SAFETY: the token came from NSEvent's add*Monitor methods.
+                unsafe { NSEvent::removeMonitor(&token) };
+            }
+            false
+        })
+    }
+
+    fn remove_monitors() {
+        MONITORS.with(|cell| {
+            for token in cell.borrow_mut().drain(..) {
+                // SAFETY: every token came from NSEvent's add*Monitor methods.
+                unsafe { NSEvent::removeMonitor(&token) };
+            }
+        });
+    }
+}
+
 pub use passthrough::{panel_shown, track};
 
 #[cfg(test)]
@@ -298,44 +398,250 @@ mod tests {
         assert!(FLOAT.cursor_over_card((100.0, 100.0), frame));
         assert!(FLOAT.cursor_over_card((299.0, 179.0), frame));
         assert!(!FLOAT.cursor_over_card((99.0, 120.0), frame), "left gutter");
-        assert!(!FLOAT.cursor_over_card((300.0, 120.0), frame), "right gutter");
+        assert!(
+            !FLOAT.cursor_over_card((300.0, 120.0), frame),
+            "right gutter"
+        );
         assert!(!FLOAT.cursor_over_card((150.0, 95.0), frame), "top gutter");
-        assert!(!FLOAT.cursor_over_card((150.0, 200.0), frame), "bottom gutter");
+        assert!(
+            !FLOAT.cursor_over_card((150.0, 200.0), frame),
+            "bottom gutter"
+        );
+    }
+
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    /// A panel window: frame + visibility + every `set_ignore_cursor_events`
+    /// call it received, in order.
+    #[derive(Clone)]
+    struct FakeWindow {
+        visible: Rc<Cell<bool>>,
+        frame: (f64, f64, f64, f64),
+        calls: Rc<RefCell<Vec<bool>>>,
+    }
+
+    impl FakeWindow {
+        /// A FLOAT-gutter panel whose 200x80 card's top-left is (100, 100).
+        fn card_at_100() -> Self {
+            let (x, y) = FLOAT.window_origin(100.0, 100.0);
+            let (w, h) = FLOAT.window_size(200.0, 80.0);
+            Self {
+                visible: Rc::new(Cell::new(true)),
+                frame: (x, y, w, h),
+                calls: Rc::default(),
+            }
+        }
+
+        fn ignoring(&self) -> Option<bool> {
+            self.calls.borrow().last().copied()
+        }
+    }
+
+    impl GutterWindow for FakeWindow {
+        fn is_visible(&self) -> bool {
+            self.visible.get()
+        }
+        fn frame(&self) -> Option<(f64, f64, f64, f64)> {
+            Some(self.frame)
+        }
+        fn set_ignore_cursor_events(&self, ignore: bool) {
+            self.calls.borrow_mut().push(ignore);
+        }
+    }
+
+    const ON_CARD: (f64, f64) = (150.0, 140.0);
+    const IN_GUTTER: (f64, f64) = (90.0, 140.0);
+
+    fn moved(p: &mut Passthrough, w: &FakeWindow, cursor: (f64, f64)) -> MonitorAction {
+        p.reevaluate(Some(cursor), |label| {
+            (label == "consent").then(|| w.clone())
+        })
     }
 
     #[test]
-    fn poll_is_parked_until_a_panel_is_shown() {
-        let mut gate = PollGate::default();
-        assert!(!gate.should_poll(), "nothing shown yet: parked, zero cost");
-        gate.wake();
-        assert!(gate.should_poll());
+    fn show_sets_pass_through_for_the_cursor_now_and_starts_observing() {
+        let mut p = Passthrough::default();
+        p.track("consent", FLOAT);
+        let w = FakeWindow::card_at_100();
+        assert_eq!(
+            p.shown("consent", &w, Some(ON_CARD)),
+            MonitorAction::Install
+        );
+        assert_eq!(
+            w.ignoring(),
+            Some(false),
+            "card under the cursor takes the first click"
+        );
+        let w2 = FakeWindow::card_at_100();
+        assert_eq!(
+            p.shown("consent", &w2, Some(IN_GUTTER)),
+            MonitorAction::None,
+            "already observing"
+        );
+        assert_eq!(
+            w2.ignoring(),
+            Some(true),
+            "gutter under the cursor is click-through at once"
+        );
+        assert_eq!(p.shown("consent", &w2, None), MonitorAction::None);
+        assert_eq!(w2.ignoring(), Some(false), "unknown cursor: take clicks");
+        assert_eq!(
+            p.shown("untracked", &w2, Some(IN_GUTTER)),
+            MonitorAction::None
+        );
     }
 
     #[test]
-    fn poll_keeps_running_while_a_panel_is_visible_and_parks_once_none_is() {
-        let mut gate = PollGate::default();
-        gate.wake();
-        let started = gate.tick_started();
-        gate.after_tick(started, true);
-        assert!(gate.should_poll(), "a gutter panel is on screen");
-        let started = gate.tick_started();
-        gate.after_tick(started, false);
-        assert!(!gate.should_poll(), "first tick that sees nothing parks");
+    fn crossing_back_onto_the_card_takes_clicks_on_that_motion_event() {
+        // Edge lag (#415): the card must take clicks on the very motion event
+        // that crosses its edge, not on a later timer tick.
+        let mut p = Passthrough::default();
+        p.track("consent", FLOAT);
+        let w = FakeWindow::card_at_100();
+        p.shown("consent", &w, Some(ON_CARD));
+        moved(&mut p, &w, IN_GUTTER);
+        assert_eq!(w.ignoring(), Some(true));
+        moved(&mut p, &w, ON_CARD);
+        assert_eq!(w.ignoring(), Some(false));
+        moved(&mut p, &w, (151.0, 141.0));
+        assert_eq!(
+            *w.calls.borrow(),
+            vec![false, true, false],
+            "flips only on a crossing"
+        );
     }
 
     #[test]
-    fn a_show_during_a_tick_is_not_lost_to_that_tick_parking() {
-        let mut gate = PollGate::default();
-        gate.wake();
-        let started = gate.tick_started();
-        // The panel is shown while the tick is still deciding (it saw the
-        // panel as hidden); the tick must not park the poll.
-        gate.wake();
-        gate.after_tick(started, false);
-        assert!(gate.should_poll());
-        let started = gate.tick_started();
-        gate.after_tick(started, false);
-        assert!(!gate.should_poll());
+    fn re_show_after_hiding_in_the_gutter_takes_clicks_immediately() {
+        let mut p = Passthrough::default();
+        p.track("consent", FLOAT);
+        let w = FakeWindow::card_at_100();
+        p.shown("consent", &w, Some(ON_CARD));
+        moved(&mut p, &w, IN_GUTTER);
+        w.visible.set(false);
+        // Re-shown under a cursor that is now on the card (the card moved or
+        // the cursor did, with no motion event while hidden).
+        w.visible.set(true);
+        p.shown("consent", &w, Some(ON_CARD));
+        assert_eq!(w.ignoring(), Some(false));
+    }
+
+    #[test]
+    fn observing_stops_once_no_panel_is_visible_and_resumes_on_show() {
+        let mut p = Passthrough::default();
+        p.track("consent", FLOAT);
+        let w = FakeWindow::card_at_100();
+        assert_eq!(
+            p.shown("consent", &w, Some(ON_CARD)),
+            MonitorAction::Install
+        );
+        assert_eq!(
+            moved(&mut p, &w, IN_GUTTER),
+            MonitorAction::None,
+            "visible: keep observing"
+        );
+        w.visible.set(false);
+        assert_eq!(moved(&mut p, &w, ON_CARD), MonitorAction::Remove);
+        assert_eq!(
+            moved(&mut p, &w, ON_CARD),
+            MonitorAction::None,
+            "removed once"
+        );
+        assert_eq!(
+            *w.calls.borrow(),
+            vec![false, true],
+            "a hidden panel is never flipped"
+        );
+        w.visible.set(true);
+        assert_eq!(
+            p.shown("consent", &w, Some(ON_CARD)),
+            MonitorAction::Install
+        );
+    }
+
+    #[test]
+    fn a_card_that_moves_under_a_still_cursor_takes_the_click() {
+        // A panel move/resize re-evaluates with the same cursor position.
+        let mut p = Passthrough::default();
+        p.track("consent", FLOAT);
+        let mut w = FakeWindow::card_at_100();
+        p.shown("consent", &w, Some(IN_GUTTER));
+        assert_eq!(w.ignoring(), Some(true));
+        w.frame.0 -= 40.0; // card now spans x 60..260, under the cursor at x 90
+        moved(&mut p, &w, IN_GUTTER);
+        assert_eq!(w.ignoring(), Some(false));
+    }
+
+    #[test]
+    fn a_failed_monitor_install_is_retried_on_the_next_show() {
+        let mut p = Passthrough::default();
+        p.track("consent", FLOAT);
+        let w = FakeWindow::card_at_100();
+        assert_eq!(
+            p.shown("consent", &w, Some(IN_GUTTER)),
+            MonitorAction::Install
+        );
+        assert_eq!(w.ignoring(), Some(true));
+        p.install_failed("consent", &w);
+        assert_eq!(
+            w.ignoring(),
+            Some(false),
+            "nothing would flip it back: take clicks"
+        );
+        moved(&mut p, &w, IN_GUTTER); // e.g. a queued Moved from the show sequence
+        assert_eq!(
+            w.ignoring(),
+            Some(false),
+            "unobserved: must not turn click-through again"
+        );
+        assert_eq!(
+            p.shown("consent", &w, Some(ON_CARD)),
+            MonitorAction::Install
+        );
+    }
+
+    #[test]
+    fn a_destroyed_window_is_untracked() {
+        let mut p = Passthrough::default();
+        p.track("consent", FLOAT);
+        let w = FakeWindow::card_at_100();
+        p.shown("consent", &w, Some(ON_CARD));
+        assert_eq!(
+            p.reevaluate(Some(ON_CARD), |_| None::<FakeWindow>),
+            MonitorAction::Remove
+        );
+        assert_eq!(
+            p.shown("consent", &w, Some(ON_CARD)),
+            MonitorAction::None,
+            "no longer tracked"
+        );
+    }
+
+    #[test]
+    fn a_hidden_panel_is_not_queried_per_pointer_event() {
+        let mut p = Passthrough::default();
+        p.track("consent", FLOAT);
+        p.track("retired-overlay", FLOAT);
+        let w = FakeWindow::card_at_100();
+        p.shown("consent", &w, Some(ON_CARD));
+        let mut asked = Vec::new();
+        p.reevaluate(Some(ON_CARD), |label| {
+            asked.push(label.to_string());
+            Some(w.clone())
+        });
+        assert_eq!(asked, vec!["consent"], "never-shown panel is not looked up");
+        w.visible.set(false);
+        moved(&mut p, &w, ON_CARD);
+        let mut asked = 0;
+        p.reevaluate(Some(ON_CARD), |_| {
+            asked += 1;
+            Some(w.clone())
+        });
+        assert_eq!(
+            asked, 0,
+            "seen hidden once: no longer looked up until shown"
+        );
     }
 
     #[test]
