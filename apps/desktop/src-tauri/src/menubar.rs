@@ -275,8 +275,8 @@ mod platform {
         NSStatusBar, NSStatusItem,
     };
     use objc2_foundation::{
-        NSDictionary, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
-        NSString,
+        NSDictionary, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSProcessInfo,
+        NSRect, NSSize, NSString,
     };
     use std::cell::RefCell;
     use std::sync::Mutex;
@@ -369,6 +369,32 @@ mod platform {
         } else {
             ClickZone::Body
         }
+    }
+
+    /// A click older than this is not the one that sent the action.
+    const PILL_CLICK_MAX_AGE_SECS: f64 = 1.0;
+
+    /// The `currentEvent` facts `pill_click_x` needs.
+    #[derive(Debug, Clone, Copy)]
+    struct PillActionEvent {
+        kind: NSEventType,
+        on_pill_window: bool,
+        age_secs: f64,
+        x: f64,
+    }
+
+    /// The x to hit-test for a status-item action. Only a fresh left-mouse
+    /// event on the pill's own window is the click that sent it. An AX press
+    /// (VoiceOver, Switch Control) or keyboard activation has no current
+    /// event -- it used to read as x = f64::MAX, the leave circle -- or a
+    /// stale one: `currentEvent` is the last event handled, which can be an
+    /// earlier click in another Petal window.
+    fn pill_click_x(event: Option<PillActionEvent>) -> Option<f64> {
+        let event = event?;
+        let left_mouse =
+            event.kind == NSEventType::LeftMouseDown || event.kind == NSEventType::LeftMouseUp;
+        let fresh = (0.0..=PILL_CLICK_MAX_AGE_SECS).contains(&event.age_secs);
+        (left_mouse && event.on_pill_window && fresh).then_some(event.x)
     }
 
     /// The zone a status-item action lands in. `click_x` is the x of the
@@ -523,18 +549,24 @@ mod platform {
                 };
 
                 let _ = sender;
-                // Only a mouse click has a position. An Accessibility press
-                // arrives with no current event (or an unrelated one), which
-                // used to read as x = f64::MAX, the leave circle.
-                let click_x = NSApplication::sharedApplication(mtm)
-                    .currentEvent()
-                    .filter(|event| {
-                        let kind = event.r#type();
-                        kind == NSEventType::LeftMouseDown || kind == NSEventType::LeftMouseUp
-                    })
-                    .map(|event| event.locationInWindow().x);
-
                 let ivars = self.ivars();
+                // Only the click that sent this action has a position. An AX
+                // press arrives with no current event, or a stale one.
+                let pill_window_number = ivars
+                    .status_item
+                    .button(mtm)
+                    .and_then(|b| b.window())
+                    .map(|w| w.windowNumber());
+                let now = NSProcessInfo::processInfo().systemUptime();
+                let click_x = pill_click_x(NSApplication::sharedApplication(mtm).currentEvent().map(
+                    |event| PillActionEvent {
+                        kind: event.r#type(),
+                        on_pill_window: pill_window_number == Some(event.windowNumber()),
+                        age_secs: now - event.timestamp(),
+                        x: event.locationInWindow().x,
+                    },
+                ));
+
                 let state = with_state(|s| *s);
                 let width = if state.in_meeting && !state.minimal {
                     PILL_WIDTH_FULL
@@ -1643,6 +1675,47 @@ mod platform {
             for x in [0.0, PILL_WIDTH_MINIMAL / 2.0, PILL_WIDTH_MINIMAL] {
                 assert_eq!(
                     click_zone(x, PILL_WIDTH_MINIMAL, true, true),
+                    ClickZone::Body
+                );
+            }
+        }
+
+        #[test]
+        fn only_the_click_that_sent_the_action_has_a_position() {
+            let click = |kind, on_pill_window, age_secs| {
+                pill_click_x(Some(PillActionEvent {
+                    kind,
+                    on_pill_window,
+                    age_secs,
+                    x: PILL_WIDTH_FULL,
+                }))
+            };
+            // No current event: an AX press (VoiceOver, Switch Control).
+            assert_eq!(pill_click_x(None), None);
+            // A real click on the pill, down or up, keeps its position.
+            assert_eq!(
+                click(NSEventType::LeftMouseUp, true, 0.01),
+                Some(PILL_WIDTH_FULL)
+            );
+            assert_eq!(
+                click(NSEventType::LeftMouseDown, true, 0.0),
+                Some(PILL_WIDTH_FULL)
+            );
+            // Keyboard activation or an unrelated event has no position.
+            assert_eq!(click(NSEventType::KeyDown, true, 0.01), None);
+            assert_eq!(click(NSEventType::AppKitDefined, true, 0.01), None);
+            assert_eq!(click(NSEventType::RightMouseUp, true, 0.01), None);
+            // A stale click left as `currentEvent`: in another Petal window,
+            // or an old one on the pill.
+            assert_eq!(click(NSEventType::LeftMouseUp, false, 0.01), None);
+            assert_eq!(click(NSEventType::LeftMouseUp, true, 5.0), None);
+            assert_eq!(click(NSEventType::LeftMouseUp, true, -1.0), None);
+            // End to end: an AX press while in a full meeting opens the
+            // popover instead of leaving, even over a stale far-right click.
+            for event in [None, Some(false)] {
+                let x = event.and_then(|on_pill| click(NSEventType::LeftMouseUp, on_pill, 0.01));
+                assert_eq!(
+                    action_zone(x, PILL_WIDTH_FULL, false, true),
                     ClickZone::Body
                 );
             }
