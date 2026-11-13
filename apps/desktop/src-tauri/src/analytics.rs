@@ -1735,7 +1735,7 @@ mod tests {
 
     fn sample_latency_summary() -> crate::rc_latency_telemetry::Summary {
         use crate::rc_latency_telemetry::{
-            Counter, Dimension, HistogramStats, RcRole, Stage, Summary,
+            Counter, Dimension, HistogramStats, MaxCounter, RcRole, Stage, Summary,
         };
         Summary {
             role: RcRole::Host,
@@ -1747,6 +1747,7 @@ mod tests {
                 HistogramStats { p50: 4, p95: 108, max: 240, n: 400 },
             )],
             counters: vec![(Counter::InputStallCount, 3)],
+            max_counters: vec![(MaxCounter::OffsetErrMs, 0)],
             dimensions: vec![(Dimension::WindowCodec, "h264".to_string())],
         }
     }
@@ -1764,6 +1765,7 @@ mod tests {
         assert_eq!(props["role"], json!("host"));
         assert_eq!(props["window_codec"], json!("h264"));
         assert_eq!(props["input_stall_count"], json!(3));
+        assert_eq!(props["offset_err_ms"], json!(0), "a max counter of 0 is still sent");
         assert!(props.get("replay_inject_ms_p50").is_none(), "n = 0 stages are omitted");
         let contract: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../contracts/petal-contracts.json"
@@ -1784,6 +1786,9 @@ mod tests {
             allowed.push(dimension.clone());
         }
         for counter in schema["counters"].as_array().unwrap() {
+            allowed.push(counter.as_str().unwrap().to_string());
+        }
+        for counter in schema["maxCounters"].as_array().unwrap() {
             allowed.push(counter.as_str().unwrap().to_string());
         }
         for key in props.as_object().unwrap().keys() {

@@ -28,7 +28,9 @@ Each has a section below except the two diagnostics topics, documented here:
   `sendTimeMs`; the receiver echoes `pong` with the same `probeId` /
   `sendTimeMs` plus `receiverReceiveTimeMs` and `receiverSendTimeMs`, and the
   original sender computes RTT and an NTP-style clock offset on its own clock.
-  Reliable delivery. Native: `apps/desktop/src-tauri/src/latency_probe.rs`;
+  Reliable delivery. Native pings every 2 s: every peer while the cockpit is
+  open, and otherwise each controller holding a remote-control grant on this
+  host (#371), stopping when the grant ends. The message is unchanged. Native: `apps/desktop/src-tauri/src/latency_probe.rs`;
   web: `web-harness/src/trackNames.ts` (`LatencyProbeMessage`).
 - **`petal.pipeline-stats`** — cross-peer pipeline stage snapshots for the
   Network Cockpit (`apps/desktop/src-tauri/src/pipeline_stats.rs`).
@@ -903,6 +905,16 @@ Timing fields (#371), additive and optional:
   `excess = receive gap - sentAtMs gap`, recorded as `input_excess_delay_ms`;
   excess over 50 ms while the send gap is under 100 ms counts one
   `input_stall_count`. A repeated input is skipped. Clock-free.
+- The host also records the one-way leg
+  `receive - (sentAtMs + offset)` on its own clock, stamped when the packet
+  comes off the data channel (before parse and auth): `input_leg_ms` for
+  ordered inputs, `input_leg_lossy_ms` for hover moves (`unreliable_seq_stream`
+  pointer moves). An input the sequencer held behind a gap keeps its own
+  receive time. The offset comes from the minimum-RTT sample among the last
+  16 latency-probe answers from that controller that are at most 10 s old
+  (the diagnostics staleness rule); with none, there is no sample.
+  `offset_err_ms` is half that RTT. A hover move the seq watermark rejects
+  adds no sample.
 - Old peers ignore both fields (no envelope uses `deny_unknown_fields`), and a
   malformed value is dropped rather than rejecting the packet. The binary
   hot-path frame does not carry `sentAtMs` yet.
@@ -1479,7 +1491,9 @@ a producer (#375).
   `remote-control-latency-summary:` log line. `counters` (#371) are summed
   per interval, emitted after the stages and only when non-zero; an interval
   with no samples and no non-zero counter never emits, and a final partial
-  with only counters still emits. The degraded thresholds (#371/#376) are
+  with only counters still emits. `maxCounters` (#371, `offset_err_ms`) keep
+  the interval max, are emitted after the counters whenever set (0
+  included), and never make an interval emit on their own. The degraded thresholds (#371/#376) are
   added here with their producers.
 
 No wire field changed in #370, so there is no old-peer fixture. The #371

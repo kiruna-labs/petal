@@ -2237,6 +2237,17 @@ pub(crate) fn window_has_active_controller(window_id: u32) -> bool {
 /// Friendly display state for a local Petal View selector. Technical
 /// controller identities stay native-only; the title bar needs only a bounded
 /// name and treats multiple simultaneous grants conservatively.
+/// #371: controllers holding any grant on this host. Read from the grant
+/// table on every probe tick, so every revoke path stops the pings.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn granted_controller_identities() -> HashSet<String> {
+    sessions()
+        .lock_unpoisoned()
+        .keys()
+        .map(|key| key.controller_id.clone())
+        .collect()
+}
+
 pub(crate) fn active_controller_display_name(
     state: &SessionState,
     window_id: u32,
@@ -4844,12 +4855,14 @@ fn send_discrete_result_from_state(
     );
 }
 
+/// `received`: when this packet came off the data channel (#371).
 fn handle_message(
     app: &AppHandle,
     state: &SessionState,
     local_identity: &str,
     trusted_sender: Option<String>,
     message: RemoteControlMessage,
+    received: rc_input_timing::SocketReceive,
 ) {
     if message.v != VERSION {
         if should_log_message(message.message_type, message.action, message.seq) {
@@ -5283,7 +5296,7 @@ fn handle_message(
                 accessibility_trusted,
             };
             if remote_control_allowed && authorized {
-                rc_input_timing::host_input(&message, received_at);
+                rc_input_timing::host_input(&message, received, unreliable_seq_accepted);
             }
             let mut action =
                 plan_input_dispatch(gates, input_v2_snapshot_before_admission(&message));
@@ -5816,11 +5829,12 @@ fn handle_input_bundle(
     sender: &str,
     bundle: InputBundle,
     generation: &RoomGeneration,
+    received: rc_input_timing::SocketReceive,
 ) {
     let _fence = input_bundle_delivery_fence().lock_unpoisoned();
     let window_id = bundle.window_id;
-    let output = remote_control_engine().accept_input_bundle(sender, bundle, Instant::now());
-    deliver_sequenced_inputs(app, local_identity, sender, window_id, output, generation);
+    let output = remote_control_engine().accept_input_bundle(sender, bundle, received.at);
+    deliver_sequenced_inputs(app, local_identity, sender, window_id, output, generation, received);
 }
 
 /// Held input to release before a sequenced batch runs: a skipped input may
@@ -5839,7 +5853,8 @@ fn releases_for_sequencer_gap(
     drain_pressed_for_sequencer_gap(window_id, sender, resume)
 }
 
-/// Caller holds `input_bundle_delivery_fence`.
+/// Caller holds `input_bundle_delivery_fence`. `now` re-anchors each input's
+/// own accept instant (`output.received_at`) to a wall-clock stamp (#371).
 fn deliver_sequenced_inputs(
     app: &AppHandle,
     local_identity: &str,
@@ -5847,6 +5862,7 @@ fn deliver_sequenced_inputs(
     window_id: u32,
     output: SequencerOutput,
     generation: &RoomGeneration,
+    now: rc_input_timing::SocketReceive,
 ) {
     if output.stale_stream {
         log::debug!("remote-control: dropping input bundle from a retired stream of '{sender}'");
@@ -5871,13 +5887,14 @@ fn deliver_sequenced_inputs(
         );
     }
     if let Some(state) = app.try_state::<SessionState>() {
-        for message in output.deliver {
+        for (message, received_at) in output.deliver.into_iter().zip(output.received_at) {
             handle_message(
                 app,
                 state.inner(),
                 local_identity,
                 Some(sender.to_string()),
                 message,
+                now.rewound_to(received_at),
             );
         }
     }
@@ -5892,16 +5909,9 @@ fn deliver_sequenced_inputs(
                 return;
             }
             let _fence = input_bundle_delivery_fence().lock_unpoisoned();
-            let output =
-                remote_control_engine().flush_input_bundle_gap(&sender, window_id, Instant::now());
-            deliver_sequenced_inputs(
-                &app,
-                &local_identity,
-                &sender,
-                window_id,
-                output,
-                &generation,
-            );
+            let now = rc_input_timing::SocketReceive::now();
+            let output = remote_control_engine().flush_input_bundle_gap(&sender, window_id, now.at);
+            deliver_sequenced_inputs(&app, &local_identity, &sender, window_id, output, &generation, now);
         });
     }
 }
@@ -5950,6 +5960,8 @@ pub fn start_receiver_for_room(
                     if topic.as_deref() != Some(TOPIC) {
                         continue;
                     }
+                    // #371: before parse and auth, so neither counts as network.
+                    let received = rc_input_timing::SocketReceive::now();
                     let trusted_sender = participant.as_ref().map(|p| p.identity().to_string());
                     if let Some(bundle) = redundant::parse_input_bundle(payload.as_slice()) {
                         match trusted_sender.as_deref() {
@@ -5959,6 +5971,7 @@ pub fn start_receiver_for_room(
                                 sender,
                                 bundle,
                                 &generation,
+                                received,
                             ),
                             None => log::debug!("remote-control: dropping anonymous input bundle"),
                         }
@@ -6003,6 +6016,7 @@ pub fn start_receiver_for_room(
                             &local_identity,
                             trusted_sender,
                             message,
+                            received,
                         );
                     }
                 }
@@ -25250,6 +25264,97 @@ mod tests {
         assert!(inject_max >= 75, "replay_inject_ms max {inject_max}");
         assert!(complete_max >= 105, "replay_complete_ms max {complete_max}");
         assert!(line.starts_with("remote-control-latency-summary: role=host "));
+    }
+
+    /// #371: the host probes a controller exactly while it holds a grant.
+    /// Drives the real grant install and revoke, which every revoke path
+    /// funnels through; the probe re-reads the grant table each tick.
+    #[test]
+    #[cfg(target_os = "macos")] // latency_probe is macOS-only
+    fn latency_probe_targets_a_controller_only_while_its_grant_is_active() {
+        let ids = remote_control_test_ids(
+            "latency_probe_targets_a_controller_only_while_its_grant_is_active",
+        );
+        let present = || vec![ids.controller_id.clone(), "bystander".to_string()];
+        let targets = || {
+            crate::latency_probe::ping_targets(
+                false,
+                present(),
+                &granted_controller_identities(),
+            )
+        };
+        assert!(targets().is_empty(), "no grant, cockpit closed: no pings");
+        authorize_shared(ids.window_id, &ids.controller_id);
+        assert_eq!(targets(), vec![ids.controller_id.clone()]);
+        revoke(ids.window_id, &ids.controller_id);
+        assert!(
+            !granted_controller_identities().contains(&ids.controller_id),
+            "revoke ends the grant"
+        );
+        assert!(targets().is_empty(), "pings stop with the grant");
+        assert_eq!(
+            crate::latency_probe::ping_targets(true, present(), &HashSet::new()).len(),
+            2,
+            "the cockpit still probes everyone"
+        );
+    }
+
+    /// #371: real host input path -> host aggregator. An ordered input with a
+    /// fresh offset is an `input_leg_ms` sample, a hover move an
+    /// `input_leg_lossy_ms` one; a redundant copy and a watermark-rejected
+    /// hover move add nothing.
+    #[test]
+    fn host_input_records_one_way_legs_tagged_by_transport() {
+        let ids = remote_control_test_ids("host_input_records_one_way_legs_tagged_by_transport");
+        let _guard = platform_input_test_lock();
+        let mut outcome = None;
+        for attempt in 0..5u64 {
+            rc_latency_telemetry::sync(RcRole::Host, true);
+            // Controller clock 25 s ahead of ours; each input took ~30 ms.
+            rc_input_timing::record_controller_clock(&ids.controller_id, -25_000_000, 10.0);
+            let sent = now_ms() + 25_000 - 30;
+            let mut key = test_message(
+                RemoteControlType::Key,
+                Some(RemoteControlAction::Down),
+                10 * attempt + 1,
+                ids.window_id,
+                ids.controller_id.clone(),
+            );
+            key.sent_at_ms = Some(sent + attempt);
+            let received = rc_input_timing::SocketReceive::now();
+            rc_input_timing::host_input(&key, received, true);
+            rc_input_timing::host_input(&key, received, true);
+            let mut hover = test_message(
+                RemoteControlType::Pointer,
+                Some(RemoteControlAction::Move),
+                10 * attempt + 2,
+                ids.window_id,
+                ids.controller_id.clone(),
+            );
+            hover.sent_at_ms = Some(sent);
+            rc_input_timing::host_input(&hover, received, true);
+            rc_input_timing::host_input(&hover, received, false);
+            let Some(summary) = rc_latency_telemetry::take_host_interval_for_test() else {
+                continue;
+            };
+            let stats = |wanted: Stage| {
+                summary
+                    .stages
+                    .iter()
+                    .find(|(stage, _)| *stage == wanted)
+                    .map(|(_, stats)| *stats)
+            };
+            if let (Some(leg), Some(lossy)) = (stats(Stage::InputLegMs), stats(Stage::InputLegLossyMs)) {
+                outcome = Some((leg, lossy, summary.log_line()));
+                break;
+            }
+        }
+        let (leg, lossy, line) = outcome.expect("both legs reached the host summary");
+        assert_eq!(leg.n, 1, "the redundant copy is not a second sample");
+        assert_eq!(lossy.n, 1, "a watermark-rejected hover move is not a sample");
+        assert!((25..=60).contains(&leg.max), "input_leg_ms {}", leg.max);
+        assert!((25..=60).contains(&lossy.max), "input_leg_lossy_ms {}", lossy.max);
+        assert!(line.contains(" offset_err_ms=5"), "{line}");
     }
 
     #[test]

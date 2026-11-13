@@ -3,10 +3,9 @@
 //! Stage/dimension keys, histogram vectors and the summary log line are
 //! pinned by `contracts/petal-contracts.json` (`latencyHistogramVectors`,
 //! `remoteControlLatencySummary`). What lands with its first producer, not
-//! here: the TS mirror (#375), max-semantics counters (#371 follow-up), the
-//! Sentry degraded diagnostic (#371/#376).
+//! here: the TS mirror (#375), the Sentry degraded diagnostic (#371/#376).
 //!
-//! Producers call only [`record_stage`], [`add_counter`] and
+//! Producers call only [`record_stage`], [`record_stage_with_max`], [`add_counter`] and
 //! [`set_dimension`]. The owner
 //! calls [`sync`] on a timer with the current "is control active" truth.
 //! Each interval with samples becomes one `remote_control_latency_summary`
@@ -185,6 +184,7 @@ macro_rules! closed_keys {
 
 closed_keys!(Stage {
     InputLegMs => "input_leg_ms",
+    InputLegLossyMs => "input_leg_lossy_ms",
     InputRttMs => "input_rtt_ms",
     InputExcessDelayMs => "input_excess_delay_ms",
     ReplayInjectMs => "replay_inject_ms",
@@ -219,6 +219,12 @@ const DIMENSION_COUNT: usize = 7;
 // Sum-per-interval counters. A zero counter is never emitted.
 closed_keys!(Counter {
     InputStallCount => "input_stall_count",
+});
+
+// Max-per-interval values that qualify the stage samples recorded with them.
+// Emitted whenever set, 0 included, but never make an interval emit alone.
+closed_keys!(MaxCounter {
+    OffsetErrMs => "offset_err_ms",
 });
 
 impl Dimension {
@@ -258,6 +264,7 @@ pub(crate) struct Summary {
     pub(crate) is_final: bool,
     pub(crate) stages: Vec<(Stage, HistogramStats)>,
     pub(crate) counters: Vec<(Counter, u64)>,
+    pub(crate) max_counters: Vec<(MaxCounter, u64)>,
     pub(crate) dimensions: Vec<(Dimension, String)>,
 }
 
@@ -286,6 +293,9 @@ impl Summary {
                 out.push((counter.key().to_string(), (*value).into()));
             }
         }
+        for (counter, value) in &self.max_counters {
+            out.push((counter.key().to_string(), (*value).into()));
+        }
         for (dimension, value) in &self.dimensions {
             out.push((dimension.key().to_string(), value.clone().into()));
         }
@@ -313,6 +323,7 @@ struct Session {
     events_emitted: u32,
     stages: Vec<LatencyHistogram>,
     counters: Vec<u64>,
+    max_counters: Vec<Option<u64>>,
     dimensions: [Option<String>; DIMENSION_COUNT],
 }
 
@@ -324,6 +335,7 @@ impl Session {
             events_emitted: 0,
             stages: Stage::ALL.iter().map(|_| LatencyHistogram::new()).collect(),
             counters: vec![0; Counter::ALL.len()],
+            max_counters: vec![None; MaxCounter::ALL.len()],
             dimensions: Default::default(),
         }
     }
@@ -346,10 +358,15 @@ impl Session {
             .map(|counter| (*counter, self.counters[counter.index()]))
             .filter(|(_, value)| *value > 0)
             .collect();
+        let max_counters: Vec<(MaxCounter, u64)> = MaxCounter::ALL
+            .iter()
+            .filter_map(|counter| Some((*counter, self.max_counters[counter.index()]?)))
+            .collect();
         let elapsed_ms = now.saturating_duration_since(self.interval_started_at).as_millis() as u64;
         self.interval_started_at = now;
         self.stages.iter_mut().for_each(LatencyHistogram::reset);
         self.counters.iter_mut().for_each(|value| *value = 0);
+        self.max_counters.iter_mut().for_each(|value| *value = None);
         if (stages.is_empty() && counters.is_empty())
             || self.events_emitted >= MAX_EVENTS_PER_SESSION
         {
@@ -363,6 +380,7 @@ impl Session {
             is_final,
             stages,
             counters,
+            max_counters,
             dimensions: Dimension::ALL
                 .iter()
                 .filter_map(|d| Some((*d, self.dimensions[d.index()].clone()?)))
@@ -424,6 +442,17 @@ impl Aggregator {
         self.with_session_nonblocking(|session| {
             let slot = &mut session.counters[counter.index()];
             *slot = slot.saturating_add(delta);
+        });
+    }
+
+    /// A stage sample and the max counter qualifying it, under one lock so
+    /// neither lands in an interval without the other.
+    pub(crate) fn record_stage_with_max(&self, stage: Stage, ms: f64, counter: MaxCounter, value: u64) {
+        self.with_session_nonblocking(|session| {
+            if session.stages[stage.index()].record(ms) {
+                let slot = &mut session.max_counters[counter.index()];
+                *slot = Some(slot.map_or(value, |current| current.max(value)));
+            }
         });
     }
 
@@ -496,6 +525,11 @@ pub(crate) fn add_counter(role: RcRole, counter: Counter, delta: u64) {
     aggregator(role).add_counter(counter, delta);
 }
 
+/// [`record_stage`] plus the max-per-interval value that qualifies it.
+pub(crate) fn record_stage_with_max(role: RcRole, stage: Stage, ms: f64, counter: MaxCounter, value: u64) {
+    aggregator(role).record_stage_with_max(stage, ms, counter, value);
+}
+
 /// Set a closed-value dimension for the rest of `role`'s session.
 pub(crate) fn set_dimension(role: RcRole, dimension: Dimension, value: &str) -> bool {
     aggregator(role).set_dimension(dimension, value)
@@ -513,7 +547,10 @@ pub(crate) fn sync(role: RcRole, active: bool) {
 /// Test hook: force the host session's current interval out now.
 #[cfg(test)]
 pub(crate) fn take_host_interval_for_test() -> Option<Summary> {
-    HOST.sync_at(true, Instant::now() + EMIT_INTERVAL + Duration::from_secs(1))
+    // Drains at the real now: a future instant would leave the next interval
+    // starting in the future and hold back every later forced take.
+    let mut guard = HOST.session.lock().unwrap_or_else(|p| p.into_inner());
+    guard.as_mut()?.take_interval(RcRole::Host, Instant::now(), false)
 }
 
 #[cfg(test)]
@@ -550,6 +587,7 @@ mod tests {
     struct SummaryContract {
         stages: Vec<String>,
         counters: Vec<String>,
+        max_counters: Vec<String>,
         dimensions: serde_json::Map<String, serde_json::Value>,
         roles: Vec<String>,
         interval_ms: u64,
@@ -595,6 +633,7 @@ mod tests {
             is_final: false,
             stages,
             counters: vec![],
+            max_counters: vec![],
             dimensions: vec![],
         }
     }
@@ -668,6 +707,8 @@ mod tests {
         }
         let counters: Vec<_> = Counter::ALL.iter().map(|c| c.key()).collect();
         assert_eq!(counters, contract.counters);
+        let max_counters: Vec<_> = MaxCounter::ALL.iter().map(|c| c.key()).collect();
+        assert_eq!(max_counters, contract.max_counters);
         let roles: Vec<_> = [RcRole::Host, RcRole::Controller].iter().map(|r| r.key()).collect();
         assert_eq!(roles, contract.roles);
         assert_eq!(contract.interval_ms, EMIT_INTERVAL.as_millis() as u64);
@@ -701,6 +742,7 @@ mod tests {
                 .iter()
                 .filter_map(|c| Some((*c, input.counters.get(c.key())?.as_u64()?)))
                 .collect(),
+            max_counters: vec![],
             dimensions: Dimension::ALL
                 .iter()
                 .filter_map(|d| {
@@ -826,6 +868,35 @@ mod tests {
         assert!(last.is_final);
         assert_eq!(last.counters, [(Counter::InputStallCount, 1)]);
         assert_eq!(last.stages.len(), 1, "the n = 1 stage rides along");
+    }
+
+    /// #371: `offset_err_ms` is recorded only with the leg it qualifies,
+    /// keeps the interval max, renders 0, resets per interval, and does not
+    /// count toward the final partial's n >= 5 rule.
+    #[test]
+    fn max_counters_ride_with_their_stage_and_keep_the_interval_max() {
+        let aggregator = Aggregator::new(RcRole::Host);
+        let mut now = Instant::now();
+        aggregator.sync_at(true, now);
+        let leg = |ms: f64, err: u64| {
+            aggregator.record_stage_with_max(Stage::InputLegMs, ms, MaxCounter::OffsetErrMs, err)
+        };
+        leg(-1.0, 50);
+        now += EMIT_INTERVAL;
+        assert!(aggregator.sync_at(true, now).is_none(), "a rejected leg sets no max");
+        for (ms, err) in [(20.0, 3), (21.0, 9), (22.0, 4)] {
+            leg(ms, err);
+        }
+        now += EMIT_INTERVAL;
+        let summary = aggregator.sync_at(true, now).unwrap();
+        assert_eq!(summary.max_counters, [(MaxCounter::OffsetErrMs, 9)]);
+        assert!(summary.log_line().contains(" input_leg_ms_n=3 offset_err_ms=9"));
+        leg(20.0, 0);
+        now += EMIT_INTERVAL;
+        let next = aggregator.sync_at(true, now).unwrap();
+        assert_eq!(next.max_counters, [(MaxCounter::OffsetErrMs, 0)], "reset, then 0 is sent");
+        leg(20.0, 7);
+        assert!(aggregator.sync_at(false, now).is_none(), "n = 1 final: the max does not rescue it");
     }
 
     #[test]

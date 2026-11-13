@@ -251,6 +251,9 @@ impl RedundantInputSender {
 pub(crate) struct SequencerOutput {
     /// Inputs to hand to the ordinary per-message path, in order.
     pub deliver: Vec<RemoteControlMessage>,
+    /// Parallel to `deliver`: when each input's bundle was accepted, so an
+    /// input held behind a gap keeps its own socket-receive time (#371).
+    pub received_at: Vec<Instant>,
     /// Delivered inputs that were not the newest in the bundle that carried
     /// them (a redundant copy or a paced batch).
     pub recovered: u64,
@@ -270,7 +273,7 @@ pub(crate) struct SequencerOutput {
 pub(crate) struct InputSequencer {
     stream: Option<String>,
     next: u64,
-    buffered: BTreeMap<u64, RemoteControlMessage>,
+    buffered: BTreeMap<u64, (RemoteControlMessage, Instant)>,
     gap_since: Option<Instant>,
     retired: VecDeque<String>,
 }
@@ -307,7 +310,7 @@ impl InputSequencer {
             if rseq != newest {
                 out.recovered += 1;
             }
-            self.buffered.insert(rseq, input);
+            self.buffered.insert(rseq, (input, now));
         }
         let next_before = self.next;
         self.drain_contiguous(&mut out);
@@ -335,8 +338,9 @@ impl InputSequencer {
     }
 
     fn drain_contiguous(&mut self, out: &mut SequencerOutput) {
-        while let Some(input) = self.buffered.remove(&self.next) {
+        while let Some((input, received_at)) = self.buffered.remove(&self.next) {
             out.deliver.push(input);
+            out.received_at.push(received_at);
             self.next = self.next.saturating_add(1);
         }
     }
@@ -400,6 +404,28 @@ mod tests {
                 published(sender.push(key(seq, "down", "a"), t0 + Duration::from_millis(seq * 10))).0
             })
             .collect()
+    }
+
+    /// #371: an input held behind a gap is delivered with the instant its
+    /// own bundle arrived, not the later bundle's or the gap timer's.
+    #[test]
+    fn held_inputs_keep_their_own_receive_instant() {
+        let t0 = Instant::now();
+        let mut sender = RedundantInputSender::new(7, "s1".into());
+        let bundles = send_burst(&mut sender, 3, t0);
+        let mut host = InputSequencer::default();
+        let first = host.accept(bundles[0].clone(), t0);
+        assert_eq!(first.received_at, vec![t0]);
+        // Only seq 3 survives the bundle that should have carried seq 2; a
+        // bundle holding just seq 3 leaves a gap at 2.
+        let mut only_third = bundles[2].clone();
+        only_third.first = 3;
+        only_third.inputs = vec![only_third.inputs.last().unwrap().clone()];
+        let held_at = t0 + Duration::from_millis(30);
+        assert!(host.accept(only_third, held_at).deliver.is_empty());
+        let flushed = host.flush_expired(held_at + GAP_HOLD);
+        assert_eq!(seqs(&flushed.deliver), vec![3]);
+        assert_eq!(flushed.received_at, vec![held_at]);
     }
 
     #[test]

@@ -2820,6 +2820,7 @@
   "remoteControlLatencySummary": {
     "stages": [
       "input_leg_ms",
+      "input_leg_lossy_ms",
       "input_rtt_ms",
       "input_excess_delay_ms",
       "replay_inject_ms",
@@ -2877,6 +2878,9 @@
     },
     "counters": [
       "input_stall_count"
+    ],
+    "maxCounters": [
+      "offset_err_ms"
     ],
     "alwaysPresent": [
       "role",
