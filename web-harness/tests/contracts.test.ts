@@ -202,7 +202,7 @@ const contractFixture = JSON.parse(
     authority: 'authenticatedHost' | 'authenticatedController' | 'authenticatedRemoteControlGrant';
   }>;
   rules: { reliability: { lossy: string[]; reliable: string[] } };
-  remoteControlBinaryFrames: Array<{ name: string; hex: string; length: number }>;
+  remoteControlBinaryFrames: Array<{ name: string; hex: string; length: number; sentAtMs?: number }>;
   fnv1a32TestVectors: Array<{ input: string; hashHex: string }>;
 };
 
@@ -252,6 +252,24 @@ test('remote-control binary fixtures and reliability rule are shared', () => {
     assert.equal(decoded.kind, message.kind);
     assert.ok(Math.abs(decoded.x - message.x) < 1 / 0xffff);
     assert.ok(Math.abs(decoded.y - message.y) < 1 / 0xffff);
+    assert.equal(decoded.sentAtMs, undefined, 'v1 carries no sentAtMs');
+
+    // #371: frame v2 appends sentAtMs; v1 stays what an old host receives.
+    const v2Fixture = contractFixture.remoteControlBinaryFrames.find((candidate) => candidate.name === `${name}-v2`)!;
+    const stamped = { ...message, sentAtMs: v2Fixture.sentAtMs! };
+    assert.equal(Buffer.from(encodeRemoteControlHotPath(stamped)!).toString('hex'), fixture.hex, 'v1 by default');
+    assert.equal(Buffer.from(encodeRemoteControlHotPath(message, 2)!).toString('hex'), fixture.hex, 'no stamp -> v1');
+    const v2 = encodeRemoteControlHotPath(stamped, 2)!;
+    assert.equal(v2.length, v2Fixture.length);
+    assert.equal(Buffer.from(v2).toString('hex'), v2Fixture.hex);
+    const decodedV2 = decodeRemoteControlHotPath(v2, message.targetUserId, message.controllerId)!;
+    assert.equal(decodedV2.v, 1);
+    assert.equal(decodedV2.sentAtMs, 1_700_000_000_123);
+    assert.equal(decodedV2.seq, message.seq);
+    assert.equal(decodeRemoteControlHotPath(v2.subarray(0, 27), 'native-1', 'web-1'), null);
+    const v1Long = new Uint8Array(35);
+    v1Long.set(bytes);
+    assert.equal(decodeRemoteControlHotPath(v1Long, 'native-1', 'web-1'), null);
   }
   assert.equal(fixedPointCoordinateKey(0.5, 0.25), fixedPointCoordinateKey(0.5 + 1 / 0xffff / 3, 0.25));
 });
@@ -962,6 +980,7 @@ test('remote-control fixture pins representative variant payloads', () => {
     message: 'Remote control active for shared window',
     supportsBinaryHotPath: true,
     supportsRedundantInput: true,
+    supportsBinaryHotPathV2: true,
   });
   assert.equal(byName.get('status-request-unavailable')?.status, 'requestUnavailable');
   assert.deepEqual(byName.get('pointer-move'), {

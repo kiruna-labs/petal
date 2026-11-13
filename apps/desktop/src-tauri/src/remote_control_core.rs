@@ -211,6 +211,9 @@ pub(crate) struct RemoteControlEngine {
     control_sessions: Mutex<HashMap<ControlGrantKey, String>>,
     warned_tokenless_inputs: Mutex<HashSet<(u32, String)>>,
     hot_path_capable_targets: Mutex<HashSet<(u32, String)>>,
+    /// #371: subset of `hot_path_capable_targets` whose host also advertised
+    /// `supports_binary_hot_path_v2` (frame v2 carries `sentAtMs`).
+    hot_path_v2_targets: Mutex<HashSet<(u32, String)>>,
     discrete_admissions: Mutex<DiscreteAdmissionState>,
     controller_pointer_positions: Mutex<HashMap<(u32, String), (f64, f64)>>,
     last_emitted_statuses: Mutex<HashMap<(u32, String), &'static str>>,
@@ -233,6 +236,7 @@ impl RemoteControlEngine {
             control_sessions: Mutex::new(HashMap::new()),
             warned_tokenless_inputs: Mutex::new(HashSet::new()),
             hot_path_capable_targets: Mutex::new(HashSet::new()),
+            hot_path_v2_targets: Mutex::new(HashSet::new()),
             discrete_admissions: Mutex::new(DiscreteAdmissionState::default()),
             controller_pointer_positions: Mutex::new(HashMap::new()),
             last_emitted_statuses: Mutex::new(HashMap::new()),
@@ -755,13 +759,19 @@ impl RemoteControlEngine {
             (message.message_type, message.action),
             (RemoteControlType::Pointer, Some(RemoteControlAction::Move))
         ) || message.message_type == RemoteControlType::Wheel;
-        let target_is_hot_path_capable = is_hot_path_kind
-            && self
-                .hot_path_capable_targets
-                .lock_unpoisoned()
-                .contains(&(message.window_id, target.clone()));
+        let key = (message.window_id, target.clone());
+        let target_is_hot_path_capable =
+            is_hot_path_kind && self.hot_path_capable_targets.lock_unpoisoned().contains(&key);
+        // #371: v2 only to a host that advertised it; an old host keeps v1.
+        let target_takes_v2 =
+            target_is_hot_path_capable && self.hot_path_v2_targets.lock_unpoisoned().contains(&key);
         let payload = target_is_hot_path_capable
-            .then(|| binary_frame_for(message))
+            .then(|| {
+                target_takes_v2
+                    .then(|| binary_frame_v2_for(message))
+                    .flatten()
+                    .or_else(|| binary_frame_for(message))
+            })
             .flatten()
             .unwrap_or_else(|| {
                 serde_json::to_vec(message).expect("remote-control message is serializable")
@@ -795,8 +805,31 @@ impl RemoteControlEngine {
         &self.warned_tokenless_inputs
     }
 
+    #[cfg(test)]
     pub(crate) fn hot_path_capable_targets(&self) -> &Mutex<HashSet<(u32, String)>> {
         &self.hot_path_capable_targets
+    }
+
+    /// Controller side: apply a host's `status` to the binary hot-path
+    /// capability for (window, host). Latest-wins: an `active` without the
+    /// flag, or `stopped`/`disabled`, clears it (a rolled-back host must get
+    /// JSON / v1 again, never a frame it cannot parse).
+    pub(crate) fn record_host_hot_path_status(&self, message: &RemoteControlMessage, status: &str) {
+        if !matches!(status, "active" | "stopped" | "disabled") {
+            return;
+        }
+        let key = (message.window_id, message.controller_id.clone());
+        let active = status == "active";
+        let v1 = active && message.supports_binary_hot_path;
+        let v2 = v1 && message.supports_binary_hot_path_v2;
+        for (set, on) in [(&self.hot_path_capable_targets, v1), (&self.hot_path_v2_targets, v2)] {
+            let mut set = set.lock_unpoisoned();
+            if on {
+                set.insert(key.clone());
+            } else {
+                set.remove(&key);
+            }
+        }
     }
 
     pub(crate) fn discrete_admissions(&self) -> &Mutex<DiscreteAdmissionState> {
@@ -992,6 +1025,9 @@ pub(crate) const BINARY_MAGIC: u8 = 0x50;
 /// compatibility path -- meant for old JSON clients, not this brand-new wire
 /// variant. See `fnv1a32`, `binary_frame_for`, `message_from_binary`.
 pub(crate) const BINARY_FRAME_LEN: usize = 27;
+/// #371: frame v2 = the v1 layout (version byte `2`) + u64 LE `sentAtMs`.
+pub(crate) const BINARY_FRAME_V2_VERSION: u8 = 2;
+pub(crate) const BINARY_FRAME_V2_LEN: usize = BINARY_FRAME_LEN + 8;
 
 /// FNV-1a, 32-bit. Pure/stateless so it can be reimplemented identically in
 /// TS (`web-harness/src/remoteControl.ts::fnv1a32`) -- keep both in lockstep;
@@ -1566,6 +1602,10 @@ pub struct RemoteControlMessage {
     /// (`remote_control_redundant`); otherwise it keeps the reliable path.
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_redundant_input: bool,
+    /// #371: true only on a host's `active` status. The controller may then
+    /// send binary hot-path frame v2 (with `sentAtMs`); otherwise v1.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub supports_binary_hot_path_v2: bool,
     /// #371: controller wall clock (integer ms) when the input was produced,
     /// on every controller->host kind. Additive: old hosts ignore it, and it
     /// is not part of the operation fingerprint.
@@ -1637,6 +1677,7 @@ impl RemoteControlDraft {
             grant_token: self.grant_token,
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            supports_binary_hot_path_v2: false,
             sent_at_ms: self.sent_at_ms,
             host_hold_ms: None,
             modifiers: self.modifiers,
@@ -2171,6 +2212,15 @@ pub(crate) fn binary_frame_for(message: &RemoteControlMessage) -> Option<Vec<u8>
     );
     bytes.push(message.delta_mode.unwrap_or(0));
     bytes.extend_from_slice(&token_fingerprint.to_le_bytes());
+    Some(bytes)
+}
+
+/// #371: frame v2, or `None` (caller falls back to v1) without `sentAtMs`.
+pub(crate) fn binary_frame_v2_for(message: &RemoteControlMessage) -> Option<Vec<u8>> {
+    let sent_at_ms = message.sent_at_ms?;
+    let mut bytes = binary_frame_for(message)?;
+    bytes[1] = BINARY_FRAME_V2_VERSION;
+    bytes.extend_from_slice(&sent_at_ms.to_le_bytes());
     Some(bytes)
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -3176,6 +3226,57 @@ mod tests {
         assert_eq!(releases[0].message.code.as_deref(), Some("KeyA"));
         assert_eq!(releases[0].message.location, Some(0));
         assert!(!releases[0].message.repeat);
+    }
+
+    /// #371: frame v2 goes only to a host whose `active` status advertised
+    /// `supportsBinaryHotPathV2`; a v1-only host keeps the 27-byte frame, and
+    /// a stop or rollback clears both.
+    #[test]
+    fn controller_sends_hot_path_v2_only_to_a_host_that_advertises_it() {
+        let engine = RemoteControlEngine::new();
+        let status = |json: &str| message(json);
+        let hover = message(
+            r#"{"v":1,"kind":"pointer","action":"move","targetUserId":"native-1","controllerId":"web-1","windowId":42,"seq":1,"grantToken":"0123456789abcdef0123456789abcdef","x":0.5,"y":0.5,"buttons":0,"sentAtMs":1700000000123}"#,
+        );
+        let active_v1 = status(
+            r#"{"v":1,"kind":"status","targetUserId":"web-1","controllerId":"native-1","windowId":42,"seq":2,"status":"active","grantToken":"0123456789abcdef0123456789abcdef","supportsBinaryHotPath":true}"#,
+        );
+        let mut active_v2 = active_v1.clone();
+        active_v2.supports_binary_hot_path_v2 = true;
+        let mut stopped = active_v2.clone();
+        stopped.status = Some("stopped".to_string());
+
+        engine.record_host_hot_path_status(&active_v1, "active");
+        let v1 = engine.data_packet_for(&hover).payload;
+        assert_eq!((v1.len(), v1[1]), (BINARY_FRAME_LEN, VERSION), "old host keeps v1");
+
+        engine.record_host_hot_path_status(&active_v2, "active");
+        let v2 = engine.data_packet_for(&hover).payload;
+        assert_eq!((v2.len(), v2[1]), (BINARY_FRAME_V2_LEN, BINARY_FRAME_V2_VERSION));
+        assert_eq!(&v2[BINARY_FRAME_LEN..], &1_700_000_000_123u64.to_le_bytes());
+        assert_eq!(&v2[2..BINARY_FRAME_LEN], &v1[2..], "v2 only appends");
+        let mut unstamped = hover.clone();
+        unstamped.sent_at_ms = None;
+        assert_eq!(engine.data_packet_for(&unstamped).payload.len(), BINARY_FRAME_LEN);
+
+        // V2 without the base hot-path flag is no capability at all: JSON.
+        let mut v2_only = active_v2.clone();
+        v2_only.supports_binary_hot_path = false;
+        engine.record_host_hot_path_status(&v2_only, "active");
+        assert_eq!(engine.data_packet_for(&hover).payload.first(), Some(&b'{'));
+        engine.record_host_hot_path_status(&active_v1, "active");
+        assert_eq!(engine.data_packet_for(&hover).payload.len(), BINARY_FRAME_LEN);
+        engine.record_host_hot_path_status(&active_v2, "active");
+
+        // A non-terminal feedback status leaves the capability alone.
+        engine.record_host_hot_path_status(&active_v2, "occluded");
+        assert_eq!(engine.data_packet_for(&hover).payload.len(), BINARY_FRAME_V2_LEN);
+        // Rolled back to a v1 host: back to v1, never a frame it cannot parse.
+        engine.record_host_hot_path_status(&active_v1, "active");
+        assert_eq!(engine.data_packet_for(&hover).payload.len(), BINARY_FRAME_LEN);
+        engine.record_host_hot_path_status(&active_v2, "active");
+        engine.record_host_hot_path_status(&stopped, "stopped");
+        assert_eq!(engine.data_packet_for(&hover).payload.first(), Some(&b'{'));
     }
 
     #[test]

@@ -461,6 +461,8 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
       // not-yet-upgraded host's status packet never sets the field, so this
       // is `false` against it and we keep sending JSON.
       active.supportsBinaryHotPath = message.supportsBinaryHotPath === true;
+      // #371: same latest-wins rule for frame v2 (carries sentAtMs).
+      active.supportsBinaryHotPathV2 = active.supportsBinaryHotPath && message.supportsBinaryHotPathV2 === true;
       // #399: latest-wins like the hot path. A repeated `active` for the same
       // grant keeps the stream; a new grant opens a new one.
       if (message.supportsRedundantInput === true && typeof message.grantToken === 'string' && message.grantToken) {
@@ -573,7 +575,7 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
       });
     }
     const bytes =
-      (hotPathCapable ? encodeRemoteControlHotPath(message) : null) ??
+      (hotPathCapable ? encodeRemoteControlHotPath(message, active?.supportsBinaryHotPathV2 ? 2 : 1) : null) ??
       remoteControlEncoder.encode(JSON.stringify(message));
     const options = remoteControlPublishOptions(message);
     return state.room.localParticipant.publishData(bytes, options).catch((err) => {

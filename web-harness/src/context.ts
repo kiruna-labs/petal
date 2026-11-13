@@ -405,6 +405,9 @@ export interface ActiveRemoteControl {
    * binary encode on this, never assumes support. Defaults to false/absent
    * so a not-yet-upgraded host is always sent JSON. */
   supportsBinaryHotPath?: boolean;
+  /** #371: the latest `active` also advertised `supportsBinaryHotPathV2`,
+   * so hot-path frames may be v2 (with `sentAtMs`). */
+  supportsBinaryHotPathV2?: boolean;
   /** #399: present only while the host's latest `active` status advertised
    * `supportsRedundantInput`; input then rides lossy redundant bundles. */
   redundantInput?: RedundantInputSender;

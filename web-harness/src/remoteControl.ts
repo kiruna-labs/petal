@@ -100,6 +100,8 @@ export const REMOTE_CONTROL_BINARY_MAGIC = 0x50;
  * `apps/desktop/src-tauri/src/remote_control.rs`'s `BINARY_FRAME_LEN`.
  */
 export const REMOTE_CONTROL_BINARY_LENGTH = 27;
+/** #371: frame v2 = the v1 layout (version byte 2) + u64 LE `sentAtMs`. */
+export const REMOTE_CONTROL_BINARY_V2_LENGTH = REMOTE_CONTROL_BINARY_LENGTH + 8;
 
 /**
  * FNV-1a, 32-bit, over raw bytes. Pure/stateless so it can be reimplemented
@@ -129,15 +131,20 @@ export function fixedPointCoordinateKey(x: number, y: number): string {
  * whenever the message has no grant token to fingerprint: the 27-byte frame
  * cannot carry a v2 admission envelope or a real grant token.
  */
-export function encodeRemoteControlHotPath(message: RemoteControlMessage): Uint8Array<ArrayBuffer> | null {
+export function encodeRemoteControlHotPath(
+  message: RemoteControlMessage,
+  frameVersion: 1 | 2 = 1
+): Uint8Array<ArrayBuffer> | null {
   const isPointerMove = message.kind === 'pointer' && message.action === 'move';
   const isWheel = message.kind === 'wheel';
   if ((!isPointerMove && !isWheel) || (isWheel && isV2DiscreteAttempt(message))) return null;
   if (typeof message.grantToken !== 'string' || message.grantToken.length === 0) return null;
   const hot = message as Extract<RemoteControlMessage, { kind: 'pointer' | 'wheel' }>;
-  const out = new Uint8Array(REMOTE_CONTROL_BINARY_LENGTH);
+  // #371: v2 only for a host that advertised it, and only with a stamp.
+  const sentAtMs = frameVersion === 2 ? wireMs(message.sentAtMs) : undefined;
+  const out = new Uint8Array(sentAtMs === undefined ? REMOTE_CONTROL_BINARY_LENGTH : REMOTE_CONTROL_BINARY_V2_LENGTH);
   const view = new DataView(out.buffer);
-  out[0] = REMOTE_CONTROL_BINARY_MAGIC; out[1] = 1;
+  out[0] = REMOTE_CONTROL_BINARY_MAGIC; out[1] = sentAtMs === undefined ? 1 : 2;
   out[2] = isPointerMove ? 4 : 5; out[3] = isPointerMove ? 1 : 0;
   view.setUint32(4, message.seq >>> 0, true); view.setUint32(8, message.windowId >>> 0, true);
   view.setUint16(12, Math.round(Math.min(1, Math.max(0, hot.x)) * 0xffff), true);
@@ -149,6 +156,10 @@ export function encodeRemoteControlHotPath(message: RemoteControlMessage): Uint8
   view.setInt16(20, Math.max(-32768, Math.min(32767, Math.round(isWheel ? (hot as Extract<RemoteControlMessage, { kind: 'wheel' }>).deltaY : 0))), true);
   out[22] = isWheel ? (hot as Extract<RemoteControlMessage, { kind: 'wheel' }>).deltaMode : 0;
   view.setUint32(23, fnv1a32(new TextEncoder().encode(message.grantToken)), true);
+  if (sentAtMs !== undefined) {
+    view.setUint32(27, sentAtMs % 0x1_0000_0000, true);
+    view.setUint32(31, Math.floor(sentAtMs / 0x1_0000_0000), true);
+  }
   return out;
 }
 
@@ -164,12 +175,16 @@ export function encodeRemoteControlHotPath(message: RemoteControlMessage): Uint8
  * for admitting a hot-path frame.
  */
 export function decodeRemoteControlHotPath(payload: Uint8Array, targetUserId: string, controllerId: string): RemoteControlMessage | null {
-  if (payload.length !== REMOTE_CONTROL_BINARY_LENGTH || payload[0] !== REMOTE_CONTROL_BINARY_MAGIC || payload[1] !== 1) return null;
+  if (payload[0] !== REMOTE_CONTROL_BINARY_MAGIC) return null;
+  const v1 = payload[1] === 1 && payload.length === REMOTE_CONTROL_BINARY_LENGTH;
+  const v2 = payload[1] === 2 && payload.length === REMOTE_CONTROL_BINARY_V2_LENGTH;
+  if (!v1 && !v2) return null;
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const sentAtMs = v2 ? wireMs(view.getUint32(27, true) + view.getUint32(31, true) * 0x1_0000_0000) : undefined;
   const kind = payload[2] === 4 ? 'pointer' : payload[2] === 5 ? 'wheel' : null;
   if (!kind) return null;
   const modifiers = { alt: !!(payload[17] & 1), ctrl: !!(payload[17] & 2), meta: !!(payload[17] & 4), shift: !!(payload[17] & 8) };
-  const base = { v: 1 as const, targetUserId, controllerId, windowId: view.getUint32(8, true), seq: view.getUint32(4, true), x: view.getUint16(12, true) / 0xffff, y: view.getUint16(14, true) / 0xffff, modifiers };
+  const base = { v: 1 as const, targetUserId, controllerId, windowId: view.getUint32(8, true), seq: view.getUint32(4, true), x: view.getUint16(12, true) / 0xffff, y: view.getUint16(14, true) / 0xffff, modifiers, ...(sentAtMs !== undefined ? { sentAtMs } : {}) };
   return kind === 'pointer'
     ? { ...base, kind, action: 'move', button: -1, buttons: payload[16] }
     : { ...base, kind, deltaX: view.getInt16(18, true), deltaY: view.getInt16(20, true), deltaMode: payload[22] as 0 | 1 | 2 };
