@@ -31,6 +31,7 @@ use livekit::webrtc::native::apm::AudioProcessingModule;
 use super::mixer::{AudioMixer, LevelMeter, MIX_CHANNELS, MIX_SAMPLE_RATE};
 use crate::ai_chat::audio::{downmix_to_mono, Resampler};
 use crate::sync_ext::MutexExt;
+use crate::transport::audio::MuteRecord;
 
 /// The stream mix's name for this source.
 pub const MIC_SOURCE: &str = "local-mic";
@@ -62,15 +63,12 @@ struct Chunk {
 
 /// The meeting's microphone, as the stream sees it. Read-only.
 pub trait MeetingMic: Send + Sync {
-    /// `None`: the meeting has no microphone (audio disabled, or left).
-    fn muted(&self) -> Option<bool>;
+    /// The meeting's mute and when it was last unmuted, read as one value
+    /// (an unmute the stream mic never got to see still bounds what it may
+    /// send). `None`: the meeting has no microphone (audio disabled, or left).
+    fn mute(&self) -> Option<MuteRecord>;
     /// The selected recording device's name; `None` means the system default.
     fn device_name(&self) -> Option<String>;
-    /// When the mic was last unmuted, recorded as it happened: a mute the
-    /// stream mic never got to see still bounds what it may send.
-    fn last_unmuted(&self) -> Option<Instant> {
-        None
-    }
 }
 
 /// Mono 48 kHz capture in, processed 10 ms blocks out to the stream mix.
@@ -182,6 +180,12 @@ impl MuteFollower {
         // Its earliest sample, conservatively; before the unmute: muted.
         let reach = latency + length + CAPTURE_SLACK;
         self.unmuted_at.is_some_and(|unmuted| stamp.checked_sub(reach).is_none_or(|first| first < unmuted))
+    }
+
+    /// Whether to feed `chunk` as muted, by the meeting's mute as of now.
+    fn chunk_muted_now(&mut self, meeting: &dyn MeetingMic, chunk: &Chunk) -> bool {
+        let record = meeting.mute().unwrap_or(MuteRecord::new(true));
+        self.chunk_muted(record.muted, record.unmuted_at, Instant::now(), chunk.at, chunk.latency, chunk.samples.len())
     }
 }
 
@@ -329,7 +333,7 @@ impl StreamMic {
         let thread_stop = stop.clone();
         let gate_meeting = meeting.clone();
         // No meeting mic (`None`) counts as muted.
-        mixer.lock_unpoisoned().set_mute_gate(MIC_SOURCE, Arc::new(move || gate_meeting.muted() != Some(false)));
+        mixer.lock_unpoisoned().set_mute_gate(MIC_SOURCE, Arc::new(move || gate_meeting.mute().is_none_or(|record| record.muted)));
         let thread_mixer = mixer.clone();
         let thread = std::thread::Builder::new()
             .name("petal-stream-mic".into())
@@ -362,7 +366,7 @@ impl Drop for StreamMic {
 fn run(meeting: &dyn MeetingMic, mixer: &Mutex<AudioMixer>, reference: &Mutex<AudioMixer>, stop: &AtomicBool) {
     let mut processor = MicProcessor::new(true);
     let mut capture: Option<OpenCapture> = None;
-    let mut muted = meeting.muted();
+    let mut muted = meeting.mute().map(|record| record.muted);
     let mut follower = MuteFollower::new(muted.unwrap_or(true));
     let mut device = meeting.device_name();
     let mut muted_at = Instant::now();
@@ -374,7 +378,7 @@ fn run(meeting: &dyn MeetingMic, mixer: &Mutex<AudioMixer>, reference: &Mutex<Au
     while !stop.load(Ordering::Acquire) {
         let now = Instant::now();
         if now >= muted_at + MUTE_POLL {
-            muted = meeting.muted();
+            muted = meeting.mute().map(|record| record.muted);
             muted_at = now;
         }
         if now >= device_at + DEVICE_POLL {
@@ -418,15 +422,7 @@ fn run(meeting: &dyn MeetingMic, mixer: &Mutex<AudioMixer>, reference: &Mutex<Au
             Some(open) => match open.chunks.recv_timeout(MUTE_POLL) {
                 Ok(chunk) => {
                     // Mute as of this chunk, not the last poll.
-                    let now_muted = meeting.muted().unwrap_or(true);
-                    let chunk_muted = follower.chunk_muted(
-                        now_muted,
-                        meeting.last_unmuted(),
-                        Instant::now(),
-                        chunk.at,
-                        chunk.latency,
-                        chunk.samples.len(),
-                    );
+                    let chunk_muted = follower.chunk_muted_now(meeting, &chunk);
                     processor.feed(&chunk.samples, chunk_muted, reference, mixer);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -528,6 +524,132 @@ mod tests {
         assert!(!open.chunk_muted(false, None, at(10), at(0), none, 480));
     }
 
+    /// The meeting's mute as macOS's stream mic reads it
+    /// (`streaming::session::MeetingMicState`): the session's request record.
+    #[cfg(target_os = "macos")]
+    struct SessionMic(Arc<crate::session::SessionState>);
+
+    #[cfg(target_os = "macos")]
+    impl MeetingMic for SessionMic {
+        fn mute(&self) -> Option<MuteRecord> {
+            Some(self.0.stream_mute())
+        }
+        fn device_name(&self) -> Option<String> {
+            None
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn chunk_at(at: Instant) -> Chunk {
+        Chunk { at, latency: Duration::ZERO, samples: vec![0; APM_FRAMES] }
+    }
+
+    /// A mute followed at once by an unmute, through the session's own entry
+    /// points, before the stream mic reads anything (and before the live
+    /// track's coalesced apply would ever run): what was captured in between
+    /// stays silent.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_coalesced_mute_still_silences_the_stream() {
+        let state = Arc::new(crate::session::SessionState::default());
+        let meeting = SessionMic(state.clone());
+        state.set_mic_muted(false);
+        std::thread::sleep(Duration::from_millis(50));
+        let mut follower = MuteFollower::new(false);
+        assert!(!follower.chunk_muted_now(&meeting, &chunk_at(Instant::now())), "heard while unmuted");
+
+        state.set_mic_muted(true);
+        let spoken = Instant::now();
+        state.set_mic_muted(false);
+        assert!(follower.chunk_muted_now(&meeting, &chunk_at(spoken)), "captured while muted");
+
+        state.set_ai_chat_ducking(true);
+        let ducked = Instant::now();
+        state.set_ai_chat_ducking(false);
+        assert!(follower.chunk_muted_now(&meeting, &chunk_at(ducked)), "captured while ducked");
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!follower.chunk_muted_now(&meeting, &chunk_at(Instant::now())), "heard after");
+    }
+
+    /// The stream mic never reads "unmuted" together with an unmute time from
+    /// before the latest mute, however the reads and requests interleave.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_stream_reads_mute_and_unmute_time_together() {
+        let state = Arc::new(crate::session::SessionState::default());
+        let base = Instant::now();
+        // When the latest mute request returned, in ns after `base`.
+        let muted_by = Arc::new(AtomicU64::new(0));
+        let done = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (state, muted_by, done) = (state.clone(), muted_by.clone(), done.clone());
+            std::thread::spawn(move || {
+                for _ in 0..20_000 {
+                    state.set_mic_muted(true);
+                    muted_by.store(base.elapsed().as_nanos() as u64, Ordering::SeqCst);
+                    state.set_mic_muted(false);
+                }
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+        let meeting = SessionMic(state);
+        let mut unmuted_reads = 0u32;
+        while !done.load(Ordering::SeqCst) {
+            let floor = base + Duration::from_nanos(muted_by.load(Ordering::SeqCst));
+            let record = meeting.mute().expect("a meeting mic");
+            if !record.muted && floor > base {
+                unmuted_reads += 1;
+                assert!(
+                    record.unmuted_at.is_some_and(|unmuted| unmuted >= floor),
+                    "read unmuted with an unmute time from before the latest mute: {record:?}"
+                );
+            }
+        }
+        writer.join().expect("writer");
+        assert!(unmuted_reads > 0, "the reader saw the mic unmuted at least once");
+    }
+
+    /// Mutes and unmutes requested from two threads at once: every mute the
+    /// session ever reported asked for is recorded, so the stream mic never
+    /// reads "unmuted" with an unmute time from before it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn racing_mute_requests_are_each_recorded() {
+        let state = Arc::new(crate::session::SessionState::default());
+        let done = Arc::new(AtomicBool::new(false));
+        let writers: Vec<_> = [true, false]
+            .into_iter()
+            .map(|muted| {
+                let (state, done) = (state.clone(), done.clone());
+                std::thread::spawn(move || {
+                    while !done.load(Ordering::SeqCst) {
+                        state.set_mic_muted(muted);
+                    }
+                })
+            })
+            .collect();
+        let meeting = SessionMic(state.clone());
+        let mut checked = 0u32;
+        for _ in 0..200_000 {
+            let before = Instant::now();
+            let asked = state.mic_muted();
+            let record = meeting.mute().expect("a meeting mic");
+            if asked && !record.muted {
+                checked += 1;
+                assert!(
+                    record.unmuted_at.is_some_and(|unmuted| unmuted >= before),
+                    "a mute asked for at or after {before:?} went unrecorded: {record:?}"
+                );
+            }
+        }
+        done.store(true, Ordering::SeqCst);
+        for writer in writers {
+            writer.join().expect("writer");
+        }
+        assert!(checked > 0, "the reader caught a mute being lifted");
+    }
+
     /// A partial block left over from a muted chunk never goes out with the
     /// next, unmuted one, and the echo reference stays aligned.
     #[test]
@@ -550,7 +672,7 @@ mod tests {
         // No meeting mic: nothing is opened, and it counts as muted.
         struct NoMic;
         impl MeetingMic for NoMic {
-            fn muted(&self) -> Option<bool> {
+            fn mute(&self) -> Option<MuteRecord> {
                 None
             }
             fn device_name(&self) -> Option<String> {
@@ -593,8 +715,8 @@ mod tests {
     struct DefaultMic;
 
     impl MeetingMic for DefaultMic {
-        fn muted(&self) -> Option<bool> {
-            Some(false)
+        fn mute(&self) -> Option<MuteRecord> {
+            Some(MuteRecord::new(false))
         }
 
         fn device_name(&self) -> Option<String> {

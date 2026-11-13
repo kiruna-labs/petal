@@ -621,23 +621,22 @@ impl MeetingMicState {
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 impl super::mic::MeetingMic for MeetingMicState {
-    fn muted(&self) -> Option<bool> {
-        let track = self.track()?;
-        // macOS applies a mute to the track asynchronously; the intent is
-        // set when it's asked, so the stream mutes on that (#487).
+    fn mute(&self) -> Option<crate::transport::audio::MuteRecord> {
+        // macOS applies a mute to the track asynchronously, and may skip a
+        // superseded one: follow the request, recorded when it's asked (#487).
         #[cfg(target_os = "macos")]
-        if session_state(&self.0).mic_mute_intended() {
-            return Some(true);
+        {
+            self.track()?;
+            Some(session_state(&self.0).stream_mute())
         }
-        Some(track.is_muted())
+        #[cfg(target_os = "windows")]
+        {
+            self.track().map(|track| track.mute_record())
+        }
     }
 
     fn device_name(&self) -> Option<String> {
         self.track().and_then(|track| track.current_device_name())
-    }
-
-    fn last_unmuted(&self) -> Option<std::time::Instant> {
-        self.track().and_then(|track| track.last_unmuted_at())
     }
 }
 

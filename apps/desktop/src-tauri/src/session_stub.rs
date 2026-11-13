@@ -1149,13 +1149,12 @@ impl SessionState {
     /// Windows AI-chat parity: temporarily mute the live microphone without
     /// changing the user's persistent mute intent.
     pub(crate) fn set_ai_chat_ducking(&self, duck: bool) {
+        // Read the intent and apply it under `joined`, as `set_mic_muted`
+        // does: a duck release racing a mute must not unmute the track (and
+        // with it the live stream's mic, #487).
+        let joined = self.joined.lock_unpoisoned();
         let muted = self.desired_mic_muted.load(Ordering::SeqCst) || duck;
-        if let Some(microphone) = self
-            .joined
-            .lock_unpoisoned()
-            .as_ref()
-            .and_then(|session| session.media.microphone.clone())
-        {
+        if let Some(microphone) = joined.as_ref().and_then(|session| session.media.microphone.as_ref()) {
             microphone.set_muted(muted);
         }
     }

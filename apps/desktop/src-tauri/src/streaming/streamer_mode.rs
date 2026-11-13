@@ -852,6 +852,26 @@ mod tests {
         problems
     }
 
+    /// Plain `.build(` calls in one file (`rel`, under `src/`), whitespace
+    /// ignored. In this file, `build_petal`'s own builds don't count, matched
+    /// by content, and neither do its tests (fixtures, which build nothing).
+    fn plain_builds(rel: &str, source: &str) -> usize {
+        let mut code: String = strip_comments(source).chars().filter(|c| !c.is_whitespace()).collect();
+        if rel == "streaming/streamer_mode.rs" {
+            let tests = ["#[cfg(test)]", "mod", "tests{"].concat();
+            code.truncate(code.find(&tests).expect("this file's tests"));
+            for build in [
+                "self.content_protected(ticket.mode()==BuildMode::Protected).build()",
+                "self.content_protected(true).build()",
+                "self.build()",
+            ] {
+                let at = code.find(build).expect("build_petal's own build");
+                code.replace_range(at..at + build.len(), "");
+            }
+        }
+        code.matches(".build(").count()
+    }
+
     fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("read src dir") {
             let path = entry.expect("dir entry").path();
@@ -892,6 +912,21 @@ mod tests {
         }
         let commented = format!("// {ctor}(app).build()");
         assert!(window_builder_violations(&commented).is_empty());
+
+        // A builder kept aside past another window's build_petal passes the
+        // constructor check; its plain build is counted, here too.
+        let rel = "streaming/streamer_mode.rs";
+        let source = include_str!("streamer_mode.rs");
+        assert_eq!(plain_builds(rel, source), 0);
+        let held = format!(
+            "fn held() {{\n    let held = {ctor}(app, \"a\", url);\n    let w = {ctor}(app, \"b\", url).build_petal()?;\n    held.build()?;\n}}\n"
+        );
+        assert!(window_builder_violations(&held).is_empty(), "the constructor check alone misses it");
+        let tests = ["#[cfg(test)]\n", "mod tests"].concat();
+        let bypassed = source.replacen(&tests, &[held.as_str(), &tests].concat(), 1);
+        assert_eq!(plain_builds(rel, &bypassed), 1);
+        let again = source.replacen(&tests, &["fn again(self) { self.build(); }\n", &tests].concat(), 1);
+        assert_eq!(plain_builds(rel, &again), 1, "each allowed build is excused once");
     }
 
     /// #487: every Petal window is built through `build_petal`, so on Windows
@@ -935,9 +970,8 @@ mod tests {
             let squeezed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
             let builds_windows = squeezed.contains(&["Webview", "Window", "Builder"].concat())
                 || squeezed.contains(&["WebviewWindow", "::builder"].concat());
-            // This file defines build_petal (and its fixtures say `.build()`).
-            if builds_windows && rel != "streaming/streamer_mode.rs" {
-                let plain = squeezed.matches(".build(").count();
+            if builds_windows {
+                let plain = plain_builds(&rel, &source);
                 let allowed = other_builds.iter().find(|(f, _)| *f == name).map_or(0, |(_, n)| *n);
                 if plain != allowed {
                     problems.push(format!(
