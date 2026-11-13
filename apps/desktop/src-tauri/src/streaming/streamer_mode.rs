@@ -926,7 +926,7 @@ mod tests {
         for file in &files {
             let source = std::fs::read_to_string(file).expect("read source");
             let name = file.file_name().unwrap().to_string_lossy().to_string();
-            let rel = file.strip_prefix(&src).unwrap().display().to_string();
+            let rel = file.strip_prefix(&src).unwrap().display().to_string().replace('\\', "/");
             builders += strip_comments(&source).matches(&["Webview", "Window", "Builder::new("].concat()).count();
             for problem in window_builder_violations(&source) {
                 problems.push(format!("{rel}: {problem}"));
