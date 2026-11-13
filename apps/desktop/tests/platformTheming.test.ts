@@ -795,6 +795,10 @@ test('Windows Settings renders without macOS copy; both platforms compute dark c
             if (getComputedStyle(el).textOverflow === 'ellipsis') bad.push(el.textContent.trim() + ': ellipsis');
           }
           if (!rows.some((row) => row.textContent.includes(${JSON.stringify(USAGE_STATS_LABEL)}))) bad.push('usage-stats row missing');
+          // #487: the Live streaming rows are measured here too.
+          for (const title of ['Keep me off live streams', 'Always use streamer mode']) {
+            if (!rows.some((row) => row.textContent.includes(title))) bad.push(title + ' row missing');
+          }
           return bad;
         })()`
       )) as string[];

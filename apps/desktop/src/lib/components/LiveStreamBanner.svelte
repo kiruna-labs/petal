@@ -110,16 +110,20 @@
 {/if}
 
 <style>
+  /* Centred with auto margins between 16px insets, not left: 50% plus a
+     translate: that shrink-wraps to the right half of the window, so at
+     400px a guest's notice overflowed 200px (#487). */
   .live-banner {
     position: absolute;
     top: 10px;
-    left: 50%;
-    transform: translateX(-50%);
+    left: 16px;
+    right: 16px;
+    width: fit-content;
+    margin-inline: auto;
     z-index: 25;
     display: flex;
     align-items: center;
     gap: 8px;
-    max-width: calc(100% - 32px);
     padding: 5px 6px 5px 10px;
     border-radius: var(--radius-pill);
     background: var(--surface-raised);
