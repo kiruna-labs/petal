@@ -1452,6 +1452,7 @@ async fn cleanup_left_room(
     // `subscriber::start_compositor_feed`'s event loop to notice.
     //
     // #360: except across an automatic rejoin -- see `remote_window_exit`.
+    let mut rejoin_hold_id = None;
     match remote_window_exit(
         connection_lost,
         user_leave,
@@ -1469,7 +1470,7 @@ async fn cleanup_left_room(
                 // Already invalidated above: only a LATER feed may re-bind.
                 generation: state.current_room_generation().value(),
             };
-            crate::compositor::hold_all_windows_for_rejoin(app, &room);
+            rejoin_hold_id = crate::compositor::hold_all_windows_for_rejoin(app, &room);
         }
         RemoteWindowExit::KeepRejoinHold => {
             crate::compositor::remove_all_windows_except_rejoin_held(app);
@@ -1541,6 +1542,7 @@ async fn cleanup_left_room(
                 connection_lost,
                 user_leave,
                 stopped_share_count,
+                rejoin_hold_id,
             },
         );
 
@@ -1601,6 +1603,10 @@ pub struct RoomLeftEvent {
     pub user_leave: bool,
     /// Window shares this leave stopped; a rejoin does not restart them (#170).
     pub stopped_share_count: usize,
+    /// #360: the hold keeping remote windows on their last frame across the
+    /// rejoin. A terminal failure releases exactly this hold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejoin_hold_id: Option<u64>,
 }
 
 #[cfg(test)]
@@ -1681,7 +1687,10 @@ mod tests {
             .map(|(body, _)| body)
             .expect("cleanup_left_room precedes RemoteWindowExit");
         assert!(cleanup.contains("match remote_window_exit("));
-        assert!(cleanup.contains("crate::compositor::hold_all_windows_for_rejoin(app, &room);"));
+        assert!(cleanup.contains(
+            "rejoin_hold_id = crate::compositor::hold_all_windows_for_rejoin(app, &room);"
+        ));
+        assert!(cleanup.contains("                rejoin_hold_id,\n            },"));
         assert!(cleanup.contains("generation: state.current_room_generation().value(),"));
         assert!(cleanup.contains(
 "RemoteWindowExit::HoldForRejoin(room_id) => {"
@@ -1720,12 +1729,14 @@ mod tests {
             connection_lost: true,
             user_leave: false,
             stopped_share_count: 2,
+            rejoin_hold_id: Some(7),
         })
         .unwrap();
         assert_eq!(wire["roomName"], "room-a");
         assert_eq!(wire["connectionLost"], true);
         assert_eq!(wire["userLeave"], false);
         assert_eq!(wire["stoppedShareCount"], 2);
+        assert_eq!(wire["rejoinHoldId"], 7);
     }
 
     /// The leave→rejoin publish carryover (the B1 fix's source of truth) is

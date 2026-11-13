@@ -59,6 +59,9 @@ export async function runBoundedRejoin(
     }
     return { kind: 'rejoined', attempts: attempt };
   }
+  // #360: the user may have left (or the route moved on) during the last
+  // attempt; a cancelled run must not release anything.
+  if (seams.cancelled()) return { kind: 'cancelled' };
   await seams.release?.().catch(() => {});
   return { kind: 'failed', attempts: total, lastError };
 }

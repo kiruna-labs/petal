@@ -582,7 +582,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   function handleRoomLeft(event: RoomLeftEvent) {
     // #354: a lost connection is not the meeting ending -- rejoin.
     if (event.connectionLost) {
-      void recoverLostConnection(event.stoppedShareCount ?? 0);
+      void recoverLostConnection(event.stoppedShareCount ?? 0, event.rejoinHoldId ?? null);
       return;
     }
     beginTerminalReturn('Meeting ended - returning you to the room list.');
@@ -594,8 +594,11 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     void emit(EVENTS.resilienceEvent, event).catch(() => {});
   }
 
-  async function recoverLostConnection(stoppedShareCount: number) {
+  async function recoverLostConnection(stoppedShareCount: number, rejoinHoldId: number | null) {
     if (reconnecting) return;
+    // #360: captured now -- `roomName` is reactive and can change across the
+    // awaits below; the release must name the room AND hold this run began for.
+    const recoveringRoom = roomName;
     const epoch = ++recoveryEpoch;
     const stale = () => disposed || epoch !== recoveryEpoch;
     rejoinCancelled = false;
@@ -615,9 +618,9 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
         if ((await currentRoom()) === roomName) await leaveRoom();
       },
       // #360: end the native hold on remote windows kept across the rejoin.
-      // Room-scoped natively, so it can never touch a room joined since.
+      // Scoped natively to this room and this hold: a stale run is a no-op.
       release: async () => {
-        await releaseRejoinHold(roomName);
+        if (rejoinHoldId !== null) await releaseRejoinHold(recoveringRoom, rejoinHoldId);
       },
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       cancelled: () => stale() || selfLeaveRequested || rejoinCancelled,

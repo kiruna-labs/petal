@@ -803,6 +803,9 @@ export interface RoomLeftEvent {
   userLeave?: boolean;
   /** Window shares the leave stopped (a rejoin does not restart them). */
   stoppedShareCount?: number;
+  /** #360: native's hold on remote windows across the rejoin; a terminal
+   * failure releases exactly this hold. Absent when nothing was held. */
+  rejoinHoldId?: number;
 }
 
 /** Mirrors `menubar::MenubarPillState` (src-tauri/src/menubar.rs). */
