@@ -45,6 +45,11 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { isMac } from '#lib/platform.js';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
+  import { recentRoomLabelForDisplay } from '#lib/data/liveStream.js';
+  import { streamerMode, watchStreamerMode } from '#lib/stores/streamerMode.svelte.js';
+
+  // Streamer mode hides room names, codes and what is typed below.
+  $effect(() => watchStreamerMode());
 
   interface RoomParticipant {
     name: string;
@@ -193,9 +198,10 @@
     // Never expose an internal room-<hex> credential when a caller has not
     // resolved a display label yet (#327).
     const fallback = room.trim();
-    return (
+    return recentRoomLabelForDisplay(
       roomDisplayNamesByName[room]?.trim() ||
-      (fallback && !normalizeMeetingCredential(fallback) ? fallback : 'Petal meeting')
+        (fallback && !normalizeMeetingCredential(fallback) ? fallback : 'Petal meeting'),
+      streamerMode.active
     );
   }
 
@@ -344,6 +350,7 @@
       roomName={displayNameForRoom(liveRoom.name)}
       participants={liveRoom.participants}
       accessCode={roomAccessCodesByName[liveRoom.name] ?? null}
+      codeHidden={streamerMode.active}
       onJoin={onJoinLive}
       onCopyInvite={onCopyRoomLink ? () => onCopyRoomLink(liveRoom.name) : undefined}
     />
@@ -370,7 +377,7 @@
           <input
             id="meeting-code"
             class="join-input"
-            type="text"
+            type={streamerMode.active ? 'password' : 'text'}
             name="meeting-code"
             autocapitalize="off"
             autocomplete="off"
@@ -409,6 +416,7 @@
           <RoomRow
             name={displayNameForRoom(room)}
             accessCode={roomAccessCodesByName[room] ?? null}
+            codeHidden={streamerMode.active}
             participants={roomParticipantsByName[room] ?? []}
             occupancy={roomOccupancyByName[room] ?? null}
             roster={roomRosterByName[room] ?? []}

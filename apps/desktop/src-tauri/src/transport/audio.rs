@@ -531,7 +531,8 @@ pub struct MicTrack {
     /// to re-enumerate/switch the recording device in place.
     audio: PlatformAudio,
     track: LocalAudioTrack,
-    muted: AtomicBool,
+    /// Mute and when it last went unmuted, as one value (see [`MuteRecord`]).
+    mute: Mutex<MuteRecord>,
     /// The recording device id this track was (re-)pinned to, as of the last
     /// successful enumeration -- read+compared by
     /// `refresh_default_recording_device` to detect "the default device
@@ -613,7 +614,13 @@ pub enum RecordingDeviceRefresh {
 
 impl MicTrack {
     pub fn is_muted(&self) -> bool {
-        self.muted.load(Ordering::SeqCst)
+        self.mute.lock_unpoisoned().muted
+    }
+
+    /// Mute and when it was last unmuted, read together.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn mute_record(&self) -> MuteRecord {
+        *self.mute.lock_unpoisoned()
     }
 
     /// The published mic track, for reading its capture stats
@@ -639,6 +646,17 @@ impl MicTrack {
             .recording_devices()
             .find(|device| device.id.as_str() == device_id)
             .map(|device| device.name)
+    }
+
+    /// The recording device this track is on, by name. Read-only: live
+    /// streaming's own mic capture follows it (`streaming/mic.rs`).
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+    pub(crate) fn current_device_name(&self) -> Option<String> {
+        let id = self.current_device.lock_unpoisoned().as_ref()?.id.clone();
+        self.audio
+            .recording_devices()
+            .find(|device| device.id == id)
+            .map(|device| device.name.clone())
     }
 
     /// This mic's current LiveKit track SID. Used by #713's reconnect
@@ -671,7 +689,8 @@ impl MicTrack {
     /// Record the user's latest mute intent synchronously so UI reads stay
     /// immediate even when the SDK call is dispatched onto Tauri's runtime.
     pub fn cache_muted_state(&self, muted: bool) {
-        self.muted.store(muted, Ordering::SeqCst);
+        let mut record = self.mute.lock_unpoisoned();
+        *record = record.set(muted, std::time::Instant::now());
     }
 
     /// Mute or unmute the published mic track in place -- see module doc
@@ -1298,6 +1317,29 @@ pub fn enable_managed_playout(
     SpeakerPlayout::new(preferred_playout_device)
 }
 
+/// A mic's mute and when it was last unmuted, always written and read as
+/// one value: the live stream silences audio captured before the unmute,
+/// and a reader that saw "unmuted" with an older time would let a muted
+/// chunk through (#487).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MuteRecord {
+    pub muted: bool,
+    pub unmuted_at: Option<std::time::Instant>,
+}
+
+impl MuteRecord {
+    pub fn new(muted: bool) -> Self {
+        Self { muted, unmuted_at: None }
+    }
+
+    /// This record after the mute is set to `muted` at `now`.
+    #[must_use]
+    pub fn set(self, muted: bool, now: std::time::Instant) -> Self {
+        let unmuted_at = if self.muted && !muted { Some(now) } else { self.unmuted_at };
+        Self { muted, unmuted_at }
+    }
+}
+
 /// Synchronously prepared microphone resources. This is deliberately detached
 /// from room/session state so `join_room` can run preparation on the blocking
 /// pool and safely abandon its join handle at the terminal deadline (#569).
@@ -1324,7 +1366,7 @@ impl PreparedMicrophone {
         MicTrack {
             audio: self.audio,
             track: self.track,
-            muted: AtomicBool::new(self.muted),
+            mute: Mutex::new(MuteRecord::new(self.muted)),
             current_device: Mutex::new(self.current_device),
             user_pinned: AtomicBool::new(self.user_pinned),
             do_not_retry: Mutex::new(self.failed_switch.into_iter().collect()),

@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 
 pub const CONTROL_CONSENT_LABEL: &str = "control-consent";
 const CONTROL_CONSENT_WIDTH: f64 = 420.0;
@@ -45,7 +46,7 @@ pub fn create_control_consent_panel(app: &AppHandle) {
     .visible(false)
     .inner_size(CONTROL_CONSENT_WIDTH, CONTROL_CONSENT_DEFAULT_HEIGHT);
 
-    match builder.build() {
+    match builder.build_petal() {
         Ok(window) => {
             let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
                 x: -10000,

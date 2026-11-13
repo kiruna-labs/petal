@@ -35,6 +35,7 @@ use crate::transport::publisher::SharedSourceKind;
 use crate::video_color::VideoColorProfile;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 use tokio_util::sync::CancellationToken;
 use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::{
@@ -2361,7 +2362,7 @@ pub(crate) async fn create_window(
             DEFAULT_WINDOW_SIZE.0 as f64,
             DEFAULT_WINDOW_SIZE.1 as f64 + HEADER_HEIGHT as f64,
         )
-        .build()
+        .build_petal()
     {
         Ok(window) => window,
         Err(error) => {
@@ -2467,7 +2468,7 @@ fn create_pointer_overlay(app: &tauri::AppHandle, key: &WindowKey) {
         // overlay is invisible (never a black frame).
         .visible(false)
         .inner_size(1.0, 1.0)
-        .build()
+        .build_petal()
     {
         Ok(overlay) => {
             // Click-through: never block interaction with the remote content
@@ -2549,7 +2550,7 @@ fn create_control_overlay(app: &tauri::AppHandle, key: &WindowKey) {
         .title("Petal Control")
         .visible(false)
         .inner_size(1.0, 1.0)
-        .build()
+        .build_petal()
     {
         Ok(overlay) => {
             // Cursor-interactive always (resize handles + #678 raise), unlike

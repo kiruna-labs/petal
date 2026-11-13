@@ -866,6 +866,28 @@ impl SessionState {
         self.share_control_lock.lock().await
     }
 
+    /// Live streaming (client mode): the joined room, our identity, and the
+    /// window ids we share right now.
+    pub(crate) fn live_stream_context(&self) -> Option<(Arc<livekit::Room>, String, Vec<u32>)> {
+        let joined = self.joined.lock_unpoisoned();
+        let session = joined.as_ref()?;
+        Some((
+            session.room_connection.room(),
+            session.identity.clone(),
+            session
+                .media
+                .shares
+                .iter()
+                .map(|share| share.token)
+                .collect(),
+        ))
+    }
+
+    /// Live streaming (client mode): the meeting's microphone, if published.
+    pub(crate) fn live_stream_microphone(&self) -> Option<Arc<crate::transport::audio::MicTrack>> {
+        self.joined.lock_unpoisoned().as_ref()?.media.microphone.clone()
+    }
+
     pub(crate) fn shared_window_ids(&self) -> Vec<u32> {
         self.joined
             .lock_unpoisoned()
@@ -1127,13 +1149,12 @@ impl SessionState {
     /// Windows AI-chat parity: temporarily mute the live microphone without
     /// changing the user's persistent mute intent.
     pub(crate) fn set_ai_chat_ducking(&self, duck: bool) {
+        // Read the intent and apply it under `joined`, as `set_mic_muted`
+        // does: a duck release racing a mute must not unmute the track (and
+        // with it the live stream's mic, #487).
+        let joined = self.joined.lock_unpoisoned();
         let muted = self.desired_mic_muted.load(Ordering::SeqCst) || duck;
-        if let Some(microphone) = self
-            .joined
-            .lock_unpoisoned()
-            .as_ref()
-            .and_then(|session| session.media.microphone.clone())
-        {
+        if let Some(microphone) = joined.as_ref().and_then(|session| session.media.microphone.as_ref()) {
             microphone.set_muted(muted);
         }
     }
@@ -2663,6 +2684,14 @@ fn start_share_frame_pump(
                     }
                     sequence += 1;
                     let captured = share_captured_frame(previous, sequence);
+                    // Live stream (client mode): the re-push also seeds a tap
+                    // that was bound after the content went static.
+                    crate::streaming::tap::offer_frame(
+                        token,
+                        kind == SharedSourceKind::Window
+                            || crate::streaming::streamer_mode::frame_excludes_petal(previous.captured_at_100ns),
+                        || Some(stream_tap_frame(previous)),
+                    );
                     let published = shared.published.lock_unpoisoned().clone();
                     // A refresh re-push is not a capture: `previous` is a frame
                     // whose `capture_wall_time_us` is frozen at the LAST real
@@ -2769,6 +2798,14 @@ fn start_share_frame_pump(
                 );
             }
             let captured = share_captured_frame(&frame, sequence);
+            // Live stream (client mode): the bound share's frames, at the
+            // share's own cadence, before the WebRTC conversion.
+            crate::streaming::tap::offer_frame(
+                token,
+                kind == SharedSourceKind::Window
+                    || crate::streaming::streamer_mode::frame_excludes_petal(frame.captured_at_100ns),
+                || Some(stream_tap_frame(&frame)),
+            );
             let published = shared.published.lock_unpoisoned().clone();
             let push_result = published.push_frame(&captured, published_wall_time_us);
             if let Some(timing) = push_result {
@@ -2798,6 +2835,19 @@ fn start_share_frame_pump(
             continue;
         }
     })
+}
+
+fn stream_tap_frame(
+    frame: &crate::windows_screen_capture::BgraFrame,
+) -> crate::streaming::tap::TapFrame {
+    crate::streaming::tap::TapFrame {
+        pixels: crate::streaming::tap::TapPixels::Bgra {
+            bgra: frame.bgra.clone(),
+            bytes_per_row: u32::try_from(frame.bytes_per_row).unwrap_or(frame.width * 4),
+        },
+        width: frame.width,
+        height: frame.height,
+    }
 }
 
 fn sync_region_warning(app: &tauri::AppHandle, token: u32, last: &mut Option<bool>) {
@@ -2898,6 +2948,8 @@ async fn stop_share(
         ..
     } = share;
     let started = std::time::Instant::now();
+    // A live stream bound to this share falls back to its slate.
+    crate::streaming::tap::share_ended(token);
     // Per-share capture choices end with the share, whatever stopped it.
     crate::share_capture_options::clear(token);
     // Invalidate the desired reference synchronously, then clean up audio in
@@ -3334,6 +3386,13 @@ pub async fn join_room_command(
         room_connection.room().clone(),
         generation.clone(),
     );
+    // Live-stream state: `petal.live` -> `stream-live-changed` for the LIVE
+    // indicators.
+    crate::streaming::live_state::start_for_room(
+        &app,
+        room_connection.room().clone(),
+        generation.clone(),
+    );
     let livekit_room_name = connected.livekit_room_name;
     match room_connection
         .publish_identity_palette_index(identity_palette_index)
@@ -3530,6 +3589,26 @@ async fn start_audio_for_session(
         }
     };
 
+    // Live streams: our petal.stream-optout reaches the server before the mic
+    // does, so a streamer never hears an opted-out mic (#487). If it can't be
+    // saved, the mic stays off rather than publishing uncovered.
+    let prepared = match prepared {
+        Some(prepared)
+            if !crate::streaming::live_state::opt_out_settled(
+                &room_connection.room(),
+                crate::streaming::live_state::OPT_OUT_BEFORE_MIC_TIMEOUT,
+            )
+            .await =>
+        {
+            log::warn!(
+                "windows session: \"Keep me off live streams\" couldn't be saved; not publishing the microphone"
+            );
+            // Detached: releasing the device must not hold up the join.
+            drop(tokio::task::spawn_blocking(move || drop(prepared)));
+            None
+        }
+        prepared => prepared,
+    };
     if let Some(prepared) = prepared {
         let mut prepared = Some(prepared);
         let room = room_connection.room();
@@ -4001,6 +4080,10 @@ async fn leave_room_inner(
     // frame), which is exactly why the generation check in
     // `camera_session::start_camera_publish_with_device` exists.
     crate::camera_session::stop_camera_publish(app, state).await;
+    // A client-mode live stream ends with the meeting: stop it (and clear
+    // `petal.live`) while the room is still connected, before the shares stop
+    // and would only put up the slate.
+    crate::streaming::session::stop(app, crate::streaming::session::StopReason::Left).await;
     let audio_control = state.lock_screen_audio_control().await;
     let joined = state.joined.lock_unpoisoned().take();
     let Some(mut joined) = joined else {

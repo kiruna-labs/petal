@@ -65,6 +65,9 @@ const CAPTURE_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const BORDERLESS_ACCESS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Periodic arrival/delivery cadence log while the pump loop is idle.
 const CAPTURE_HEALTH_INTERVAL: Duration = Duration::from_secs(5);
+/// While a capture holds the live stream's GPU texture pool, how often it
+/// wakes without a frame to check the stream still wants it.
+const GPU_TAP_IDLE_CHECK: Duration = Duration::from_secs(1);
 #[cfg(any(test, debug_assertions))]
 const TEST_CAPTURE_STOP_AFTER_MS_ENV: &str = "PETAL_TEST_WINDOWS_CAPTURE_STOP_AFTER_MS";
 #[cfg(any(test, debug_assertions))]
@@ -215,6 +218,10 @@ pub struct BgraFrame {
     pub height: u32,
     pub capture_wall_time_us: u64,
     pub region_generation: Option<u64>,
+    /// When WGC composed the frame (`SystemRelativeTime`, QPC in 100 ns
+    /// units; `i64::MIN` if unknown). A live stream takes only frames
+    /// composed after Petal's windows were excluded (#487).
+    pub captured_at_100ns: i64,
 }
 
 #[derive(Clone, Copy)]
@@ -702,6 +709,7 @@ pub fn capture_one_shot(token: u32, timeout: Duration) -> Result<BgraFrame, Stri
         &mut roi_texture,
         region.as_ref(),
         &mut canvas_texture,
+        None,
     );
     let _ = session.Close();
     let _ = pool.Close();
@@ -726,6 +734,10 @@ struct CaptureSetup {
     region_paused: bool,
     closed_token: i64,
     arrival_token: i64,
+    /// The live stream's GPU frame tap for this capture (idle unless this
+    /// share is the one streaming); its texture pool goes once the share
+    /// stops feeding a stream.
+    gpu_tap: crate::streaming::gpu_tap::Producer,
 }
 
 fn capture_thread_main(
@@ -977,6 +989,7 @@ fn setup_capture(
         region_paused: false,
         closed_token,
         arrival_token,
+        gpu_tap: crate::streaming::gpu_tap::Producer::for_target(target.kind() == TargetKind::Window),
     })
 }
 
@@ -1009,6 +1022,10 @@ fn run_pump_loop(
             }
             let wait_timeout = if setup.region.is_some() {
                 crate::region_window::REGION_GEOMETRY_INTERVAL
+            } else if setup.gpu_tap.holds_pool() {
+                // A static share sends no frames after Stop: wake up to let
+                // the stream's texture pool go (#487).
+                GPU_TAP_IDLE_CHECK
             } else {
                 CAPTURE_HEALTH_INTERVAL
             };
@@ -1020,6 +1037,9 @@ fn run_pump_loop(
                 }
             };
             guard = next_guard;
+            if timed_out && setup.gpu_tap.holds_pool() {
+                setup.gpu_tap.release_if_idle(token);
+            }
             if timed_out && setup.region.is_some() {
                 // A region share must poll selector geometry even when the
                 // pinned owning display is static: WGC delivers no frames
@@ -1138,6 +1158,7 @@ fn run_pump_loop(
                 setup.region.as_ref(),
                 state,
                 on_frame,
+                Some((&mut setup.gpu_tap, token)),
             );
         }
         let delivered = state.frames_delivered.load(Ordering::Relaxed);
@@ -1175,6 +1196,7 @@ fn drain_and_push(
     region: Option<&RegionCaptureSpec>,
     state: &CaptureState,
     on_frame: &(impl Fn(BgraFrame) + Send + Sync),
+    gpu_tap: Option<(&mut crate::streaming::gpu_tap::Producer, u32)>,
 ) {
     // Latest-wins drain: release older frames, keep only the newest.
     let mut last: Option<Direct3D11CaptureFrame> = None;
@@ -1203,6 +1225,7 @@ fn drain_and_push(
         roi_texture,
         region,
         canvas_texture,
+        gpu_tap,
     ) {
         Ok(frame) => {
             state.frames_delivered.fetch_add(1, Ordering::Relaxed);
@@ -1225,7 +1248,9 @@ fn copy_frame_to_bgra(
     roi_texture: &mut Option<(ID3D11Texture2D, ID3D11Resource)>,
     region: Option<&RegionCaptureSpec>,
     canvas_texture: &mut Option<(ID3D11Resource, ID3D11RenderTargetView)>,
+    gpu_tap: Option<(&mut crate::streaming::gpu_tap::Producer, u32)>,
 ) -> Result<BgraFrame, String> {
+    let captured_at_100ns = frame.SystemRelativeTime().map_or(i64::MIN, |time| time.Duration);
     let content_size = frame
         .ContentSize()
         .map_err(|error| format!("frame ContentSize failed: {error}"))?;
@@ -1341,6 +1366,23 @@ fn copy_frame_to_bgra(
         )
     };
 
+    // Live stream (client mode): the same pixels the staging copy just read,
+    // copied on the GPU for the stream's encoder.
+    if let Some((producer, token)) = gpu_tap {
+        let tap_source = match (region, canvas_texture.as_ref()) {
+            (Some(_), Some((canvas_resource, _))) => canvas_resource,
+            _ => &source_resource,
+        };
+        producer.offer(
+            token,
+            device,
+            context,
+            tap_source,
+            (output_width as u32, output_height as u32),
+            crate::streaming::streamer_mode::frame_excludes_petal(captured_at_100ns),
+        );
+    }
+
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
     unsafe {
         context
@@ -1380,6 +1422,7 @@ fn copy_frame_to_bgra(
         height: frame_height,
         capture_wall_time_us: crate::time_util::now_us(),
         region_generation,
+        captured_at_100ns,
     })
 }
 

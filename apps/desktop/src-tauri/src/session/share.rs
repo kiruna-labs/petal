@@ -3376,6 +3376,30 @@ impl SessionState {
         (room_connection, identity, frames)
     }
 
+    /// Live streaming (client mode): the joined room, our identity, and the
+    /// window ids we share right now.
+    pub(crate) fn live_stream_context(&self) -> Option<(Arc<livekit::Room>, String, Vec<u32>)> {
+        let guard = self.inner.lock_unpoisoned();
+        let joined = guard.joined.as_ref()?;
+        Some((
+            joined.room_connection.room(),
+            joined.identity.clone(),
+            guard.shares.keys().copied().collect(),
+        ))
+    }
+
+    /// Live streaming (client mode): a share's captured size and the cadence
+    /// it runs at while live (full quality, under its priority's cap).
+    pub(crate) fn live_stream_capture(&self, window_id: u32) -> Option<((u32, u32), u32)> {
+        let guard = self.inner.lock_unpoisoned();
+        let share = guard.shares.get(&window_id)?;
+        let size = share.capture.configuration_handle().configured_output();
+        let fps = ShareQuality::Full
+            .capture_fps()
+            .min(share.priority.lock_unpoisoned().capture_fps());
+        Some((size, fps))
+    }
+
     /// Current frame of one active local share, if `window_id` is one of this
     /// process's real shared windows. Used by remote control to reject camera
     /// synthetic ids and stale/off-target packets before replaying input.
@@ -5847,6 +5871,9 @@ async fn start_share_with_capture_source(
     if let Some(demote_id) = window_id_to_demote {
         apply_quality(state, demote_id, ShareQuality::Reduced).await;
     }
+    // A stream may have started or ended while this capture was starting; a
+    // filter already in the right state is left alone.
+    crate::streaming::streamer_mode::reapply_capture_exclusion(state).await;
 
     // SPEC.md §4.2's global-shortcut target: record this as "the last window
     // toggled," so the shortcut has something to act on -- see
@@ -5906,6 +5933,38 @@ fn sync_region_outside_display(
     if let Err(error) = app.emit("region-warning", payload) {
         log::warn!("session: region warning emit failed for {window_id}: {error}");
     }
+}
+
+/// Live stream (client mode): a copy of a frame this share just published,
+/// for the stream's tap. The copy is made only when this share is the live
+/// one, at the share's own cadence.
+fn offer_live_stream_frame(window_id: u32, frame: &crate::capture::CapturedFrame) {
+    use crate::capture::CapturedFramePayload;
+    use crate::streaming::macos_encode::PixelBuffer;
+    static FAILED_COPIES: AtomicU64 = AtomicU64::new(0);
+    crate::streaming::tap::offer_frame(window_id, frame.excludes_petal_windows, || {
+        let copy = match &frame.payload {
+            // SAFETY: `frame` keeps its capture buffer alive for the copy.
+            CapturedFramePayload::Native { pixel_buffer } => unsafe { PixelBuffer::copy_of(pixel_buffer.as_ptr()) },
+            CapturedFramePayload::Nv12 { y, y_stride, uv, uv_stride } => {
+                PixelBuffer::from_nv12(y, *y_stride, uv, *uv_stride, frame.width, frame.height)
+            }
+            CapturedFramePayload::Bgra { data, bytes_per_row } => {
+                let bytes_per_row = u32::try_from(*bytes_per_row).unwrap_or(u32::MAX);
+                PixelBuffer::from_bgra(data, bytes_per_row, frame.width, frame.height)
+            }
+        };
+        match copy {
+            Ok(buffer) => Some(crate::streaming::tap::TapFrame { buffer, width: frame.width, height: frame.height }),
+            Err(error) => {
+                let failed = FAILED_COPIES.fetch_add(1, Ordering::Relaxed);
+                if failed % 300 == 0 {
+                    log::warn!("streaming: couldn't copy window {window_id}'s frame for the stream: {error}");
+                }
+                None
+            }
+        }
+    });
 }
 
 fn record_published_frame_timing(
@@ -6174,6 +6233,9 @@ fn spawn_share_pump(
                         "idle_refresh",
                         timing,
                     );
+                    // The re-push also seeds a stream tap bound after the
+                    // content went static.
+                    offer_live_stream_frame(window_id, frame);
                     record_published_frame_timing(&pump_diagnostics, window_id, timing);
                     rejected_push_retry
                         .observe_push(timing.map(|t| t.source_accepted), Instant::now());
@@ -6347,6 +6409,7 @@ fn spawn_share_pump(
                                             timing.map(|t| t.source_accepted),
                                             Instant::now(),
                                         );
+                                        offer_live_stream_frame(window_id, parked);
                                         record_published_frame_timing(
                                             &pump_diagnostics,
                                             window_id,
@@ -6665,6 +6728,7 @@ fn spawn_share_pump(
                 );
                 continue;
             };
+            offer_live_stream_frame(window_id, frame);
             if let Some(generation) = frame.region_generation {
                 let pushed_so_far = pump_pushed_frames_for_task.load(Ordering::Relaxed);
                 if pushed_so_far == 0 || pushed_so_far % 120 == 0 {
@@ -7628,6 +7692,7 @@ fn spawn_pump_failure_recovery(
         log::info!(
             "session: window {window_id} capture restarted in place after pump failure (seq {started_seq}, restart_generation {next_restart_generation})"
         );
+        crate::streaming::streamer_mode::reapply_capture_exclusion(state.inner()).await;
         crate::analytics::capture_restarted(crate::analytics::RestartOutcome::Recovered);
     });
 }
@@ -7879,6 +7944,9 @@ async fn stop_share_with_started_seq_inner(
         );
         return Ok(false);
     };
+    // A live stream on this share falls back to its slate until the sharer
+    // resumes it, even if this same window is shared again.
+    crate::streaming::tap::share_ended(window_id);
     if let Some(room_connection) = room_connection_at_removal.as_ref() {
         let app = app.clone();
         let room_connection = room_connection.clone();
@@ -8743,10 +8811,13 @@ async fn apply_quality(state: &SessionState, window_id: u32, quality: ShareQuali
         let (target_width, target_height, _) =
             capture_config.capture_size_for_resolution(share.resolution);
         let current_quality = current.quality();
+        // A live stream is live demand too: its share keeps the full cadence
+        // when it loses focus.
         let mut target_quality = effective_share_quality(
             quality,
             crate::remote_control::window_has_active_controller(window_id)
-                || has_passive_viewer_demand(&guard, window_id),
+                || has_passive_viewer_demand(&guard, window_id)
+                || crate::streaming::tap::is_live_window(window_id),
         );
         // Interaction-burst subscription floor (#290 step 5): while remote
         // typing/wheel/drag input has landed on this window within the last
@@ -9070,6 +9141,42 @@ pub async fn reconcile_quality_for_window(state: &SessionState, window_id: u32) 
         }
     };
     apply_quality(state, window_id, target_quality).await;
+}
+
+/// Streamer mode (this computer is live): every whole-display share drops
+/// Petal's own windows from its capture, or gets them back. Region shares
+/// already exclude them; window shares never contain them.
+/// Rebuild every whole-display share with or without Petal's windows; the
+/// shares whose filter couldn't be updated are returned.
+pub async fn apply_streamer_capture_exclusion(state: &SessionState, excluded: bool) -> Vec<u32> {
+    let mut failed = Vec::new();
+    let configs: Vec<(u32, crate::capture::WindowCaptureConfig)> = {
+        let guard = state.inner.lock_unpoisoned();
+        guard
+            .shares
+            .iter()
+            .filter(|(_, share)| share.source_kind == crate::transport::publisher::SharedSourceKind::Display)
+            .map(|(window_id, share)| (*window_id, share.capture.configuration_handle()))
+            .collect()
+    };
+    for (window_id, config) in configs {
+        match tokio::task::spawn_blocking(move || config.set_display_own_windows_excluded(excluded)).await {
+            Ok(Ok(true)) => log::info!(
+                "streaming: display share {window_id} {} Petal's windows",
+                if excluded { "now excludes" } else { "includes again" }
+            ),
+            Ok(Ok(false)) => {}
+            Ok(Err(error)) => {
+                log::warn!("streaming: couldn't update display share {window_id}'s filter: {error}");
+                failed.push(window_id);
+            }
+            Err(error) => {
+                log::warn!("streaming: display share {window_id} filter task failed: {error}");
+                failed.push(window_id);
+            }
+        }
+    }
+    failed
 }
 
 async fn retry_post_wake_software_encoder_fallback(
@@ -13966,6 +14073,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             dirty_rects_known: true,
             lock_copy_ms: 0.25,
             region_generation: None,
+            excludes_petal_windows: true,
         }
     }
 
@@ -14012,6 +14120,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             dirty_rects_known: true,
             lock_copy_ms: 0.25,
             region_generation: None,
+            excludes_petal_windows: true,
         }
     }
 
@@ -14038,6 +14147,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             dirty_rects_known: true,
             lock_copy_ms: 0.25,
             region_generation: None,
+            excludes_petal_windows: true,
         }
     }
 
@@ -14068,6 +14178,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             dirty_rects_known: true,
             lock_copy_ms: 0.0,
             region_generation: None,
+            excludes_petal_windows: true,
         }
     }
 
@@ -14999,6 +15110,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
                 dirty_rects_known: true,
                 lock_copy_ms: 0.25,
                 region_generation: None,
+                excludes_petal_windows: true,
             }
         };
 

@@ -7,6 +7,7 @@
 
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 
 pub const NETWORK_COCKPIT_LABEL: &str = "network-cockpit";
 
@@ -49,7 +50,7 @@ pub async fn open_network_cockpit_window(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let cockpit_builder =
         cockpit_builder.additional_browser_args(crate::webview2_args::WEBVIEW2_ACCEL_ARGS);
-    let window = cockpit_builder.build().map_err(|e| e.to_string())?;
+    let window = cockpit_builder.build_petal().map_err(|e| e.to_string())?;
 
     // Windows: opaque window with DWM-native corners (same as the main window);
     // macOS keeps its transparent + CSS-rounded panel.

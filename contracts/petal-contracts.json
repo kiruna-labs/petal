@@ -3542,5 +3542,454 @@
       { "counter": 32768, "blocks": "1100000000000000" },
       { "counter": 65535, "blocks": "1000000000000000" }
     ]
+  },
+  "streamOutputPlans": [
+    {
+      "name": "auto: a window slightly too big for 720p gets 1080p",
+      "input": {
+        "captureWidth": 1282,
+        "captureHeight": 825,
+        "shareFps": 30,
+        "resolution": "auto"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "bitrateBps": 4976640,
+        "maxBitrateBps": 6000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "auto: a small window gets 720p",
+      "input": {
+        "captureWidth": 800,
+        "captureHeight": 600,
+        "shareFps": 30,
+        "resolution": "auto"
+      },
+      "output": {
+        "width": 1280,
+        "height": 720,
+        "fps": 30,
+        "bitrateBps": 3000000,
+        "maxBitrateBps": 6000000,
+        "resolution": "720p"
+      }
+    },
+    {
+      "name": "auto: up to 10% downscale still fits 720p",
+      "input": {
+        "captureWidth": 1366,
+        "captureHeight": 768,
+        "shareFps": 30,
+        "resolution": "auto"
+      },
+      "output": {
+        "width": 1280,
+        "height": 720,
+        "fps": 30,
+        "bitrateBps": 3000000,
+        "maxBitrateBps": 6000000,
+        "resolution": "720p"
+      }
+    },
+    {
+      "name": "auto: a 1440p display caps at 1080p",
+      "input": {
+        "captureWidth": 2560,
+        "captureHeight": 1440,
+        "shareFps": 30,
+        "resolution": "auto"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "bitrateBps": 4976640,
+        "maxBitrateBps": 6000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "auto: a portrait window gets a portrait canvas",
+      "input": {
+        "captureWidth": 900,
+        "captureHeight": 1600,
+        "shareFps": 30,
+        "resolution": "auto"
+      },
+      "output": {
+        "width": 1080,
+        "height": 1920,
+        "fps": 30,
+        "bitrateBps": 4976640,
+        "maxBitrateBps": 6000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "landscape override pillarboxes a portrait window",
+      "input": {
+        "captureWidth": 900,
+        "captureHeight": 1600,
+        "shareFps": 30,
+        "resolution": "auto",
+        "orientation": "landscape"
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "bitrateBps": 4976640,
+        "maxBitrateBps": 6000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "portrait override on a landscape window",
+      "input": {
+        "captureWidth": 1920,
+        "captureHeight": 1080,
+        "shareFps": 30,
+        "resolution": "auto",
+        "orientation": "portrait"
+      },
+      "output": {
+        "width": 1080,
+        "height": 1920,
+        "fps": 30,
+        "bitrateBps": 4976640,
+        "maxBitrateBps": 6000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "an explicit 1440p upscales a small window and hits the auto bitrate max",
+      "input": {
+        "captureWidth": 1280,
+        "captureHeight": 720,
+        "shareFps": 60,
+        "resolution": "1440p"
+      },
+      "output": {
+        "width": 2560,
+        "height": 1440,
+        "fps": 60,
+        "bitrateBps": 12000000,
+        "maxBitrateBps": 12000000,
+        "resolution": "1440p"
+      }
+    },
+    {
+      "name": "an explicit 720p downscales a large window",
+      "input": {
+        "captureWidth": 2560,
+        "captureHeight": 1440,
+        "shareFps": 60,
+        "resolution": "720p"
+      },
+      "output": {
+        "width": 1280,
+        "height": 720,
+        "fps": 60,
+        "bitrateBps": 4423680,
+        "maxBitrateBps": 6000000,
+        "resolution": "720p"
+      }
+    },
+    {
+      "name": "4K60 at 4K",
+      "input": {
+        "captureWidth": 3840,
+        "captureHeight": 2160,
+        "shareFps": 60,
+        "resolution": "4k"
+      },
+      "output": {
+        "width": 3840,
+        "height": 2160,
+        "fps": 60,
+        "bitrateBps": 25000000,
+        "maxBitrateBps": 25000000,
+        "resolution": "4k"
+      }
+    },
+    {
+      "name": "an override above 50 Mbps clamps to 50 Mbps",
+      "input": {
+        "captureWidth": 3840,
+        "captureHeight": 2160,
+        "shareFps": 60,
+        "resolution": "4k",
+        "maxBitrateBps": 80000000
+      },
+      "output": {
+        "width": 3840,
+        "height": 2160,
+        "fps": 60,
+        "bitrateBps": 39813120,
+        "maxBitrateBps": 50000000,
+        "resolution": "4k"
+      }
+    },
+    {
+      "name": "a max bitrate below the floor wins over the floor",
+      "input": {
+        "captureWidth": 1920,
+        "captureHeight": 1080,
+        "shareFps": 60,
+        "resolution": "1080p",
+        "maxBitrateBps": 1000000
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "bitrateBps": 1000000,
+        "maxBitrateBps": 1000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "a 15 fps share at 720p gets the 3 Mbps floor",
+      "input": {
+        "captureWidth": 1280,
+        "captureHeight": 720,
+        "shareFps": 15,
+        "resolution": "auto"
+      },
+      "output": {
+        "width": 1280,
+        "height": 720,
+        "fps": 15,
+        "bitrateBps": 3000000,
+        "maxBitrateBps": 6000000,
+        "resolution": "720p"
+      }
+    },
+    {
+      "name": "a degenerate capture still gets a standard canvas",
+      "input": {
+        "captureWidth": 1,
+        "captureHeight": 1,
+        "shareFps": 30,
+        "resolution": "auto"
+      },
+      "output": {
+        "width": 1280,
+        "height": 720,
+        "fps": 30,
+        "bitrateBps": 3000000,
+        "maxBitrateBps": 6000000,
+        "resolution": "720p"
+      }
+    },
+    {
+      "name": "cpu: Auto with a 1080p share at 60 fps is held to 30 fps",
+      "input": {
+        "captureWidth": 1920,
+        "captureHeight": 1080,
+        "shareFps": 60,
+        "resolution": "auto",
+        "cpuEncode": true
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "bitrateBps": 4976640,
+        "maxBitrateBps": 6000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "cpu: Auto with a 720p share at 60 fps runs at 30 fps",
+      "input": {
+        "captureWidth": 1280,
+        "captureHeight": 720,
+        "shareFps": 60,
+        "resolution": "auto",
+        "cpuEncode": true
+      },
+      "output": {
+        "width": 1280,
+        "height": 720,
+        "fps": 30,
+        "bitrateBps": 3000000,
+        "maxBitrateBps": 6000000,
+        "resolution": "720p"
+      }
+    },
+    {
+      "name": "cpu: Auto with a 1440p display caps at 1080p30",
+      "input": {
+        "captureWidth": 2560,
+        "captureHeight": 1440,
+        "shareFps": 60,
+        "resolution": "auto",
+        "cpuEncode": true
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "bitrateBps": 4976640,
+        "maxBitrateBps": 6000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "cpu: an explicit 1080p at 60 fps is kept",
+      "input": {
+        "captureWidth": 1920,
+        "captureHeight": 1080,
+        "shareFps": 60,
+        "resolution": "1080p",
+        "cpuEncode": true
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "bitrateBps": 6000000,
+        "maxBitrateBps": 6000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "cpu: an explicit 4K is kept",
+      "input": {
+        "captureWidth": 1920,
+        "captureHeight": 1080,
+        "shareFps": 30,
+        "resolution": "4k",
+        "cpuEncode": true
+      },
+      "output": {
+        "width": 3840,
+        "height": 2160,
+        "fps": 30,
+        "bitrateBps": 19906560,
+        "maxBitrateBps": 25000000,
+        "resolution": "4k"
+      }
+    }
+  ],
+  "streamFpsCeilings": [
+    {
+      "width": 1920,
+      "height": 1080,
+      "fps": 60
+    },
+    {
+      "width": 2560,
+      "height": 1440,
+      "fps": 60
+    },
+    {
+      "width": 3840,
+      "height": 2160,
+      "fps": 60
+    },
+    {
+      "width": 4096,
+      "height": 2304,
+      "fps": 30
+    }
+  ],
+  "streamLiveAttribute": {
+    "key": "petal.live",
+    "value": "{\"mode\":\"client\",\"startedAt\":1786000000000,\"windowId\":123456,\"state\":\"live\"}",
+    "parsed": {
+      "mode": "client",
+      "startedAt": 1786000000000,
+      "windowId": 123456,
+      "state": "live"
+    },
+    "states": [
+      "live",
+      "paused"
+    ],
+    "rejected": [
+      "",
+      "null",
+      "{\"mode\":\"server\",\"startedAt\":1,\"windowId\":1,\"state\":\"live\"}",
+      "{\"mode\":\"client\",\"startedAt\":1,\"windowId\":-1,\"state\":\"live\"}",
+      "{\"mode\":\"client\",\"startedAt\":1,\"windowId\":1,\"state\":\"ended\"}"
+    ]
+  },
+  "streamLiveDerivation": {
+    "attributes": [
+      {
+        "identity": "carol",
+        "value": null
+      },
+      {
+        "identity": "dave",
+        "value": "{\"mode\":\"client\",\"startedAt\":1786000000500,\"windowId\":7,\"state\":\"live\"}"
+      },
+      {
+        "identity": "erin",
+        "value": "not json"
+      },
+      {
+        "identity": "bob",
+        "value": "{\"mode\":\"client\",\"startedAt\":1786000000000,\"windowId\":9,\"state\":\"paused\"}"
+      },
+      {
+        "identity": "alice",
+        "value": "{\"mode\":\"client\",\"startedAt\":1786000000000,\"windowId\":3,\"state\":\"live\"}"
+      }
+    ],
+    "streams": [
+      {
+        "ownerIdentity": "alice",
+        "windowId": 3,
+        "paused": false,
+        "startedAt": 1786000000000
+      },
+      {
+        "ownerIdentity": "bob",
+        "windowId": 9,
+        "paused": true,
+        "startedAt": 1786000000000
+      },
+      {
+        "ownerIdentity": "dave",
+        "windowId": 7,
+        "paused": false,
+        "startedAt": 1786000000500
+      }
+    ],
+    "rules": [
+      "every participant with a valid petal.live attribute is a stream; malformed values are ignored",
+      "streams are ordered by (startedAt, identity); the first one is the room's live stream",
+      "a streamer whose own stream is not first stops: someone else in this meeting went live first"
+    ]
+  },
+  "streamOptOutAttribute": {
+    "key": "petal.stream-optout",
+    "optedOut": "1",
+    "optedIn": "0",
+    "included": [
+      "",
+      "0",
+      "true",
+      "yes",
+      " 1",
+      "1 "
+    ],
+    "rules": [
+      "only the exact value \"1\" opts a participant out; absent or any other value means included",
+      "an opted-out participant's audio never reaches a live stream's mix; it still feeds the streamer's echo cancellation",
+      "a streamer's own setting does not apply to their own stream",
+      "a streamer mixes no remote participant's audio until its own petal.live is accepted by the server and remoteAudioGraceMs has passed, counted from then or from that participant's (re)connection, whichever is later; from the moment the streamer's room starts reconnecting, remote audio leaves the stream until its petal.live is written again and the grace has passed again",
+      "a client opts back in by writing \"0\" (and writes \"0\" on join when not opted out); a streamer that has seen a participant opted out keeps them out of that stream until it sees a present value other than \"1\", so an attribute lost to a rejoin or full reconnect never lets their audio in",
+      "a client writes its opt-out before it publishes a microphone on join, and writes it again after every reconnect; an opted-out client whose opt-out the server has not accepted does not publish a microphone",
+      "a browser guest can opt out at any time, before any stream starts; the choice is kept per room"
+    ],
+    "remoteAudioGraceMs": 5000
   }
 }

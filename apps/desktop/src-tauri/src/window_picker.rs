@@ -6,6 +6,7 @@
 //! window state and avoids the `tauri_nspanel` close/dealloc crash class.
 
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 
 pub const WINDOW_PICKER_LABEL: &str = "window-picker";
 
@@ -391,7 +392,7 @@ fn open_window_picker_window_on_main(app: &AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let picker_builder =
         picker_builder.additional_browser_args(crate::webview2_args::WEBVIEW2_ACCEL_ARGS);
-    match picker_builder.build()
+    match picker_builder.build_petal()
     {
         Ok(win) => {
             // Windows: opaque window with DWM-native corners (same as the main

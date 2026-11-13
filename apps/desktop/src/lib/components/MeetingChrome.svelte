@@ -107,6 +107,8 @@
     /** Contrast-safe text/icon color for sharingLiveBackground. */
     sharingLiveColor?: string;
     remoteControlAllowed?: boolean;
+    /** The room is being live streamed: the pill carries a red LIVE dot. */
+    live?: boolean;
     stateTitle?: string | null;
     stateDetail?: string | null;
     stateTone?: 'info' | 'warning';
@@ -170,6 +172,7 @@
     sharingLiveBackground,
     sharingLiveColor,
     remoteControlAllowed = true,
+    live = false,
     stateTitle = null,
     stateDetail = null,
     stateTone = 'info',
@@ -945,6 +948,10 @@
           />
         </span>
       </Pill>
+      {#if live}
+        <!-- Overlaid, so the pill's measured geometry never changes. -->
+        <span class="pill-live-dot" role="img" aria-label="This meeting is live"></span>
+      {/if}
     </div>
     {#if moreOpen}
       <!-- Tiny vertical overflow menu (issue #6) — same graphite register
@@ -1125,6 +1132,18 @@
   .pill-anchor {
     position: relative;
     z-index: 2;
+  }
+
+  .pill-live-dot {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--danger);
+    box-shadow: 0 0 0 2px var(--surface-raised);
+    pointer-events: none;
   }
 
   .pill-control-slot {

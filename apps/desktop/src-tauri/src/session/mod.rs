@@ -154,7 +154,8 @@ pub use room::{join_room, leave_room};
 pub(crate) use share::VIEWER_DEMAND_STALE_AFTER;
 pub(crate) use share::MAX_CONCURRENT_SHARES;
 pub(crate) use share::{
-    expire_stale_viewer_demands, note_passive_viewer_demand, note_remote_interaction,
+    apply_streamer_capture_exclusion, expire_stale_viewer_demands, note_passive_viewer_demand,
+    note_remote_interaction,
     reconcile_quality_for_window, repair_active_share_publication,
     repair_active_share_publications_after_reconnect,
     repair_local_track_publication_after_reconnect,
@@ -430,6 +431,11 @@ pub struct SessionState {
     /// never touched by it. The live track's EFFECTIVE mute is
     /// `desired_mic_muted || ai_chat_ducking`; see `apply_effective_mic_mute`.
     ai_chat_ducking: AtomicBool,
+    /// The requested effective mute (`desired_mic_muted || ai_chat_ducking`)
+    /// and when it last went unmuted, set the moment it is asked, whether or
+    /// not the live track's apply runs or is coalesced away. The live stream
+    /// mutes on this, never on the track (#487).
+    stream_mute: Mutex<crate::transport::audio::MuteRecord>,
     /// Serializes shared-window metadata writes. A stale title-clear waits,
     /// revalidates, and cannot race a new share's title publish.
     share_metadata_apply_lock: Arc<tokio::sync::Mutex<()>>,
@@ -455,6 +461,7 @@ impl Default for SessionState {
             mic_mute_generation: Arc::new(AtomicU64::new(0)),
             mic_mute_apply_lock: Arc::new(tokio::sync::Mutex::new(())),
             ai_chat_ducking: AtomicBool::new(false),
+            stream_mute: Mutex::new(crate::transport::audio::MuteRecord::new(true)),
             share_metadata_apply_lock: Arc::new(tokio::sync::Mutex::new(())),
             screen_audio_control_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -734,8 +741,10 @@ impl SessionState {
     /// this always succeeds (there's no failure mode: muting before a mic
     /// exists is a valid, meaningful action, not an error).
     pub(crate) fn set_mic_muted(&self, muted: bool) -> bool {
-        self.desired_mic_muted.store(muted, Ordering::SeqCst);
-        self.apply_effective_mic_mute();
+        self.apply_effective_mic_mute(|| {
+            self.desired_mic_muted.store(muted, Ordering::SeqCst);
+            true
+        });
         muted
     }
 
@@ -746,10 +755,14 @@ impl SessionState {
     /// already released) still safely re-applies the same effective state,
     /// which is harmless and keeps the caller's poll loop simple.
     pub(crate) fn set_ai_chat_ducking(&self, duck: bool) {
-        if self.ai_chat_ducking.swap(duck, Ordering::SeqCst) == duck {
-            return;
-        }
-        self.apply_effective_mic_mute();
+        self.apply_effective_mic_mute(|| self.ai_chat_ducking.swap(duck, Ordering::SeqCst) != duck);
+    }
+
+    /// The requested mute and when it last went unmuted, as one value: what
+    /// the live stream's mic follows (#487). The live track catches up a
+    /// moment later, or never, when a newer request supersedes it.
+    pub(crate) fn stream_mute(&self) -> crate::transport::audio::MuteRecord {
+        *self.stream_mute.lock_unpoisoned()
     }
 
     #[cfg(test)]
@@ -762,10 +775,21 @@ impl SessionState {
     /// both the user's own mute toggle and #845's transient AI-chat ducking
     /// go through the identical generation-guarded, crash-safe apply path
     /// (see the comment on the SDK call below for why it must be this way).
-    fn apply_effective_mic_mute(&self) {
-        let muted =
-            self.desired_mic_muted.load(Ordering::SeqCst) || self.ai_chat_ducking.load(Ordering::SeqCst);
-        let generation = self.mic_mute_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    ///
+    /// `change` updates the flags (false: nothing changed). It runs under the
+    /// stream's mute record's lock, so every change is recorded, in order,
+    /// however callers race (#487).
+    fn apply_effective_mic_mute(&self, change: impl FnOnce() -> bool) {
+        let (muted, generation) = {
+            let mut record = self.stream_mute.lock_unpoisoned();
+            if !change() {
+                return;
+            }
+            let muted =
+                self.desired_mic_muted.load(Ordering::SeqCst) || self.ai_chat_ducking.load(Ordering::SeqCst);
+            *record = record.set(muted, std::time::Instant::now());
+            (muted, self.mic_mute_generation.fetch_add(1, Ordering::SeqCst) + 1)
+        };
         let latest_generation = self.mic_mute_generation.clone();
         let apply_lock = self.mic_mute_apply_lock.clone();
         let mic = {

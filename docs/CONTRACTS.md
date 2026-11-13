@@ -222,6 +222,67 @@ the `roomCredentials` access code). Files to change together:
 - `web-harness/src/controls.ts` (`tokenRequestBody`)
 - `web-harness/tests/displayNames.test.ts`
 
+## Live streaming
+
+A sharer can go live with one share to an RTMP(S) destination, encoded on
+their own computer. One live stream per room. The room is LIVE when any
+participant has the **`petal.live` participant attribute**, set by the
+desktop sharer before any media goes out (going live fails if the server
+does not accept it), kept written until it sticks and again after every
+reconnect, and cleared on stop/failure/leave:
+`{"mode":"client","startedAt":<ms>,"windowId":<u32>,"state":"live"|"paused"}`
+(exactly this key order). The live share is `(participant identity,
+windowId)`; viewers mark that share's surface LIVE.
+
+**Concurrent streams.** Every participant with a valid `petal.live` value
+is a stream; malformed values are ignored. Streams are ordered by
+`(startedAt, identity)` and the first is the room's live stream. Every
+client badges each stream's share, not only the first. A streamer whose own
+stream is not first stops with "Someone else in this meeting went live
+first", so two simultaneous starts leave exactly one. Fixture:
+`streamLiveDerivation`.
+
+**Opting out of streams.** A participant who keeps their audio off live
+streams sets the **`petal.stream-optout`** attribute to `"1"`; absent or any
+other value means included. Clients opt back in with **`"0"`**, not by
+deleting the key: a streamer that has seen a participant opted out keeps them
+out of that stream until it sees a present value other than `"1"`, so an
+attribute lost to a rejoin or full reconnect never lets their audio in.
+Desktop and browser clients write `"1"` or `"0"` on join, before they publish a
+microphone, on every change, and again after every reconnect (a full
+reconnect rejoins with no attributes); a failed write is retried until it
+sticks. An opted-out client whose opt-out the server hasn't accepted (5 s on
+join) does not publish a microphone. Browser guests have the control in the meeting at all times, not only
+while something is live, and the choice is kept per room. The streamer's mix
+drops an opted-out participant's tracks at once and restores them when they
+opt back in. Those tracks still feed the streamer's echo reference, and the
+streamer's own setting never applies to their own stream.
+
+**Consent before remote audio.** A streamer mixes no other participant's
+audio until its own `petal.live` has been accepted by the server and
+**`remoteAudioGraceMs`** (5000) has passed, so everyone has seen LIVE and had
+the chance to opt out. Someone who arrives (or reconnects) mid-stream waits
+the same grace from their arrival, and their current opt-out is read on
+arrival. From the moment the streamer's room starts reconnecting, remote
+audio leaves the stream until its `petal.live` is written again and the grace
+has passed again. The streamer's own audio is not gated. Fixture:
+`streamOptOutAttribute`.
+
+Output rules (size, fps, bitrate) live in
+`apps/desktop/src-tauri/src/streaming/plan.rs`. A plan input with
+**`cpuEncode: true`** (absent means false) is for a computer that encodes on
+the CPU (Windows with no D3D11 video device): Auto stays within 1080p and
+30 fps there, and explicit sizes are unchanged. The go-live dialog's CPU hint
+quotes that ceiling (`STREAM_CPU_AUTO_MAX` in
+`apps/desktop/src/lib/data/liveStream.ts`). Fixtures:
+`streamOutputPlans`, `streamFpsCeilings`, `streamLiveAttribute`,
+`streamLiveDerivation`, `streamOptOutAttribute`. Files to change together:
+
+- `apps/desktop/src-tauri/src/streaming/plan.rs`, `streaming/wire.rs`,
+  `streaming/audio_tap.rs` (`REMOTE_AUDIO_GRACE`), `streaming/attributes.rs`
+- `web-harness/src/liveStream.ts` (`tests/liveStream.test.ts`)
+- `apps/desktop/src/lib/data/liveStream.ts` (`tests/liveStream.test.ts`)
+
 ## Room status (proof of possession) — replaces the public directory
 
 There is **no public room directory.** `GET /api/rooms` returns **410 Gone**

@@ -7,6 +7,7 @@ must keep the generation/identity guard.
 | Work | Owner | Cancellation / terminal event | Safety guard |
 | --- | --- | --- | --- |
 | Window capture (`WindowCapture` / `SCStream`) | `session::share::ActiveShare` | `ActiveShare` stop/replacement drops capture; capture `Drop` stops native stream | share key, `started_seq`, room generation |
+| Live-stream GPU frame tap (shared texture pool) | `streaming::gpu_tap::Producer` in the WGC capture session | dropped with the capture session; rebuilt on frame-size change; a slot frees when its last `GpuFrame` lease drops (`tap::share_ended`/`tap::stop` clear the mailbox) | bound tap window id + capture/encoder adapter LUID; any failure falls back to the CPU copy |
 | Window capture frame pump | `ActiveShare::pump_abort` | stop, replacement, failed publish, or session leave aborts the task | share key + current published-track slot |
 | Capture/pump watchdog | `ActiveShare::monitor` | stop/replacement aborts and awaits the monitor | share restart generation + room generation |
 | Browser URL refresh | `ActiveShare::url_refresh` | `UrlRefreshTask::stop` cancels then aborts | share sequence + room generation sink check |

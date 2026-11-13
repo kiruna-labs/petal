@@ -74,6 +74,30 @@
       "version": "8.0.0"
     },
     {
+      "bom-ref": "path+file:///petal/apps/desktop/vendor/shiguredo_rtmp#2026.1.0-canary.6",
+      "description": "RTMP library",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/shiguredo/rtmp-rs"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/shiguredo/rtmp-rs"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "name": "shiguredo_rtmp",
+      "purl": "pkg:cargo/shiguredo_rtmp@2026.1.0-canary.6?download_url=file:///petal/apps/desktop/vendor/shiguredo_rtmp",
+      "scope": "required",
+      "type": "library",
+      "version": "2026.1.0-canary.6"
+    },
+    {
       "bom-ref": "path+file:///petal/apps/desktop/vendor/tauri-nspanel#2.1.0",
       "description": "A plugin for subclassing Tauri's NSWindow to NSPanel",
       "name": "tauri-nspanel",
@@ -21188,11 +21212,13 @@
         "registry+https://github.com/rust-lang/crates.io-index#percent-encoding@2.3.2",
         "registry+https://github.com/rust-lang/crates.io-index#reqwest@0.13.5",
         "path+file:///petal/apps/desktop/vendor/screencapturekit#8.0.0",
+        "registry+https://github.com/rust-lang/crates.io-index#security-framework@3.7.0",
         "registry+https://github.com/rust-lang/crates.io-index#sentry@0.49.5",
         "registry+https://github.com/rust-lang/crates.io-index#sentry-log@0.49.5",
         "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.229",
         "registry+https://github.com/rust-lang/crates.io-index#serde_json@1.0.154",
         "registry+https://github.com/rust-lang/crates.io-index#sha2@0.11.1",
+        "path+file:///petal/apps/desktop/vendor/shiguredo_rtmp#2026.1.0-canary.6",
         "registry+https://github.com/rust-lang/crates.io-index#system-configuration@0.8.0",
         "registry+https://github.com/rust-lang/crates.io-index#tar@0.4.46",
         "registry+https://github.com/rust-lang/crates.io-index#tauri@2.12.2",
@@ -21207,6 +21233,7 @@
         "registry+https://github.com/rust-lang/crates.io-index#tauri-plugin-updater@2.14.1",
         "registry+https://github.com/rust-lang/crates.io-index#thiserror@2.0.21",
         "registry+https://github.com/rust-lang/crates.io-index#tokio@1.54.1",
+        "registry+https://github.com/rust-lang/crates.io-index#tokio-native-tls@0.3.1",
         "registry+https://github.com/rust-lang/crates.io-index#tokio-tungstenite@0.29.0",
         "registry+https://github.com/rust-lang/crates.io-index#tokio-util@0.7.20",
         "path+file:///petal/apps/desktop/vendor/webrtc-sys#0.3.35",
@@ -21273,6 +21300,9 @@
         "registry+https://github.com/rust-lang/crates.io-index#futures-core@0.3.34"
       ],
       "ref": "path+file:///petal/apps/desktop/vendor/screencapturekit#8.0.0"
+    },
+    {
+      "ref": "path+file:///petal/apps/desktop/vendor/shiguredo_rtmp#2026.1.0-canary.6"
     },
     {
       "dependsOn": [

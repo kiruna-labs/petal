@@ -59,8 +59,10 @@
     type NetworkSnapshot,
     type PresentParticipant,
     type RemoteControlStatus,
-    type RemoteWindowDebugStats
+    type RemoteWindowDebugStats,
+    type StreamLiveState
   } from '#lib/ipc.js';
+  import { isShareOnAir } from '#lib/data/liveStream.js';
   import {
     REMOTE_CONTROL_REQUEST_TIMEOUT_MS,
     REMOTE_CONTROL_CONSENT_TIMEOUT_MS,
@@ -78,6 +80,23 @@
   );
   const sourceTitle = $derived(page.url.searchParams.get('title') ?? 'Shared window');
   const initialSourceUrl = $derived(page.url.searchParams.get('url'));
+
+  // Live streaming: badge this window while its owner streams it (any of the
+  // room's streams, not only the earliest; not while paused on its slate:
+  // the window is off air).
+  let roomStream = $state<StreamLiveState | null>(null);
+  const streamLive = $derived(isShareOnAir(roomStream, ownerIdentity, windowId));
+  onMount(() => {
+    void invoke<StreamLiveState>(COMMANDS.streamLiveState)
+      .then((state) => (roomStream = state))
+      .catch(() => {});
+    const unlisten = listen<StreamLiveState>(EVENTS.streamLiveChanged, (event) => {
+      roomStream = event.payload;
+    });
+    return () => {
+      unlisten.then((u) => u()).catch(() => {});
+    };
+  });
   const remoteControlAvailable = $derived(page.url.searchParams.get('remoteControl') === '1');
   // Distinct from merely-absent `remoteControl`: the sharer said no, which is
   // permanent, so the header hides the segment instead of showing 'Preparing…'.
@@ -834,6 +853,7 @@
       {identity}
       {sourceTitle}
       {mediaPaused}
+      live={streamLive}
       {sourceUrl}
       autoHide={false}
       {onOpenSourceUrl}

@@ -21,6 +21,7 @@
 
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 
 pub const SETTINGS_WINDOW_LABEL: &str = "settings";
 
@@ -163,7 +164,7 @@ impl SettingsWindowOps for TauriSettingsWindow<'_> {
         #[cfg(target_os = "windows")]
         let settings_builder =
             settings_builder.additional_browser_args(crate::webview2_args::WEBVIEW2_ACCEL_ARGS);
-        let window = settings_builder.build().map_err(|e| e.to_string())?;
+        let window = settings_builder.build_petal().map_err(|e| e.to_string())?;
 
         // Windows: opaque window with DWM-native corners (same as the main
         // window); macOS keeps its transparent + CSS-rounded shell.
