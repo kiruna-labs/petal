@@ -760,11 +760,14 @@ impl RemoteControlEngine {
             (RemoteControlType::Pointer, Some(RemoteControlAction::Move))
         ) || message.message_type == RemoteControlType::Wheel;
         let key = (message.window_id, target.clone());
-        let target_is_hot_path_capable =
-            is_hot_path_kind && self.hot_path_capable_targets.lock_unpoisoned().contains(&key);
         // #371: v2 only to a host that advertised it; an old host keeps v1.
-        let target_takes_v2 =
-            target_is_hot_path_capable && self.hot_path_v2_targets.lock_unpoisoned().contains(&key);
+        // Both sets read under one lock order (v1, then v2) so a concurrent
+        // v2->v1 rollback is never seen half-applied.
+        let (target_is_hot_path_capable, target_takes_v2) = {
+            let v1 = self.hot_path_capable_targets.lock_unpoisoned();
+            let capable = is_hot_path_kind && v1.contains(&key);
+            (capable, capable && self.hot_path_v2_targets.lock_unpoisoned().contains(&key))
+        };
         let payload = target_is_hot_path_capable
             .then(|| {
                 target_takes_v2
@@ -822,8 +825,10 @@ impl RemoteControlEngine {
         let active = status == "active";
         let v1 = active && message.supports_binary_hot_path;
         let v2 = v1 && message.supports_binary_hot_path_v2;
-        for (set, on) in [(&self.hot_path_capable_targets, v1), (&self.hot_path_v2_targets, v2)] {
-            let mut set = set.lock_unpoisoned();
+        // Same lock order as `data_packet_for`; both change atomically.
+        let mut v1_set = self.hot_path_capable_targets.lock_unpoisoned();
+        let mut v2_set = self.hot_path_v2_targets.lock_unpoisoned();
+        for (set, on) in [(&mut *v1_set, v1), (&mut *v2_set, v2)] {
             if on {
                 set.insert(key.clone());
             } else {
