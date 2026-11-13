@@ -95,9 +95,7 @@ pub async fn stream_settings_set(
         super::streamer_mode::set_forced(&app, after.always_streamer_mode);
     }
     if before.keep_off_live_streams != after.keep_off_live_streams {
-        if let Some(room) = super::live_state::current_room() {
-            super::live_state::publish_opt_out(&room, after.keep_off_live_streams).await;
-        }
+        super::live_state::publish_opt_out();
     }
     Ok(after)
 }

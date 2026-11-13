@@ -14,6 +14,7 @@
 //!   and [`settings`] ("Always use streamer mode", "Keep me off live
 //!   streams").
 
+pub mod attributes;
 pub mod audio_tap;
 pub mod capability;
 pub mod clock;

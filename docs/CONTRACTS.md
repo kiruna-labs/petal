@@ -227,7 +227,9 @@ the `roomCredentials` access code). Files to change together:
 A sharer can go live with one share to an RTMP(S) destination, encoded on
 their own computer. One live stream per room. The room is LIVE when any
 participant has the **`petal.live` participant attribute**, set by the
-desktop sharer once publishing succeeds and cleared on stop/failure/leave:
+desktop sharer before any media goes out (going live fails if the server
+does not accept it), kept written until it sticks and again after every
+reconnect, and cleared on stop/failure/leave:
 `{"mode":"client","startedAt":<ms>,"windowId":<u32>,"state":"live"|"paused"}`
 (exactly this key order). The live share is `(participant identity,
 windowId)`; viewers mark that share's surface LIVE.

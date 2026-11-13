@@ -3,8 +3,9 @@
 //! one room at a time).
 //!
 //! Owns the frame tap binding, the audio taps, the encode thread and the RTMP
-//! publisher; sets the `petal.live` attribute once publishing succeeds and
-//! clears it on every way out (stop, failure, slate timeout, leave, quit).
+//! publisher; announces `petal.live` and waits for the room to accept it
+//! before any media goes out, and clears it on every way out (stop, failure,
+//! slate timeout, leave, quit).
 //! Emits `stream-session-changed` (about once a second while live, for the
 //! sharer's notice) and `stream-session-ended`.
 
@@ -46,6 +47,10 @@ struct PendingSave {
 }
 /// How long go-live waits for the bound share's first tapped frame.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long go-live waits for the room to accept `petal.live` before any
+/// media goes out.
+const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const ANNOUNCE_FAILED_ERROR: &str = "Couldn't show the meeting that you're live. Check your connection and try again.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -192,6 +197,34 @@ struct LiveSession {
     mic: Option<super::mic::StreamMic>,
     publisher: Option<tokio::task::JoinHandle<PublisherState>>,
     last_snapshot: Arc<Mutex<Option<StreamSessionSnapshot>>>,
+    live_attribute: LiveAttributeGate,
+}
+
+/// Whether this session may still write `petal.live`. The monitor sets it
+/// only through [`LiveAttributeGate::write_if_open`]; stopping closes the gate
+/// before clearing, so a monitor iteration still in flight can't put LIVE
+/// back after the stream ended.
+#[derive(Debug, Clone)]
+struct LiveAttributeGate(Arc<Mutex<bool>>);
+
+impl LiveAttributeGate {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(true)))
+    }
+
+    /// Run `write` unless the gate is closed; `write` runs under the gate's
+    /// lock, so [`Self::close`] waits for it.
+    fn write_if_open(&self, write: impl FnOnce()) -> bool {
+        let open = self.0.lock_unpoisoned();
+        if *open {
+            write();
+        }
+        *open
+    }
+
+    fn close(&self) {
+        *self.0.lock_unpoisoned() = false;
+    }
 }
 
 fn slot() -> &'static Mutex<Option<LiveSession>> {
@@ -281,15 +314,38 @@ async fn wait_for_first_frame(tap: &super::tap::LiveTap) -> Option<(u32, u32)> {
     None
 }
 
-async fn set_live_attribute(room: &livekit::Room, value: Option<ClientLiveAttribute>) {
-    let mut attributes = std::collections::HashMap::new();
+/// How long stopping waits for the cleared `petal.live` to reach the room.
+const CLEAR_LIVE_ATTRIBUTE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Write `petal.live` for a stream about to start and wait until the room
+/// has it. On failure it is cleared again (the keeper keeps retrying that).
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+async fn announce(room: &livekit::Room, attribute: ClientLiveAttribute) -> bool {
+    let Some(value) = set_live_attribute(room, Some(attribute)) else { return false };
+    let Some(keeper) = super::live_state::keeper_for(room) else { return false };
+    if keeper.wait_confirmed(STREAM_LIVE_ATTRIBUTE, &value, ANNOUNCE_TIMEOUT).await {
+        return true;
+    }
+    log::warn!("streaming: the room didn't accept {STREAM_LIVE_ATTRIBUTE} within {ANNOUNCE_TIMEOUT:?}; not going live");
+    set_live_attribute(room, None);
+    false
+}
+
+/// Set our `petal.live` (`None` clears it). The room's attribute keeper
+/// writes it until it sticks and again after every reconnect; returns the
+/// value it will hold.
+fn set_live_attribute(room: &livekit::Room, value: Option<ClientLiveAttribute>) -> Option<String> {
     // An empty value deletes the key.
-    attributes.insert(
-        STREAM_LIVE_ATTRIBUTE.to_string(),
-        value.as_ref().map(encode_client_live_attribute).unwrap_or_default(),
-    );
-    if let Err(error) = room.local_participant().set_attributes(attributes).await {
-        log::warn!("streaming: couldn't update the {STREAM_LIVE_ATTRIBUTE} attribute: {error}");
+    let encoded = value.as_ref().map(encode_client_live_attribute).unwrap_or_default();
+    match super::live_state::keeper_for(room) {
+        Some(keeper) => {
+            keeper.set(STREAM_LIVE_ATTRIBUTE, &encoded);
+            Some(encoded)
+        }
+        None => {
+            log::warn!("streaming: no attribute writer for this room; {STREAM_LIVE_ATTRIBUTE} not set");
+            None
+        }
     }
 }
 
@@ -394,6 +450,21 @@ async fn start_client(
         plan.bitrate_bps,
     );
 
+    // Tell the room first: no media leaves this computer until everyone in
+    // the meeting can see LIVE.
+    let started_at = now_ms();
+    let announced = ClientLiveAttribute {
+        mode: StreamMode::Client,
+        started_at,
+        window_id,
+        state: ClientLiveState::Live,
+    };
+    if !announce(&room, announced).await {
+        super::tap::stop();
+        return Err(ANNOUNCE_FAILED_ERROR.into());
+    }
+    super::live_state::refresh(app, &room);
+
     let cancel = CancellationToken::new();
     let queue = Arc::new(MediaQueue::new());
     let mixer = Arc::new(Mutex::new(AudioMixer::new()));
@@ -418,11 +489,14 @@ async fn start_client(
             cancel.cancel();
             release_mic(mic).await;
             super::tap::stop();
+            set_live_attribute(&room, None);
+            super::live_state::refresh(app, &room);
             return Err(error);
         }
     };
     let stats = Arc::new(PublisherStats::default());
     let (state_tx, state_rx) = tokio::sync::watch::channel(PublisherState::Connecting);
+    let live_attribute = LiveAttributeGate::new();
     let publisher = tokio::spawn(run_publisher(
         destination,
         queue.clone(),
@@ -431,7 +505,6 @@ async fn start_client(
         cancel.child_token(),
         None,
     ));
-    let started_at = now_ms();
     let window = Arc::new(std::sync::atomic::AtomicU32::new(window_id));
     let last_snapshot = Arc::new(Mutex::new(None));
     let pipeline_stats = pipeline.stats.clone();
@@ -446,6 +519,7 @@ async fn start_client(
         mic: Some(mic),
         publisher: Some(publisher),
         last_snapshot: last_snapshot.clone(),
+        live_attribute: live_attribute.clone(),
     });
     super::region_lock::bind(app, Some((window_id, (plan.width, plan.height))));
     #[cfg(target_os = "macos")]
@@ -481,6 +555,8 @@ async fn start_client(
         last_snapshot,
         snapshot,
         pending_save,
+        live_attribute,
+        announced,
     ));
     Ok(current().unwrap_or_else(|| placeholder_snapshot(window_id)))
 }
@@ -569,11 +645,13 @@ async fn monitor(
     last_snapshot: Arc<Mutex<Option<StreamSessionSnapshot>>>,
     mut snapshot: StreamSessionSnapshot,
     mut pending_save: Option<PendingSave>,
+    live_attribute: LiveAttributeGate,
+    announced: ClientLiveAttribute,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
     let mut last_bytes = 0u64;
     let mut last_at = Instant::now();
-    let mut attribute: Option<ClientLiveAttribute> = None;
+    let mut attribute = announced;
     let mut output_checked = Instant::now();
     let identity = room.local_participant().identity().to_string();
     loop {
@@ -644,20 +722,19 @@ async fn monitor(
         *last_snapshot.lock_unpoisoned() = Some(snapshot.clone());
         let _ = app.emit(STREAM_SESSION_CHANGED_EVENT, &snapshot);
 
-        // `petal.live`: set once publishing succeeds; paused on the slate.
-        let published_once = attribute.is_some() || matches!(publisher_state, PublisherState::Live);
-        if published_once {
-            let desired = ClientLiveAttribute {
-                mode: StreamMode::Client,
-                started_at: snapshot.started_at,
-                window_id: snapshot.window_id,
-                state: if on_slate { ClientLiveState::Paused } else { ClientLiveState::Live },
-            };
-            if attribute != Some(desired) {
-                set_live_attribute(&room, Some(desired)).await;
-                attribute = Some(desired);
-                super::live_state::refresh(&app, &room);
-            }
+        // `petal.live` (announced before going live): follows the bound
+        // share, and is paused on the slate.
+        let desired = ClientLiveAttribute {
+            mode: StreamMode::Client,
+            started_at: snapshot.started_at,
+            window_id: snapshot.window_id,
+            state: if on_slate { ClientLiveState::Paused } else { ClientLiveState::Live },
+        };
+        if attribute != desired && live_attribute.write_if_open(|| {
+            set_live_attribute(&room, Some(desired));
+        }) {
+            attribute = desired;
+            super::live_state::refresh(&app, &room);
         }
     }
 }
@@ -729,7 +806,14 @@ pub async fn stop(app: &AppHandle, reason: StopReason) {
     #[cfg(target_os = "macos")]
     reconcile_share_quality(app, &[session.window_id.load(Ordering::Relaxed)]);
     super::region_lock::bind(app, None);
-    set_live_attribute(&session.room, None).await;
+    session.live_attribute.close();
+    if set_live_attribute(&session.room, None).is_some() {
+        if let Some(keeper) = super::live_state::keeper_for(&session.room) {
+            if !keeper.wait_confirmed(STREAM_LIVE_ATTRIBUTE, "", CLEAR_LIVE_ATTRIBUTE_TIMEOUT).await {
+                log::warn!("streaming: {STREAM_LIVE_ATTRIBUTE} not cleared yet; still retrying");
+            }
+        }
+    }
     super::live_state::refresh(app, &session.room);
     let error = match &reason {
         StopReason::Failed(error) => Some(error.clone()),
@@ -789,6 +873,18 @@ pub fn current() -> Option<StreamSessionSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_closed_gate_never_writes_live_again() {
+        let gate = LiveAttributeGate::new();
+        let mut writes = 0;
+        assert!(gate.write_if_open(|| writes += 1));
+        // Stopping closes it; a monitor iteration that resumes afterwards
+        // must not put LIVE back.
+        gate.clone().close();
+        assert!(!gate.write_if_open(|| writes += 1));
+        assert_eq!(writes, 1);
+    }
 
     #[test]
     fn preview_reports_the_encode_path_and_whether_it_can_go_live() {
