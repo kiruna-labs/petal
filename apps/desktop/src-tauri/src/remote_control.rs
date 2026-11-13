@@ -411,9 +411,14 @@ fn message_from_binary(
     target_user_id: &str,
     controller_id: &str,
 ) -> Option<RemoteControlMessage> {
-    if payload.len() != BINARY_FRAME_LEN || payload[0] != BINARY_MAGIC || payload[1] != VERSION {
-        return None;
-    }
+    // #371: v1 (27 bytes) or v2 (v1 + u64 LE sentAtMs); hosts accept both.
+    let sent_at_ms = match (payload.first(), payload.get(1), payload.len()) {
+        (Some(&BINARY_MAGIC), Some(&VERSION), BINARY_FRAME_LEN) => None,
+        (Some(&BINARY_MAGIC), Some(&BINARY_FRAME_V2_VERSION), BINARY_FRAME_V2_LEN) => Some(
+            u64::from_le_bytes(payload[BINARY_FRAME_LEN..BINARY_FRAME_V2_LEN].try_into().ok()?),
+        ),
+        _ => return None,
+    };
     let read_u16 = |at: usize| u16::from_le_bytes([payload[at], payload[at + 1]]);
     let read_i16 = |at: usize| i16::from_le_bytes([payload[at], payload[at + 1]]);
     let kind = match payload[2] {
@@ -437,7 +442,8 @@ fn message_from_binary(
         return None;
     }
     Some(RemoteControlMessage {
-        v: payload[1],
+        // The JSON envelope version; the frame version is only the encoding.
+        v: VERSION,
         message_type: kind,
         action,
         target_user_id: target_user_id.to_string(),
@@ -476,7 +482,8 @@ fn message_from_binary(
         grant_token: Some(active_token),
         supports_binary_hot_path: false,
         supports_redundant_input: false,
-        sent_at_ms: None,
+        supports_binary_hot_path_v2: false,
+        sent_at_ms,
         host_hold_ms: None,
         modifiers: RemoteControlModifiers {
             alt: modifiers & 1 != 0,
@@ -1038,10 +1045,6 @@ fn sessions() -> &'static Mutex<HashMap<ControlGrantKey, String>> {
 
 fn warned_tokenless_inputs() -> &'static Mutex<HashSet<(u32, String)>> {
     remote_control_engine().warned_tokenless_inputs()
-}
-
-fn hot_path_capable_targets() -> &'static Mutex<HashSet<(u32, String)>> {
-    remote_control_engine().hot_path_capable_targets()
 }
 
 fn new_grant_token() -> String {
@@ -4183,6 +4186,8 @@ fn status_packet_for(status: &RemoteControlStatus, local_identity: &str) -> Remo
         // #399: same presence-is-the-signal rule; an old host never sets it,
         // so its controllers keep the reliable ordered path.
         supports_redundant_input: status.status == "active",
+        // #371: same rule; an old host never sets it, so controllers keep v1.
+        supports_binary_hot_path_v2: status.status == "active",
         sent_at_ms: None,
         host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
@@ -4234,6 +4239,7 @@ fn discrete_result_packet(
         grant_token: None,
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        supports_binary_hot_path_v2: false,
         sent_at_ms: None,
         host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
@@ -5000,12 +5006,7 @@ fn handle_message(
             // here would let a stale capable-entry survive a host version
             // rollback and force binary frames at an old host that can no
             // longer parse them, silently killing remote control.
-            let key = (message.window_id, message.controller_id.clone());
-            if status == "active" && message.supports_binary_hot_path {
-                hot_path_capable_targets().lock_unpoisoned().insert(key);
-            } else if matches!(status, "active" | "stopped" | "disabled") {
-                hot_path_capable_targets().lock_unpoisoned().remove(&key);
-            }
+            remote_control_engine().record_host_hot_path_status(&message, status);
             // #399: same latest-wins rule for the redundant input path.
             if matches!(status, "active" | "stopped" | "disabled") {
                 remote_control_engine().set_redundant_input_target(
@@ -6471,6 +6472,7 @@ fn clipboard_key_message(
         grant_token: Some(grant_token.to_string()),
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        supports_binary_hot_path_v2: false,
         sent_at_ms: None,
         host_hold_ms: None,
         modifiers,
@@ -6826,6 +6828,7 @@ pub async fn remote_control_set_active(
         grant_token: None,
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        supports_binary_hot_path_v2: false,
         sent_at_ms: Some(now_ms()),
         host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
@@ -6971,6 +6974,7 @@ pub async fn remote_control_request_escalation(
         grant_token: None,
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        supports_binary_hot_path_v2: false,
         sent_at_ms: Some(now_ms()),
         host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
@@ -15961,6 +15965,7 @@ pub(crate) mod input {
                 grant_token: None,
                 supports_binary_hot_path: false,
                 supports_redundant_input: false,
+                supports_binary_hot_path_v2: false,
                 sent_at_ms: None,
                 host_hold_ms: None,
                 modifiers: RemoteControlModifiers::default(),
@@ -22913,6 +22918,8 @@ mod tests {
         name: String,
         hex: String,
         length: usize,
+        #[serde(default, rename = "sentAtMs")]
+        sent_at_ms: Option<u64>,
     }
 
     #[derive(Deserialize)]
@@ -23042,6 +23049,7 @@ mod tests {
             grant_token: None,
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            supports_binary_hot_path_v2: false,
             sent_at_ms: None,
             host_hold_ms: None,
             modifiers: RemoteControlModifiers::default(),
@@ -23966,6 +23974,7 @@ mod tests {
             grant_token: None,
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            supports_binary_hot_path_v2: false,
             sent_at_ms: None,
             host_hold_ms: None,
             modifiers: RemoteControlModifiers::default(),
@@ -24196,6 +24205,7 @@ mod tests {
             grant_token: Some("0123456789abcdef0123456789abcdef".to_string()),
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            supports_binary_hot_path_v2: false,
             sent_at_ms: None,
             host_hold_ms: None,
             modifiers: RemoteControlModifiers {
@@ -24273,6 +24283,7 @@ mod tests {
             grant_token: Some("0123456789abcdef0123456789abcdef".to_string()),
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            supports_binary_hot_path_v2: false,
             sent_at_ms: None,
             host_hold_ms: None,
             modifiers: RemoteControlModifiers::default(),
@@ -24682,6 +24693,30 @@ mod tests {
             assert_eq!(decoded.window_id, 42);
             assert_eq!(decoded.seq, message.seq as u32 as u64);
             assert_eq!(decoded.grant_token.as_deref(), Some(token.as_str()));
+            assert_eq!((decoded.v, decoded.sent_at_ms), (VERSION, None), "v1 has no sentAtMs");
+
+            // #371: frame v2 appends the controller's sentAtMs; a v2 host
+            // still accepts the v1 frame above.
+            let v2_fixture = fixture
+                .remote_control_binary_frames
+                .iter()
+                .find(|f| f.name == format!("{name}-v2"))
+                .unwrap();
+            let mut stamped = message.clone();
+            stamped.sent_at_ms = v2_fixture.sent_at_ms;
+            let v2 = binary_frame_v2_for(&stamped).unwrap();
+            assert_eq!(v2.len(), v2_fixture.length);
+            let hex = v2.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+            assert_eq!(hex, v2_fixture.hex);
+            let decoded = message_from_binary(&v2, "native-1", "web-1").unwrap();
+            assert_eq!(decoded.v, VERSION, "the JSON envelope version stays 1");
+            assert_eq!(decoded.sent_at_ms, Some(1_700_000_000_123));
+            assert_eq!((decoded.window_id, decoded.seq), (42, message.seq));
+            // A wrong length for its version byte is malformed.
+            assert!(message_from_binary(&v2[..BINARY_FRAME_LEN], "native-1", "web-1").is_none());
+            let mut v1_long = bytes.clone();
+            v1_long.extend_from_slice(&[0; 8]);
+            assert!(message_from_binary(&v1_long, "native-1", "web-1").is_none());
         }
         sessions()
             .lock_unpoisoned()
@@ -26605,6 +26640,66 @@ mod tests {
         // Stopped / downgraded host: back to the legacy path.
         engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, None);
         assert!(engine.push_redundant_input(&key, later).is_none());
+    }
+
+    #[test]
+    fn active_status_advertises_binary_hot_path_v2() {
+        let status = active_status_for_session(7, "ctl".to_string(), "tok".to_string());
+        let packet = status_packet_for(&status, "host");
+        let json = serde_json::to_value(&packet).unwrap();
+        assert_eq!(json["supportsBinaryHotPathV2"], serde_json::json!(true));
+        let mut stopped = status;
+        stopped.status = "stopped";
+        let json = serde_json::to_value(status_packet_for(&stopped, "host")).unwrap();
+        assert!(json.get("supportsBinaryHotPathV2").is_none());
+    }
+
+    /// #371: a v2 binary hover move, decoded by the real host path, is an
+    /// `input_leg_lossy_ms` sample (stamped at receive, like #564's JSON).
+    #[test]
+    fn binary_v2_hover_move_records_the_lossy_one_way_leg() {
+        let ids = remote_control_test_ids("binary_v2_hover_move_records_the_lossy_one_way_leg");
+        let _guard = platform_input_test_lock();
+        let token = authorize_shared(ids.window_id, &ids.controller_id);
+        let mut outcome = None;
+        for attempt in 0..5u64 {
+            rc_latency_telemetry::sync(RcRole::Host, true);
+            // Controller clock 25 s ahead of ours; the move took ~30 ms.
+            rc_input_timing::record_controller_clock(&ids.controller_id, -25_000_000, 10.0);
+            let mut hover = test_message(
+                RemoteControlType::Pointer,
+                Some(RemoteControlAction::Move),
+                attempt + 1,
+                ids.window_id,
+                ids.controller_id.clone(),
+            );
+            hover.x = Some(0.5);
+            hover.y = Some(0.5);
+            hover.buttons = Some(0);
+            hover.grant_token = Some(token.clone());
+            hover.sent_at_ms = Some(now_ms() + 25_000 - 30);
+            let received = rc_input_timing::SocketReceive::now();
+            let frame = binary_frame_v2_for(&hover).unwrap();
+            let decoded = message_from_binary(&frame, "host", &ids.controller_id).unwrap();
+            rc_input_timing::host_input(&decoded, received, true);
+            // The v1 frame carries no sentAtMs, so it adds nothing.
+            let v1 = message_from_binary(&binary_frame_for(&hover).unwrap(), "host", &ids.controller_id)
+                .unwrap();
+            rc_input_timing::host_input(&v1, received, true);
+            let Some(summary) = rc_latency_telemetry::take_host_interval_for_test() else {
+                continue;
+            };
+            if let Some((_, stats)) =
+                summary.stages.iter().find(|(stage, _)| *stage == Stage::InputLegLossyMs)
+            {
+                outcome = Some(*stats);
+                break;
+            }
+        }
+        revoke(ids.window_id, &ids.controller_id);
+        let lossy = outcome.expect("the v2 hover move reached the host summary");
+        assert_eq!(lossy.n, 1, "only the v2 frame is a sample");
+        assert!((25..=60).contains(&lossy.max), "input_leg_lossy_ms {}", lossy.max);
     }
 
     #[test]

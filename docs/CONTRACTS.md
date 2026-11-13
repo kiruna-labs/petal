@@ -916,8 +916,9 @@ Timing fields (#371), additive and optional:
   `offset_err_ms` is half that RTT. A hover move the seq watermark rejects
   adds no sample.
 - Old peers ignore both fields (no envelope uses `deny_unknown_fields`), and a
-  malformed value is dropped rather than rejecting the packet. The binary
-  hot-path frame does not carry `sentAtMs` yet.
+  malformed value is dropped rather than rejecting the packet. Binary
+  hot-path frame v2 carries `sentAtMs` too (see "Binary hot-path frame"), so
+  binary hover moves feed `input_leg_lossy_ms`; a v1 frame carries none.
 
 Unknown future values in optional `targetKind`, capability, reason,
 `deliveryRoute`, or `failureCode` metadata are ignored rather than making an
@@ -1028,7 +1029,9 @@ routes, never to ID-addressed wheel.
 `status` additionally carries `supportsBinaryHotPath:boolean` for the legacy
 pointer-move/wheel optimization (#370). It is set `true` when a supporting host
 emits `status: "active"`; absent/false means the controller must keep sending
-JSON for that session.
+JSON for that session. `supportsBinaryHotPathV2:boolean` (#371) follows the
+same rule and additionally allows binary frame v2; it means nothing without
+`supportsBinaryHotPath`. Both are latest-wins per (window, host).
 
 #### Native clipboard extension
 
@@ -1135,8 +1138,8 @@ tests on both sides (`remote_control_redundant.rs`,
 #### Binary hot-path frame (pointer-move / wheel only)
 
 To avoid a full JSON packet per legacy pointer-move/wheel event, `pointer`+
-`move` and legacy `wheel` messages MAY be sent as a fixed 27-byte little-endian
-binary frame instead of JSON (distinguished on the wire by the first byte: JSON
+`move` and legacy `wheel` messages MAY be sent as a fixed 27-byte (v1) or
+35-byte (v2) little-endian binary frame instead of JSON (distinguished on the wire by the first byte: JSON
 always starts `0x7B` / `{`, the binary frame starts `BINARY_MAGIC = 0x50`). A
 v2 discrete wheel MUST stay JSON: the fixed frame cannot carry its admission
 fields, operation fingerprint, or correlated-result identity. Layout:
@@ -1157,6 +1160,16 @@ fields, operation fingerprint, or correlated-result identity. Layout:
 | 20-21 | deltaY | `i16` LE (wheel only; `0` for pointer) |
 | 22 | deltaMode | `u8` (wheel only; `0` for pointer) |
 | 23-26 | tokenFingerprint | `u32` LE, `fnv1a32(utf8(grantToken))` |
+| 27-34 | sentAtMs | v2 only: `u64` LE, controller wall clock ms (#371) |
+
+**Frame v2 (#371).** Identical to v1 except byte 1 is `2`, and it is 35 bytes
+with `sentAtMs` appended. A controller sends v2 only to a host whose latest
+`active` status carried `supportsBinaryHotPathV2: true`, and only for a message
+that has `sentAtMs`; otherwise it sends v1. Hosts accept both; a version byte
+whose length does not match (v1 not 27, v2 not 35) is malformed. The decoded
+message keeps JSON envelope `v: 1` -- the frame version is only the encoding.
+The host feeds v2 `sentAtMs` into the same one-way-leg recording as JSON
+(`rc_input_timing::host_input`, stamped at socket receive).
 
 `tokenFingerprint` (#370 corrective pass) exists because the frame has no room
 for the real grant-token string. The sender fingerprints its live grant token
@@ -1172,7 +1185,8 @@ receiver (`remote_control.rs::message_from_binary`) asks
 `(windowId, controllerId)`, fingerprints
 it the same way, and rejects the whole packet (never falls into the
 tokenless-compatibility window meant for old JSON clients) on any mismatch or
-missing session. Byte-level fixtures for both frame kinds are pinned in
+missing session. Byte-level fixtures for both frame kinds, v1 and v2
+(`pointer-move-v2`, `wheel-v2` with their `sentAtMs`), are pinned in
 `contracts/petal-contracts.json`'s `remoteControlBinaryFrames`.
 
 Binary frames carry no `targetUserId` field at all -- LiveKit delivery

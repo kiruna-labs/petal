@@ -938,7 +938,8 @@
         "status": "active",
         "message": "Remote control active for shared window",
         "supportsBinaryHotPath": true,
-        "supportsRedundantInput": true
+        "supportsRedundantInput": true,
+        "supportsBinaryHotPathV2": true
       },
       "fields": [
         "controllerId",
@@ -948,6 +949,7 @@
         "seq",
         "status",
         "supportsBinaryHotPath",
+        "supportsBinaryHotPathV2",
         "supportsRedundantInput",
         "targetUserId",
         "v",
@@ -2558,6 +2560,18 @@
       "name": "wheel",
       "hex": "500105002b0000002a000000008000400002f4ff780000b54dd086",
       "length": 27
+    },
+    {
+      "name": "pointer-move-v2",
+      "hex": "500204012a0000002a0000000080004000000000000000b54dd0867b68e5cf8b010000",
+      "length": 35,
+      "sentAtMs": 1700000000123
+    },
+    {
+      "name": "wheel-v2",
+      "hex": "500205002b0000002a000000008000400002f4ff780000b54dd0867b68e5cf8b010000",
+      "length": 35,
+      "sentAtMs": 1700000000123
     }
   ],
   "fnv1a32TestVectors": [

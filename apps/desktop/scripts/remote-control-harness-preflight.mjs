@@ -215,6 +215,22 @@ assertDeepEqual(
 );
 pass('redundant lossy input bundle is pinned (lossy, capability-gated, hover excluded)');
 
+// #371: binary hot-path frame v2 = v1 bytes (version 2) + u64 LE sentAtMs.
+for (const name of ['pointer-move', 'wheel']) {
+  const v1 = fixture.remoteControlBinaryFrames.find((frame) => frame.name === name);
+  const v2 = fixture.remoteControlBinaryFrames.find((frame) => frame.name === `${name}-v2`);
+  const sentAt = Buffer.alloc(8);
+  sentAt.writeBigUInt64LE(BigInt(v2?.sentAtMs ?? -1));
+  const expected = `${v1.hex.slice(0, 2)}02${v1.hex.slice(4)}${sentAt.toString('hex')}`;
+  assertDeepEqual([v2?.length, v2?.hex], [35, expected], `${name}-v2 binary frame`);
+}
+assertDeepEqual(
+  fixture.remoteControlMessages.find((entry) => entry.name === 'status')?.message?.supportsBinaryHotPathV2,
+  true,
+  'active status advertises supportsBinaryHotPathV2'
+);
+pass('binary hot-path frame v2 is pinned (v1 layout + sentAtMs, capability-gated)');
+
 section('Harness inventory');
 requireMarkers(remoteControlPath, [
   'trait InputSink',
@@ -232,7 +248,9 @@ requireMarkers(remoteControlPath, [
   'key_revoke_synthesizes_matching_key_release',
   'redundant_input_bundle_matches_shared_contract_fixture',
   'redundant_input_gap_that_loses_an_up_releases_the_held_key',
-  'controller_routes_input_through_bundles_only_for_a_capable_host'
+  'controller_routes_input_through_bundles_only_for_a_capable_host',
+  'binary_hot_path_frames_match_shared_byte_fixtures',
+  'binary_v2_hover_move_records_the_lossy_one_way_leg'
 ]);
 requireMarkers(webContractsPath, [
   'remote-control topic and all-variant JSON field names are pinned',

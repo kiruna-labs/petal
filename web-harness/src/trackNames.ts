@@ -795,6 +795,9 @@ export type RemoteControlMessage =
       /** #399: true only on a host's `active` status; the controller may then
        * send input as lossy redundant `inputBundle`s. */
       supportsRedundantInput?: boolean;
+      /** #371: true only on a host's `active` status; hot-path frames may
+       * then be v2, which appends `sentAtMs`. */
+      supportsBinaryHotPathV2?: boolean;
     })
   | (RemoteControlBase & {
       kind: 'pointer';

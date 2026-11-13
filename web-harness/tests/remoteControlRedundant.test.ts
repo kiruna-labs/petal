@@ -19,6 +19,7 @@ import {
   type RemoteControlInputBundle
 } from '../src/remoteControlRedundant.ts';
 import { setupRemoteControlUi } from '../src/remoteControlUi.ts';
+import { decodeRemoteControlHotPath } from '../src/remoteControl.ts';
 import type { HarnessContext } from '../src/context.ts';
 import type { RemoteControlMessage } from '../src/trackNames.ts';
 
@@ -304,6 +305,65 @@ test('a bundle rides the reliable channel while livekit reports the lossy buffer
     await settle();
     await ui.publishRemoteControl(key(3, 'down'));
     assert.equal(published.at(-1)!.options.reliable, false, 'back to lossy once the buffer drained');
+  } finally {
+    (globalThis as { document?: unknown }).document = priorDocument;
+  }
+});
+
+test('#371: hot-path frames are v2 (with sentAtMs) only for a host advertising supportsBinaryHotPathV2', async () => {
+  const priorDocument = (globalThis as { document?: unknown }).document;
+  (globalThis as { document?: unknown }).document = { querySelectorAll: () => [], getElementById: () => null };
+  try {
+    const published: Array<{ data: Uint8Array; options: { reliable: boolean } }> = [];
+    const ui = setupRemoteControlUi(uiContext(published));
+    let seq = 0;
+    const hover = (sentAtMs?: number) =>
+      ({
+        v: 1,
+        targetUserId: 'native-host',
+        controllerId: 'web',
+        windowId: 7,
+        seq: ++seq,
+        grantToken: 'tok',
+        kind: 'pointer',
+        action: 'move',
+        x: 0.5,
+        y: 0.5,
+        button: -1,
+        buttons: 0,
+        modifiers,
+        ...(sentAtMs !== undefined ? { sentAtMs } : {})
+      }) as RemoteControlMessage;
+    const last = () => published.at(-1)!.data;
+
+    // A v1-only host keeps the 27-byte frame.
+    ui.handleRemoteControlPayload(activeStatus({ supportsBinaryHotPath: true }), 'native-host');
+    await ui.publishRemoteControl(hover(1_700_000_000_123));
+    assert.deepEqual([last().length, last()[0], last()[1]], [27, 0x50, 1]);
+
+    ui.handleRemoteControlPayload(
+      activeStatus({ supportsBinaryHotPath: true, supportsBinaryHotPathV2: true }),
+      'native-host'
+    );
+    await ui.publishRemoteControl(hover(1_700_000_000_123));
+    assert.deepEqual([last().length, last()[1]], [35, 2]);
+    assert.equal(decodeRemoteControlHotPath(last(), 'native-host', 'web')?.sentAtMs, 1_700_000_000_123);
+    // An unstamped hover move is stamped at publish, so it still rides v2.
+    const before = Date.now();
+    await ui.publishRemoteControl(hover());
+    const stamped = decodeRemoteControlHotPath(last(), 'native-host', 'web')?.sentAtMs ?? 0;
+    assert.ok(stamped >= before && stamped <= Date.now(), `sentAtMs ${stamped}`);
+    assert.equal(published.at(-1)!.options.reliable, false, 'hover moves stay lossy');
+
+    // V2 without the base hot-path flag is not a capability: JSON.
+    ui.handleRemoteControlPayload(activeStatus({ supportsBinaryHotPathV2: true }), 'native-host');
+    await ui.publishRemoteControl(hover(1));
+    assert.equal(last()[0], '{'.charCodeAt(0));
+
+    // Rolled back to a v1 host: back to v1.
+    ui.handleRemoteControlPayload(activeStatus({ supportsBinaryHotPath: true }), 'native-host');
+    await ui.publishRemoteControl(hover(1));
+    assert.deepEqual([last().length, last()[1]], [27, 1]);
   } finally {
     (globalThis as { document?: unknown }).document = priorDocument;
   }
