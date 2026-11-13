@@ -13,7 +13,15 @@
 //! On a Windows computer with no D3D11 video device, frames are converted on
 //! the CPU ([`super::cpu_convert`]) for Microsoft's software H.264 encoder,
 //! and the tap keeps sending CPU copies.
+//!
+//! If the encoder's D3D11 device is lost (`DXGI_ERROR_DEVICE_REMOVED` or
+//! `_RESET`: a driver update or crash, a GPU reset), the device, converter
+//! and video encoder are recreated on this thread and the stream carries on,
+//! re-presenting the share's latest frame on the new device (the slate if it
+//! can't be opened there), like the other Windows D3D11 paths; it ends only
+//! if that keeps happening ([`DeviceRecovery`]).
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -118,6 +126,49 @@ fn spawn_with(
     Ok(PipelineHandle { thread, commands, stats, stop })
 }
 
+/// How many times within [`DEVICE_LOSS_WINDOW`] the encoder's device may be
+/// lost and recreated before the stream ends.
+const DEVICE_LOSS_LIMIT: usize = 3;
+const DEVICE_LOSS_WINDOW: Duration = Duration::from_secs(60);
+
+/// Whether a lost encoder device may be recreated: up to
+/// [`DEVICE_LOSS_LIMIT`] times in any [`DEVICE_LOSS_WINDOW`].
+#[derive(Debug, Default)]
+struct DeviceRecovery {
+    recent: VecDeque<Instant>,
+}
+
+impl DeviceRecovery {
+    fn allow(&mut self, now: Instant) -> bool {
+        while self.recent.front().is_some_and(|at| now.saturating_duration_since(*at) >= DEVICE_LOSS_WINDOW) {
+            self.recent.pop_front();
+        }
+        if self.recent.len() >= DEVICE_LOSS_LIMIT {
+            return false;
+        }
+        self.recent.push_back(now);
+        true
+    }
+}
+
+/// Test hook: the next video step fails as if the device had been lost.
+#[cfg(test)]
+static INJECT_DEVICE_LOSS: AtomicU32 = AtomicU32::new(0);
+
+/// Why the video path's device is gone, if it is.
+fn device_lost(video: &Video) -> Option<String> {
+    #[cfg(test)]
+    if INJECT_DEVICE_LOSS.load(Ordering::Acquire) > 0 {
+        INJECT_DEVICE_LOSS.fetch_sub(1, Ordering::AcqRel);
+        return Some("injected for a test".into());
+    }
+    match &video.frames {
+        Frames::Gpu { device, .. } => device.lost(),
+        #[cfg(target_os = "windows")]
+        Frames::Cpu(_) => None,
+    }
+}
+
 /// Where frames become NV12: on the encoder's D3D11 device, or (Windows, no
 /// video device) on the CPU.
 enum Frames {
@@ -150,12 +201,17 @@ impl Frames {
             TapPixels::Gpu(gpu) => gpu,
         };
         match self {
-            Self::Gpu { converter, .. } if !tap.gpu_disabled() => match converter.upload_texture(gpu) {
+            Self::Gpu { device, converter } if !tap.gpu_disabled() => match converter.upload_texture(gpu) {
                 Ok(()) => Ok(true),
-                Err(error) => {
-                    tap.disable_gpu(&error);
-                    Ok(false)
-                }
+                // A lost device is recovered (and the frame retried on the
+                // new one), not a reason to give up on GPU frames.
+                Err(error) => match device.lost() {
+                    Some(reason) => Err(format!("{error} (device lost: {reason})")),
+                    None => {
+                        tap.disable_gpu(&error);
+                        Ok(false)
+                    }
+                },
             },
             _ => Ok(false),
         }
@@ -182,10 +238,12 @@ fn open_frames(tap: &LiveTap, canvas: (u32, u32), force_cpu: bool) -> Result<Fra
             .and_then(|device| Converter::new(&device, canvas).map(|converter| (device, converter)));
         match opened {
             Ok((device, converter)) => {
+                // `decline_gpu`: a device recreated after a loss must not
+                // inherit the previous one's acceptance.
                 match (capture, device.adapter_luid()) {
                     (Some(capture), Some(encoder)) if capture == encoder => tap.accept_gpu(encoder),
-                    (None, _) => tap.gpu_fell_back("the capture adapter is unknown"),
-                    _ => tap.gpu_fell_back("the encoder couldn't open a device on the capture adapter"),
+                    (None, _) => tap.decline_gpu("the capture adapter is unknown"),
+                    _ => tap.decline_gpu("the encoder couldn't open a device on the capture adapter"),
                 }
                 return Ok(Frames::Gpu { device, converter });
             }
@@ -194,7 +252,7 @@ fn open_frames(tap: &LiveTap, canvas: (u32, u32), force_cpu: bool) -> Result<Fra
             ),
         }
     }
-    tap.gpu_fell_back("no D3D11 video device");
+    tap.decline_gpu("no D3D11 video device");
     Ok(Frames::Cpu(CpuConverter::new(canvas)?))
 }
 
@@ -203,6 +261,31 @@ fn open_frames(_tap: &LiveTap, canvas: (u32, u32), _force_cpu: bool) -> Result<F
     let device = EncoderDevice::create()?;
     let converter = Converter::new(&device, canvas)?;
     Ok(Frames::Gpu { device, converter })
+}
+
+/// After the device was recreated: the share's latest frame again, on the
+/// new device, or the slate if that frame can't be opened there (until the
+/// capture's next CPU copy). Returns the picture's size, its generation (the
+/// share's) and whether it is the slate.
+fn hold_picture(video: &mut Video, tap: &LiveTap) -> Result<((u32, u32), Option<u64>, bool), String> {
+    if let Some((frame, generation)) = tap.share_available().then(|| tap.mailbox.latest()).flatten() {
+        if video.frames.upload_share(&frame, tap)? {
+            return Ok(((frame.width, frame.height), Some(generation), false));
+        }
+    }
+    Ok((upload_slate(video)?, None, true))
+}
+
+/// Put the slate in the converter; its size.
+fn upload_slate(video: &mut Video) -> Result<(u32, u32), String> {
+    let slate = render_slate(video.canvas.0, video.canvas.1);
+    video.frames.upload(&BgraView {
+        bgra: &slate.bgra,
+        bytes_per_row: slate.width * 4,
+        width: slate.width,
+        height: slate.height,
+    })?;
+    Ok((slate.width, slate.height))
 }
 
 fn to_100ns(duration: Duration) -> i64 {
@@ -218,17 +301,38 @@ struct Video {
 
 impl Video {
     fn open(frames: Frames, canvas: (u32, u32), fps: u32, bitrate: u32, max: u32) -> Result<Self, String> {
+        Self::open_with(frames, AvcPackager::new(), canvas, fps, bitrate, max)
+    }
+
+    /// Over `packager`: a reopened encoder keeps the stream's timestamps
+    /// monotonic, and a changed sequence header goes out with its first
+    /// keyframe.
+    fn open_with(
+        frames: Frames,
+        mut packager: AvcPackager,
+        canvas: (u32, u32),
+        fps: u32,
+        bitrate: u32,
+        max: u32,
+    ) -> Result<Self, String> {
         let encoder = match &frames {
             Frames::Gpu { device, .. } => H264Encoder::new(device, canvas, fps, bitrate, max)?,
             #[cfg(target_os = "windows")]
             Frames::Cpu(_) => H264Encoder::new_software(canvas, fps, bitrate, max)?,
         };
-        let mut packager = AvcPackager::new();
         if let Some(header) = encoder.sequence_header() {
             let nalus = split_annex_b(header);
             packager.package(&nalus, 0, false);
         }
         Ok(Self { frames, encoder, packager, canvas })
+    }
+
+    /// Release the encoder, then the device it runs on; the packager goes on.
+    fn retire(self) -> AvcPackager {
+        let Self { frames, encoder, packager, .. } = self;
+        drop(encoder);
+        drop(frames);
+        packager
     }
 
     /// Convert the current frame into `dest` and submit it at `pts`.
@@ -283,6 +387,9 @@ fn run(
     let mut source_size = config.canvas;
     let mut audio_blocks: u64 = 0;
     let mut mix_level = LevelMeter::default();
+    let mut recovery = DeviceRecovery::default();
+    // The converter holds a picture to encode (the share's or the slate).
+    let mut has_picture = false;
     let block = Duration::from_nanos(MIX_BLOCK_FRAMES as u64 * 1_000_000_000 / u64::from(MIX_SAMPLE_RATE));
     let audio_pts = |blocks: u64| {
         Duration::from_nanos(blocks * MIX_BLOCK_FRAMES as u64 * 1_000_000_000 / u64::from(MIX_SAMPLE_RATE))
@@ -324,56 +431,94 @@ fn run(
         }
 
         // Video: one constant-rate tick.
-        if let Some(tick) = schedule.poll(elapsed) {
-            stats.frames_dropped.fetch_add(tick.skipped, Ordering::Relaxed);
-            let latest = if tap.share_available() { tap.mailbox.latest() } else { None };
-            match slate_clock.tick(elapsed, latest.is_some()) {
-                SlateDecision::End => return Ok(PipelineExit::SlateTimeout),
-                SlateDecision::Share => {
-                    let (frame, generation) = latest.ok_or("frame vanished")?;
-                    let size = (frame.width, frame.height);
-                    if (last_generation != Some(generation) || showing_slate)
-                        && video.frames.upload_share(&frame, tap)?
-                    {
-                        last_generation = Some(generation);
-                        showing_slate = false;
-                        source_size = size;
+        let step: Result<Option<PipelineExit>, String> = (|| {
+            #[cfg(test)]
+            if INJECT_DEVICE_LOSS.load(Ordering::Acquire) > 0 {
+                return Err("injected device loss".into());
+            }
+            if let Some(tick) = schedule.poll(elapsed) {
+                stats.frames_dropped.fetch_add(tick.skipped, Ordering::Relaxed);
+                let latest = if tap.share_available() { tap.mailbox.latest() } else { None };
+                match slate_clock.tick(elapsed, latest.is_some()) {
+                    SlateDecision::End => return Ok(Some(PipelineExit::SlateTimeout)),
+                    SlateDecision::Share => {
+                        let (frame, generation) = latest.ok_or("frame vanished")?;
+                        let size = (frame.width, frame.height);
+                        if (last_generation != Some(generation) || showing_slate)
+                            && video.frames.upload_share(&frame, tap)?
+                        {
+                            last_generation = Some(generation);
+                            showing_slate = false;
+                            source_size = size;
+                            has_picture = true;
+                        } else if !has_picture {
+                            // Nothing uploaded yet and this frame can't be
+                            // (a GPU frame the encoder can't open): the slate
+                            // until the capture's next CPU copy.
+                            source_size = upload_slate(&mut video)?;
+                            showing_slate = true;
+                            last_generation = None;
+                            has_picture = true;
+                        }
+                    }
+                    SlateDecision::Slate => {
+                        if !showing_slate {
+                            source_size = upload_slate(&mut video)?;
+                            showing_slate = true;
+                            last_generation = None;
+                            has_picture = true;
+                        }
                     }
                 }
-                SlateDecision::Slate => {
-                    if !showing_slate {
-                        let slate = render_slate(video.canvas.0, video.canvas.1);
-                        video.frames.upload(&BgraView {
-                            bgra: &slate.bgra,
-                            bytes_per_row: slate.width * 4,
-                            width: slate.width,
-                            height: slate.height,
-                        })?;
-                        showing_slate = true;
-                        last_generation = None;
-                        source_size = (slate.width, slate.height);
-                    }
+                stats.on_slate.store(showing_slate, Ordering::Relaxed);
+                stats.slate_remaining_s.store(
+                    slate_clock.remaining(elapsed).unwrap_or(STREAM_SLATE_MAX).as_secs() as u32,
+                    Ordering::Relaxed,
+                );
+                if queue.take_keyframe_request() {
+                    video.encoder.force_keyframe();
                 }
-            }
-            stats.on_slate.store(showing_slate, Ordering::Relaxed);
-            stats.slate_remaining_s.store(
-                slate_clock.remaining(elapsed).unwrap_or(STREAM_SLATE_MAX).as_secs() as u32,
-                Ordering::Relaxed,
-            );
-            if queue.take_keyframe_request() {
-                video.encoder.force_keyframe();
-            }
-            let dest = letterbox_rect(source_size.0, source_size.1, video.canvas.0, video.canvas.1);
-            let (frames, accepted) = video.encode(dest, to_100ns(tick.pts))?;
-            if accepted {
-                stats.frames_encoded.fetch_add(1, Ordering::Relaxed);
+                let dest = letterbox_rect(source_size.0, source_size.1, video.canvas.0, video.canvas.1);
+                let (frames, accepted) = video.encode(dest, to_100ns(tick.pts))?;
+                if accepted {
+                    stats.frames_encoded.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                video.package(frames, &mut interleaver);
             } else {
-                stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
+                let frames = video.encoder.poll()?;
+                video.package(frames, &mut interleaver);
             }
-            video.package(frames, &mut interleaver);
-        } else {
-            let frames = video.encoder.poll()?;
-            video.package(frames, &mut interleaver);
+            Ok(None)
+        })();
+        match step {
+            Ok(Some(exit)) => return Ok(exit),
+            Ok(None) => {}
+            Err(mut error) => loop {
+                // Only a lost device is recovered; any other failure ends
+                // the stream as before. A loss while recovering counts again.
+                let Some(reason) = device_lost(&video) else { return Err(error) };
+                if !recovery.allow(Instant::now()) {
+                    return Err(format!(
+                        "{error} (the graphics device was lost {DEVICE_LOSS_LIMIT} times within a minute: {reason})"
+                    ));
+                }
+                log::warn!("streaming: the encoder's graphics device was lost ({reason}): recreating it ({error})");
+                let packager = video.retire();
+                let frames = open_frames(tap, config.canvas, force_cpu)?;
+                video = Video::open_with(frames, packager, config.canvas, fps, config.bitrate_bps, config.max_bitrate_bps)?;
+                stats.hardware.store(video.encoder.hardware, Ordering::Relaxed);
+                match hold_picture(&mut video, tap) {
+                    Ok(held) => {
+                        (source_size, last_generation, showing_slate) = held;
+                        has_picture = true;
+                        stats.on_slate.store(showing_slate, Ordering::Relaxed);
+                        break;
+                    }
+                    Err(next) => error = next,
+                }
+            },
         }
 
         for packet in interleaver.drain_ready() {
@@ -431,6 +576,81 @@ mod tests {
     #[ignore = "needs Media Foundation encoders"]
     async fn streams_slate_then_share_end_to_end_on_the_cpu_path() {
         assert!(!slate_then_share(true).await, "the software encoder");
+    }
+
+    #[test]
+    fn a_lost_device_is_recreated_a_bounded_number_of_times() {
+        let mut recovery = DeviceRecovery::default();
+        let start = Instant::now();
+        for i in 0..DEVICE_LOSS_LIMIT as u64 {
+            assert!(recovery.allow(start + Duration::from_secs(i)), "loss {i} recovered");
+        }
+        assert!(!recovery.allow(start + Duration::from_secs(10)), "too many within a minute: the stream ends");
+        // A minute after the first, one more is allowed again, and only one.
+        assert!(recovery.allow(start + DEVICE_LOSS_WINDOW));
+        assert!(!recovery.allow(start + DEVICE_LOSS_WINDOW));
+    }
+
+    /// The encode thread's device-loss path, end to end: a video step fails
+    /// with the device gone, the device, converter and encoder are recreated
+    /// on the thread, and the stream carries on (slate, then the share) with
+    /// timestamps still monotonic. `-- --ignored` (the platform's encoders).
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs the platform's encoders"]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_lost_device_is_recreated_and_the_stream_carries_on() {
+        let _guard = tap::test_lock();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let received = Arc::new(std::sync::Mutex::new(Received::default()));
+        let server = tokio::spawn(serve(listener, received.clone(), None));
+        let live_tap = tap::start(78);
+        let mixer = Arc::new(Mutex::new(AudioMixer::new()));
+        let queue = Arc::new(MediaQueue::new());
+        let config = PipelineConfig { canvas: (1280, 720), fps: 30, bitrate_bps: 3_000_000, max_bitrate_bps: 6_000_000 };
+        let pipeline = spawn_with(config, live_tap.clone(), mixer.clone(), queue.clone(), false).unwrap();
+        let destination = RtmpDestination::new(&format!("rtmp://127.0.0.1:{port}/live"), "k").unwrap();
+        let (state_tx, mut state_rx) = tokio::sync::watch::channel(PublisherState::Connecting);
+        let cancel = CancellationToken::new();
+        let publisher = tokio::spawn(run_publisher(
+            destination,
+            queue.clone(),
+            Arc::new(PublisherStats::default()),
+            state_tx,
+            cancel.clone(),
+            None,
+        ));
+        state_rx.wait_for(|s| *s == PublisherState::Live).await.unwrap();
+        for i in 0..15u8 {
+            tap::offer_frame(78, true, || Some(share_frame(i)));
+            tokio::time::sleep(Duration::from_millis(33)).await;
+        }
+        let before = pipeline.stats.frames_encoded.load(Ordering::Relaxed);
+        assert!(before > 5, "streaming before the loss ({before} frames)");
+        INJECT_DEVICE_LOSS.store(1, Ordering::Release);
+        for i in 0..60u8 {
+            tap::offer_frame(78, true, || Some(share_frame(100 + i)));
+            tokio::time::sleep(Duration::from_millis(33)).await;
+        }
+        assert_eq!(INJECT_DEVICE_LOSS.load(Ordering::Acquire), 0, "the loss was handled");
+        let after = pipeline.stats.frames_encoded.load(Ordering::Relaxed);
+        let dropped = pipeline.stats.frames_dropped.load(Ordering::Relaxed);
+        eprintln!("frames encoded {before} -> {after}, dropped {dropped}");
+        assert!(!pipeline.thread.is_finished(), "the stream carried on");
+        assert!(after >= before + 30, "frames kept coming after the loss ({before} -> {after})");
+        assert!(!pipeline.stats.on_slate.load(Ordering::Relaxed), "back on the share");
+
+        pipeline.stop.store(true, Ordering::Release);
+        let exit = tokio::task::spawn_blocking(move || pipeline.thread.join().unwrap()).await.unwrap();
+        assert_eq!(exit, PipelineExit::Stopped);
+        cancel.cancel();
+        let _ = publisher.await;
+        server.abort();
+        tap::stop();
+        let r = received.lock().unwrap();
+        let ts: Vec<u32> = r.video.iter().map(|f| f.timestamp.as_millis()).collect();
+        assert!(ts.windows(2).all(|w| w[0] <= w[1]), "monotonic across the recovery: {ts:?}");
+        assert!(r.video.iter().filter(|f| f.is_keyframe()).count() >= 2, "the new encoder starts on a keyframe");
     }
 
     /// Returns whether the stream used a hardware encoder.

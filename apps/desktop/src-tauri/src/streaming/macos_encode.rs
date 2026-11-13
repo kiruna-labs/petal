@@ -611,6 +611,11 @@ impl EncoderDevice {
     pub fn create() -> Result<Self, String> {
         Ok(Self)
     }
+
+    /// VideoToolbox has no device to lose (see `windows_encode`).
+    pub fn lost(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A BGRA frame in CPU memory.

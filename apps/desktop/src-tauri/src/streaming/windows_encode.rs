@@ -237,6 +237,15 @@ impl EncoderDevice {
     pub fn adapter_luid(&self) -> Option<i64> {
         super::gpu_tap::adapter_luid(&self.device)
     }
+
+    /// Why the device is gone (`DXGI_ERROR_DEVICE_REMOVED`, `_RESET`,
+    /// `_HUNG`, ...), if it is: everything on it must be recreated.
+    pub fn lost(&self) -> Option<String> {
+        // SAFETY: a plain query on a live device interface.
+        unsafe { self.device.GetDeviceRemovedReason() }
+            .err()
+            .map(|error| format!("{:#010x} {}", error.code().0 as u32, error.message()))
+    }
 }
 
 fn texture(

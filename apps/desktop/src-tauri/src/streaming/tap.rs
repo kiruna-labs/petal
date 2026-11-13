@@ -162,18 +162,25 @@ impl LiveTap {
         }
     }
 
+    /// The (new) encoder can't take GPU frames: clear any adapter an earlier
+    /// encoder accepted, so captures go back to CPU copies.
+    pub fn decline_gpu(&self, reason: &str) {
+        self.gpu.encoder_luid.store(0, Ordering::SeqCst);
+        self.gpu_fell_back(reason);
+    }
+
     /// A capture's GPU path failed: its frames take the CPU copy again.
     pub fn gpu_fell_back(&self, reason: &str) {
-        self.gpu.window_id.store(0, Ordering::Release);
+        self.gpu.window_id.store(0, Ordering::SeqCst);
         self.log_fallback_once(reason);
     }
 
     /// The encoder couldn't use a shared frame: CPU copies for the rest of
     /// the stream.
     pub fn disable_gpu(&self, reason: &str) {
-        self.gpu.failed.store(true, Ordering::Release);
-        self.gpu.encoder_luid.store(0, Ordering::Release);
-        self.gpu.window_id.store(0, Ordering::Release);
+        self.gpu.failed.store(true, Ordering::SeqCst);
+        self.gpu.encoder_luid.store(0, Ordering::SeqCst);
+        self.gpu.window_id.store(0, Ordering::SeqCst);
         self.log_fallback_once(reason);
     }
 
@@ -275,7 +282,12 @@ pub fn offer_gpu_frame(tap: &LiveTap, window_id: u32, excludes_petal: bool, fram
     }
     let (width, height) = frame.size();
     tap.mailbox.put(TapFrame { pixels: TapPixels::Gpu(frame), width, height });
-    tap.gpu.window_id.store(window_id, Ordering::Release);
+    tap.gpu.window_id.store(window_id, Ordering::SeqCst);
+    // The encoder may have declined GPU frames since this capture checked
+    // (a device recreated on the CPU path): don't leave its CPU copies off.
+    if tap.gpu.encoder_luid.load(Ordering::SeqCst) == 0 || tap.gpu.failed.load(Ordering::SeqCst) {
+        tap.gpu.window_id.store(0, Ordering::SeqCst);
+    }
     tap.share_up.store(true, Ordering::Release);
 }
 
