@@ -3972,6 +3972,7 @@
   "streamOptOutAttribute": {
     "key": "petal.stream-optout",
     "optedOut": "1",
+    "optedIn": "0",
     "included": [
       "",
       "0",
@@ -3983,7 +3984,12 @@
     "rules": [
       "only the exact value \"1\" opts a participant out; absent or any other value means included",
       "an opted-out participant's audio never reaches a live stream's mix; it still feeds the streamer's echo cancellation",
-      "a streamer's own setting does not apply to their own stream"
-    ]
+      "a streamer's own setting does not apply to their own stream",
+      "a streamer mixes no remote participant's audio until its own petal.live is accepted by the server and remoteAudioGraceMs has passed, counted from then or from that participant's (re)connection, whichever is later; from the moment the streamer's room starts reconnecting, remote audio leaves the stream until its petal.live is written again and the grace has passed again",
+      "a client opts back in by writing \"0\" (and writes \"0\" on join when not opted out); a streamer that has seen a participant opted out keeps them out of that stream until it sees a present value other than \"1\", so an attribute lost to a rejoin or full reconnect never lets their audio in",
+      "a client writes its opt-out before it publishes a microphone on join, and writes it again after every reconnect; an opted-out client whose opt-out the server has not accepted does not publish a microphone",
+      "a browser guest can opt out at any time, before any stream starts; the choice is kept per room"
+    ],
+    "remoteAudioGraceMs": 5000
   }
 }

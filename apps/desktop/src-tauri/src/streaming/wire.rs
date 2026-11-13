@@ -13,6 +13,10 @@ pub const STREAM_LIVE_ATTRIBUTE: &str = "petal.live";
 pub const STREAM_OPTOUT_ATTRIBUTE: &str = "petal.stream-optout";
 /// The only value that opts a participant out.
 pub const STREAM_OPTOUT_VALUE: &str = "1";
+/// What a client writes to be included. Absent also means included, but a
+/// streamer that has seen someone opted out keeps them out until it sees a
+/// value like this: an attribute lost to a rejoin is not an opt-in.
+pub const STREAM_OPTIN_VALUE: &str = "0";
 
 /// Whether a `petal.stream-optout` value keeps that participant's audio off
 /// live streams. Absent or anything but `"1"` means included.
@@ -20,13 +24,12 @@ pub fn is_opted_out(value: Option<&str>) -> bool {
     value == Some(STREAM_OPTOUT_VALUE)
 }
 
-/// The attribute value for this computer's own setting; an empty value
-/// deletes the key.
+/// The attribute value for this computer's own setting.
 pub fn opt_out_value(keep_off: bool) -> &'static str {
     if keep_off {
         STREAM_OPTOUT_VALUE
     } else {
-        ""
+        STREAM_OPTIN_VALUE
     }
 }
 
@@ -150,6 +153,7 @@ mod tests {
     struct OptOutFixture {
         key: String,
         opted_out: String,
+        opted_in: String,
         included: Vec<String>,
     }
 
@@ -237,6 +241,7 @@ mod tests {
             assert!(!is_opted_out(Some(&included)), "{included:?}");
         }
         assert_eq!(opt_out_value(true), "1");
-        assert_eq!(opt_out_value(false), "");
+        assert_eq!(opt_out_value(false), fixture.opted_in);
+        assert!(!is_opted_out(Some(fixture.opted_in.as_str())));
     }
 }

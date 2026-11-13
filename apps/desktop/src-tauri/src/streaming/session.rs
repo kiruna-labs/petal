@@ -471,7 +471,13 @@ async fn start_client(
     // What Petal plays out, for the stream mic's echo cancellation; joins at
     // once so it never lags the echo it describes.
     let reference = Arc::new(Mutex::new(AudioMixer::with_prime(0)));
-    super::audio_tap::start(room.clone(), mixer.clone(), reference.clone(), cancel.child_token());
+    super::audio_tap::start(
+        room.clone(),
+        mixer.clone(),
+        reference.clone(),
+        announced_probe(&room, started_at),
+        cancel.child_token(),
+    );
     let mic = super::mic::StreamMic::start(Arc::new(MeetingMicState(app.clone())), mixer.clone(), reference);
     let pipeline = match spawn(
         PipelineConfig {
@@ -559,6 +565,25 @@ async fn start_client(
         announced,
     ));
     Ok(current().unwrap_or_else(|| placeholder_snapshot(window_id)))
+}
+
+/// Whether the room has been told about this stream (started at
+/// `started_at`): our `petal.live` for it accepted by the server. Gates
+/// remote audio (see `audio_tap`).
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn announced_probe(room: &livekit::Room, started_at: u64) -> super::audio_tap::Announced {
+    match super::live_state::keeper_for(room) {
+        Some(keeper) => Arc::new(move || {
+            keeper
+                .confirmed(STREAM_LIVE_ATTRIBUTE)
+                .and_then(|value| super::wire::parse_client_live_attribute(&value))
+                .is_some_and(|attribute| attribute.started_at == started_at)
+        }),
+        None => {
+            log::warn!("streaming: no attribute writer for this room; remote audio stays off the stream");
+            Arc::new(|| false)
+        }
+    }
 }
 
 /// The meeting's mic as the stream mic sees it: mute and device, read-only.

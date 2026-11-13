@@ -1038,6 +1038,34 @@ pub async fn join_room(
             }
         };
 
+        // Live streams: our petal.stream-optout reaches the server before the
+        // mic does, so a streamer never hears an opted-out mic (#487). If it
+        // can't be saved, the mic stays off rather than publishing uncovered.
+        let prepared = match prepared {
+            Some(prepared)
+                if !matches!(
+                    await_join_work(
+                        join_budget,
+                        crate::streaming::live_state::opt_out_settled(
+                            &room_connection.room(),
+                            crate::streaming::live_state::OPT_OUT_BEFORE_MIC_TIMEOUT,
+                        ),
+                    )
+                    .await,
+                    Ok(true)
+                ) =>
+            {
+                report_audio_join_failure(
+                    app,
+                    AudioJoinFailure::Microphone,
+                    "\"Keep me off live streams\" couldn't be saved; not publishing the microphone",
+                );
+                // Detached: releasing the device must not hold up the join.
+                drop(tokio::task::spawn_blocking(move || drop(prepared)));
+                None
+            }
+            prepared => prepared,
+        };
         if let Some(prepared) = prepared {
             let mut prepared = Some(prepared);
             let room = room_connection.room();

@@ -33,6 +33,7 @@ import {
   HARNESS_NAME_STORAGE_KEY,
 } from './constants.ts';
 import { participantDisplayName } from './tiles.ts';
+import { beforeMicrophonePublish } from './liveStream.ts';
 import { localParticipantMetadata } from './participantMetadata.ts';
 import { audioReceiverTelemetryFromStatsReport } from './audioReceiverTelemetry.ts';
 import { framesDecodedFromStatsReport } from './cameraDecodeHealth.ts';
@@ -1127,6 +1128,8 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     // worked (both ends Chromium, both RED-capable), which is exactly the one-way
     // shape #510 documented in the other direction. Never re-enable without a
     // native decoded-PCM proof.
+      // Live streams: the opt-out reaches the server before the mic does.
+      await beforeMicrophonePublish();
       await state.room.localParticipant.publishTrack(state.localAudioTrack, {
         name: trackName,
         source: Track.Source.Microphone,
@@ -1224,6 +1227,8 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
         const audioMediaTrack = stream.getAudioTracks()[0];
         const track = new LocalAudioTrack(audioMediaTrack);
         try {
+          // Live streams: the opt-out reaches the server before the mic does.
+          await beforeMicrophonePublish();
           // #787: red: false -- see the tone publisher's comment above.
           await state.room.localParticipant.publishTrack(track, {
             name: MIC_TRACK_NAME,
@@ -1595,6 +1600,9 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
 
       if (micCheckbox.checked && !state.micOn) {
         try {
+          // Live streams: the opt-out reaches the server before the mic does
+          // (checked before anything is created, so a refusal leaks nothing).
+          await beforeMicrophonePublish();
           state.audioCtx = new AudioContext();
           const dest = state.audioCtx.createMediaStreamDestination();
           state.oscillator = state.audioCtx.createOscillator();

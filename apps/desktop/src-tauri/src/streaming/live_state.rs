@@ -102,10 +102,9 @@ fn room_slot() -> &'static Mutex<Option<JoinedRoom>> {
     ROOM.get_or_init(|| Mutex::new(None))
 }
 
-/// How long joining waits for the opt-out to reach the server before the
-/// mic publishes anyway (the streamer's grace period still covers a late
-/// one; see `audio_tap`).
-pub const OPT_OUT_BEFORE_MIC_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long joining waits for the opt-out to reach the server. An opted-out
+/// mic that still isn't covered by then is not published at all.
+pub const OPT_OUT_BEFORE_MIC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The writer of our own attributes in `room`, while it is the joined room.
 pub fn keeper_for(room: &Room) -> Option<Arc<AttributeKeeper>> {
@@ -116,8 +115,8 @@ pub fn keeper_for(room: &Room) -> Option<Arc<AttributeKeeper>> {
 }
 
 /// Bring this computer's `petal.stream-optout` in line with the "Keep me off
-/// live streams" setting: `"1"` keeps its audio off live streams, empty
-/// (deleting the key) includes it again. Written until it sticks, and again
+/// live streams" setting: `"1"` keeps its audio off live streams, `"0"`
+/// includes it again. Written until it sticks, and again
 /// after every reconnect. The setting is read under the room slot's lock, the
 /// same lock a join installs its writer under, so a change racing a join
 /// can't leave the new room with the old value.
@@ -132,10 +131,17 @@ pub fn publish_opt_out() {
 /// (or there is nothing to write).
 pub async fn opt_out_settled(room: &Room, timeout: Duration) -> bool {
     let Some(keeper) = keeper_for(room) else { return true };
-    let wanted = opt_out_value(super::settings::current().keep_off_live_streams);
-    let settled = keeper.wait_confirmed(STREAM_OPTOUT_ATTRIBUTE, wanted, timeout).await;
+    settle_opt_out(&keeper, super::settings::current().keep_off_live_streams, timeout).await
+}
+
+async fn settle_opt_out(keeper: &AttributeKeeper, keep_off: bool, timeout: Duration) -> bool {
+    // Only an opt-out has to be there first; "0" goes out in the background.
+    if !keep_off {
+        return true;
+    }
+    let settled = keeper.wait_confirmed(STREAM_OPTOUT_ATTRIBUTE, opt_out_value(keep_off), timeout).await;
     if !settled {
-        log::warn!("streaming: {STREAM_OPTOUT_ATTRIBUTE} not written within {timeout:?}; publishing the mic anyway");
+        log::warn!("streaming: {STREAM_OPTOUT_ATTRIBUTE} not written within {timeout:?}");
     }
     settled
 }
@@ -189,7 +195,7 @@ pub(crate) fn start_for_room(app: &AppHandle, room: Arc<Room>, generation: RoomG
     let writer = CancellationToken::new();
     tauri::async_runtime::spawn(keeper.clone().run(RoomSink(Arc::downgrade(&room)), writer.clone()));
     *room_slot().lock_unpoisoned() = Some(JoinedRoom { room: Arc::downgrade(&room), keeper: keeper.clone() });
-    // Absent means included, so only an opt-out is written on join.
+    // "1" or "0" (see wire::STREAM_OPTIN_VALUE): written on every join.
     publish_opt_out();
     refresh(&app, &room);
     tauri::async_runtime::spawn(async move {
@@ -230,7 +236,8 @@ pub(crate) fn start_for_room(app: &AppHandle, room: Arc<Room>, generation: RoomG
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeeperAction {
-    /// Any reconnect, a full one included: write everything again.
+    /// Any reconnect, a full one included: nothing written counts as
+    /// confirmed from its start, and everything is written again.
     ReassertAll,
     /// Our own attributes changed: put back anything we wrote that is gone.
     ObserveLocal,
@@ -239,7 +246,7 @@ enum KeeperAction {
 /// What a room event means for our own attributes.
 fn keeper_action(event: &RoomEvent) -> Option<KeeperAction> {
     match event {
-        RoomEvent::Reconnected => Some(KeeperAction::ReassertAll),
+        RoomEvent::Reconnecting | RoomEvent::Reconnected => Some(KeeperAction::ReassertAll),
         RoomEvent::ParticipantAttributesChanged { participant: Participant::Local(_), .. } => {
             Some(KeeperAction::ObserveLocal)
         }
@@ -262,7 +269,43 @@ mod tests {
         // A resume and a full reconnect both end in `Reconnected` (the SDK's
         // `handle_restarted` dispatches it once tracks are republished).
         assert_eq!(keeper_action(&RoomEvent::Reconnected), Some(KeeperAction::ReassertAll));
-        assert_eq!(keeper_action(&RoomEvent::Reconnecting), None);
+        // From the moment the room starts reconnecting, nothing written
+        // counts as confirmed (the remote-audio gate closes on that).
+        assert_eq!(keeper_action(&RoomEvent::Reconnecting), Some(KeeperAction::ReassertAll));
+        assert_eq!(keeper_action(&RoomEvent::Connected { participants_with_tracks: vec![] }), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn joining_holds_the_mic_until_the_opt_out_is_on_the_server() {
+        use super::super::attributes::{AttributeSink, WriteFuture};
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// A server that takes 800 ms to accept a write.
+        struct SlowRoom(Arc<AtomicBool>);
+        impl AttributeSink for SlowRoom {
+            fn write(&self, _attributes: HashMap<String, String>) -> WriteFuture<'_> {
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    self.0.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+
+        let on_server = Arc::new(AtomicBool::new(false));
+        let keeper = AttributeKeeper::new();
+        keeper.set(STREAM_OPTOUT_ATTRIBUTE, opt_out_value(true));
+        tokio::spawn(keeper.clone().run(SlowRoom(on_server.clone()), CancellationToken::new()));
+        assert!(settle_opt_out(&keeper, true, OPT_OUT_BEFORE_MIC_TIMEOUT).await);
+        assert!(on_server.load(Ordering::SeqCst), "the mic may publish only after the server has the opt-out");
+
+        // Not opted out: nothing to wait for.
+        let keeper = AttributeKeeper::new();
+        keeper.set(STREAM_OPTOUT_ATTRIBUTE, opt_out_value(false));
+        let started = tokio::time::Instant::now();
+        assert!(settle_opt_out(&keeper, false, OPT_OUT_BEFORE_MIC_TIMEOUT).await);
+        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 
     #[test]
