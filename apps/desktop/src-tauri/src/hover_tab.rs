@@ -3856,6 +3856,32 @@ mod tests {
     }
 
     #[test]
+    fn every_share_toggle_announces_share_state_changed() {
+        // The global shortcut, picker and region window all toggle through
+        // `toggle_share_for_window_with_color`. Announcing the result only to
+        // the region window left an already-shown hover tab (and the meeting
+        // page / window picker, which listen for `share-state-changed`) stale
+        // until the pointer left the window and came back.
+        let source = include_str!("hover_tab.rs");
+        let start = source
+            .find("pub(crate) async fn toggle_share_for_window_with_color(")
+            .expect("toggle_share_for_window_with_color exists");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("function end")];
+        let tail = &body[body
+            .rfind("let actual_shared = state.is_share_active(window_id);")
+            .expect("final backend share-state read")..];
+        assert!(
+            tail.contains("emit_share_state_changed(app, window_id, actual_shared);"),
+            "the final share state must be emitted as share-state-changed"
+        );
+        assert!(
+            !tail.contains("emit_region_share_state("),
+            "emit_share_state_changed already updates the region window"
+        );
+    }
+
+    #[test]
     fn stop_state_transition_is_explicitly_unshared() {
         let payload = serde_json::to_value(super::ShareStateChanged {
             window_id: 42,
