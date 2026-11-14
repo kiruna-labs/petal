@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // #379: plan the "Remote-control latency" PostHog dashboard from
 // docs/telemetry/remote-control-latency-dashboard.sql. DRY RUN ONLY: it never
-// calls PostHog and has no apply mode. It prints, per insight, whether it
-// would be created, updated or left unchanged against an optional snapshot of
-// the existing insights (`--existing <file.json>`: an array, or `{ results }`,
-// of `{ id, name, description, query }` as the insights API returns them).
-// `--json` prints the insight payloads the plan would send.
+// calls PostHog and has no apply mode. It prints whether the dashboard and
+// each insight would be created, updated or left unchanged against an
+// optional snapshot (`--existing <file.json>`: `{ dashboard, insights }`,
+// where `dashboard` is `{ id, name }` or null and each insight is
+// `{ id, name, description, query, dashboards }` as the insights API returns
+// them). `--json` prints the steps with the payloads they would send.
 //
 // Usage: node scripts/posthog-sync-latency-dashboard.mjs [--existing f] [--json]
 import { readFileSync } from 'node:fs';
@@ -46,12 +47,15 @@ export function parseDashboardSql(text) {
   });
 }
 
-export function insightPayload(insight) {
+// `dashboardId` is null while the dashboard does not exist yet: whoever
+// applies the plan fills in the id of the dashboard it just created.
+export function insightPayload(insight, dashboardId = null) {
   return {
     name: insight.name,
     description: insight.description,
     query: { kind: 'DataVisualizationNode', source: { kind: 'HogQLQuery', query: insight.query } },
     tags: ['rc-latency', `rc-latency:${insight.key}`],
+    dashboards: [dashboardId],
   };
 }
 
@@ -59,22 +63,30 @@ function existingQuery(entry) {
   return entry?.query?.source?.query ?? entry?.query?.query ?? null;
 }
 
-// Matched by name. Existing insights the file does not define are reported
-// and left alone; nothing is ever deleted.
-export function planSync(insights, existing = []) {
+// Insights are matched by name, and must sit on the dashboard. Existing
+// insights the file does not define are reported and left alone; nothing is
+// ever deleted.
+export function planSync(insights, { dashboard = null, insights: existing = [] } = {}) {
+  const dashboardId = dashboard?.id ?? null;
+  const dashboardStep = dashboard
+    ? { action: 'unchanged', kind: 'dashboard', name: DASHBOARD_NAME, id: dashboardId }
+    : { action: 'create', kind: 'dashboard', name: DASHBOARD_NAME, payload: { name: DASHBOARD_NAME, tags: ['rc-latency'] } };
   const byName = new Map(existing.map((entry) => [entry.name, entry]));
   const names = new Set(insights.map((insight) => insight.name));
   const actions = insights.map((insight) => {
-    const payload = insightPayload(insight);
+    const payload = insightPayload(insight, dashboardId);
     const current = byName.get(insight.name);
-    if (!current) return { action: 'create', key: insight.key, name: insight.name, payload };
+    if (!current) return { action: 'create', kind: 'insight', key: insight.key, name: insight.name, payload };
     const changed = [];
     if (existingQuery(current) !== insight.query) changed.push('query');
     if ((current.description ?? '') !== insight.description) changed.push('description');
-    return { action: changed.length ? 'update' : 'unchanged', key: insight.key, name: insight.name, id: current.id, changed, payload };
+    if (dashboardId === null || !(current.dashboards ?? []).includes(dashboardId)) changed.push('dashboard');
+    return { action: changed.length ? 'update' : 'unchanged', kind: 'insight', key: insight.key, name: insight.name, id: current.id, changed, payload };
   });
-  const untracked = existing.filter((entry) => !names.has(entry.name)).map((entry) => ({ action: 'not-in-file', name: entry.name, id: entry.id }));
-  return [...actions, ...untracked];
+  const untracked = existing
+    .filter((entry) => !names.has(entry.name))
+    .map((entry) => ({ action: 'not-in-file', kind: 'insight', name: entry.name, id: entry.id }));
+  return [dashboardStep, ...actions, ...untracked];
 }
 
 export function formatPlan(plan) {
@@ -83,10 +95,10 @@ export function formatPlan(plan) {
     const id = step.id === undefined ? '' : ` (id ${step.id})`;
     const changed = step.changed?.length ? ` [${step.changed.join(', ')}]` : '';
     const note = step.action === 'not-in-file' ? ' -- left alone' : '';
-    lines.push(`  ${step.action.padEnd(11)} ${step.name}${id}${changed}${note}`);
+    lines.push(`  ${step.action.padEnd(11)} ${step.kind.padEnd(9)} ${step.name}${id}${changed}${note}`);
   }
-  const count = (action) => plan.filter((step) => step.action === action).length;
-  lines.push(`${count('create')} to create, ${count('update')} to update, ${count('unchanged')} unchanged, ${count('not-in-file')} not in the file.`);
+  const count = (action) => plan.filter((step) => step.kind === 'insight' && step.action === action).length;
+  lines.push(`Insights: ${count('create')} to create, ${count('update')} to update, ${count('unchanged')} unchanged, ${count('not-in-file')} not in the file.`);
   return lines.join('\n');
 }
 
@@ -98,14 +110,13 @@ export function main(argv, { readFile = (file) => readFileSync(file, 'utf8'), lo
     return 2;
   }
   const at = argv.indexOf('--existing');
-  let existing = [];
+  let existing = {};
   if (at >= 0) {
     if (!argv[at + 1]) {
       error('--existing needs a file');
       return 2;
     }
-    const parsed = JSON.parse(readFile(argv[at + 1]));
-    existing = Array.isArray(parsed) ? parsed : parsed.results ?? [];
+    existing = JSON.parse(readFile(argv[at + 1]));
   }
   const plan = planSync(parseDashboardSql(readFile(SQL_PATH)), existing);
   log(argv.includes('--json') ? JSON.stringify(plan, null, 2) : formatPlan(plan));

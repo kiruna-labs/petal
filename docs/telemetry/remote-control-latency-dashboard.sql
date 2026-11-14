@@ -163,36 +163,36 @@ ORDER BY day, role
 -- name: RC latency: decision tile
 -- description: One row per option (a)/(b) threshold. INSUFFICIENT unless the rule's data covers >= 50 sessions over >= 14 calendar days; a missing stage is never read as 0.
 WITH stage_stats AS (
-  SELECT quantileExactLowIf(0.5)(toFloat(properties.photon_ms_p50), toFloat(properties.photon_ms_n) >= 5) AS photon_med,
-         uniqExactIf(properties.rc_session_id, toFloat(properties.photon_ms_n) >= 5) AS photon_sessions,
-         dateDiff('day', minIf(timestamp, toFloat(properties.photon_ms_n) >= 5), maxIf(timestamp, toFloat(properties.photon_ms_n) >= 5)) + 1 AS photon_days,
-         quantileExactLowIf(0.5)(toFloat(properties.input_leg_ms_p50), toFloat(properties.input_leg_ms_n) >= 5) AS input_leg_med,
-         uniqExactIf(properties.rc_session_id, toFloat(properties.input_leg_ms_n) >= 5) >= 50
-           AND dateDiff('day', minIf(timestamp, toFloat(properties.input_leg_ms_n) >= 5), maxIf(timestamp, toFloat(properties.input_leg_ms_n) >= 5)) + 1 >= 14 AS input_leg_ok,
-         quantileExactLowIf(0.5)(toFloat(properties.replay_inject_ms_p50), toFloat(properties.replay_inject_ms_n) >= 5) AS replay_inject_med,
-         uniqExactIf(properties.rc_session_id, toFloat(properties.replay_inject_ms_n) >= 5) >= 50
-           AND dateDiff('day', minIf(timestamp, toFloat(properties.replay_inject_ms_n) >= 5), maxIf(timestamp, toFloat(properties.replay_inject_ms_n) >= 5)) + 1 >= 14 AS replay_inject_ok,
-         quantileExactLowIf(0.5)(toFloat(properties.inject_to_capture_ms_p50), toFloat(properties.inject_to_capture_ms_n) >= 5) AS inject_to_capture_med,
-         uniqExactIf(properties.rc_session_id, toFloat(properties.inject_to_capture_ms_n) >= 5) >= 50
-           AND dateDiff('day', minIf(timestamp, toFloat(properties.inject_to_capture_ms_n) >= 5), maxIf(timestamp, toFloat(properties.inject_to_capture_ms_n) >= 5)) + 1 >= 14 AS inject_to_capture_ok,
-         quantileExactLowIf(0.5)(toFloat(properties.capture_to_encoded_ms_p50), toFloat(properties.capture_to_encoded_ms_n) >= 5) AS capture_to_encoded_med,
-         uniqExactIf(properties.rc_session_id, toFloat(properties.capture_to_encoded_ms_n) >= 5) >= 50
-           AND dateDiff('day', minIf(timestamp, toFloat(properties.capture_to_encoded_ms_n) >= 5), maxIf(timestamp, toFloat(properties.capture_to_encoded_ms_n) >= 5)) + 1 >= 14 AS capture_to_encoded_ok,
-         quantileExactLowIf(0.5)(toFloat(properties.encoded_to_packetized_ms_p50), toFloat(properties.encoded_to_packetized_ms_n) >= 5) AS encoded_to_packetized_med,
-         uniqExactIf(properties.rc_session_id, toFloat(properties.encoded_to_packetized_ms_n) >= 5) >= 50
-           AND dateDiff('day', minIf(timestamp, toFloat(properties.encoded_to_packetized_ms_n) >= 5), maxIf(timestamp, toFloat(properties.encoded_to_packetized_ms_n) >= 5)) + 1 >= 14 AS encoded_to_packetized_ok,
-         quantileExactLowIf(0.5)(toFloat(properties.video_net_ms_p50), toFloat(properties.video_net_ms_n) >= 5) AS video_net_med,
-         uniqExactIf(properties.rc_session_id, toFloat(properties.video_net_ms_n) >= 5) >= 50
-           AND dateDiff('day', minIf(timestamp, toFloat(properties.video_net_ms_n) >= 5), maxIf(timestamp, toFloat(properties.video_net_ms_n) >= 5)) + 1 >= 14 AS video_net_ok,
-         quantileExactLowIf(0.5)(toFloat(properties.jb_delay_ms_p50), toFloat(properties.jb_delay_ms_n) >= 5) AS jb_delay_med,
-         uniqExactIf(properties.rc_session_id, toFloat(properties.jb_delay_ms_n) >= 5) >= 50
-           AND dateDiff('day', minIf(timestamp, toFloat(properties.jb_delay_ms_n) >= 5), maxIf(timestamp, toFloat(properties.jb_delay_ms_n) >= 5)) + 1 >= 14 AS jb_delay_ok,
-         quantileExactLowIf(0.5)(toFloat(properties.decode_ms_p50), toFloat(properties.decode_ms_n) >= 5) AS decode_med,
-         uniqExactIf(properties.rc_session_id, toFloat(properties.decode_ms_n) >= 5) >= 50
-           AND dateDiff('day', minIf(timestamp, toFloat(properties.decode_ms_n) >= 5), maxIf(timestamp, toFloat(properties.decode_ms_n) >= 5)) + 1 >= 14 AS decode_ok,
-         quantileExactLowIf(0.5)(toFloat(properties.receive_to_present_ms_p50), toFloat(properties.receive_to_present_ms_n) >= 5) AS receive_to_present_med,
-         uniqExactIf(properties.rc_session_id, toFloat(properties.receive_to_present_ms_n) >= 5) >= 50
-           AND dateDiff('day', minIf(timestamp, toFloat(properties.receive_to_present_ms_n) >= 5), maxIf(timestamp, toFloat(properties.receive_to_present_ms_n) >= 5)) + 1 >= 14 AS receive_to_present_ok
+  SELECT quantileExactLowIf(0.5)(toFloat(properties.photon_ms_p50), (toFloat(properties.photon_ms_n) >= 5 AND toFloat(properties.photon_ms_p50) IS NOT NULL)) AS photon_med,
+         uniqExactIf(properties.rc_session_id, (toFloat(properties.photon_ms_n) >= 5 AND toFloat(properties.photon_ms_p50) IS NOT NULL)) AS photon_sessions,
+         dateDiff('day', minIf(timestamp, (toFloat(properties.photon_ms_n) >= 5 AND toFloat(properties.photon_ms_p50) IS NOT NULL)), maxIf(timestamp, (toFloat(properties.photon_ms_n) >= 5 AND toFloat(properties.photon_ms_p50) IS NOT NULL))) + 1 AS photon_days,
+         quantileExactLowIf(0.5)(toFloat(properties.input_leg_ms_p50), (toFloat(properties.input_leg_ms_n) >= 5 AND toFloat(properties.input_leg_ms_p50) IS NOT NULL)) AS input_leg_med,
+         (uniqExactIf(properties.rc_session_id, (toFloat(properties.input_leg_ms_n) >= 5 AND toFloat(properties.input_leg_ms_p50) IS NOT NULL)) >= 50
+           AND dateDiff('day', minIf(timestamp, (toFloat(properties.input_leg_ms_n) >= 5 AND toFloat(properties.input_leg_ms_p50) IS NOT NULL)), maxIf(timestamp, (toFloat(properties.input_leg_ms_n) >= 5 AND toFloat(properties.input_leg_ms_p50) IS NOT NULL))) + 1 >= 14) AS input_leg_ok,
+         quantileExactLowIf(0.5)(toFloat(properties.replay_inject_ms_p50), (toFloat(properties.replay_inject_ms_n) >= 5 AND toFloat(properties.replay_inject_ms_p50) IS NOT NULL)) AS replay_inject_med,
+         (uniqExactIf(properties.rc_session_id, (toFloat(properties.replay_inject_ms_n) >= 5 AND toFloat(properties.replay_inject_ms_p50) IS NOT NULL)) >= 50
+           AND dateDiff('day', minIf(timestamp, (toFloat(properties.replay_inject_ms_n) >= 5 AND toFloat(properties.replay_inject_ms_p50) IS NOT NULL)), maxIf(timestamp, (toFloat(properties.replay_inject_ms_n) >= 5 AND toFloat(properties.replay_inject_ms_p50) IS NOT NULL))) + 1 >= 14) AS replay_inject_ok,
+         quantileExactLowIf(0.5)(toFloat(properties.inject_to_capture_ms_p50), (toFloat(properties.inject_to_capture_ms_n) >= 5 AND toFloat(properties.inject_to_capture_ms_p50) IS NOT NULL)) AS inject_to_capture_med,
+         (uniqExactIf(properties.rc_session_id, (toFloat(properties.inject_to_capture_ms_n) >= 5 AND toFloat(properties.inject_to_capture_ms_p50) IS NOT NULL)) >= 50
+           AND dateDiff('day', minIf(timestamp, (toFloat(properties.inject_to_capture_ms_n) >= 5 AND toFloat(properties.inject_to_capture_ms_p50) IS NOT NULL)), maxIf(timestamp, (toFloat(properties.inject_to_capture_ms_n) >= 5 AND toFloat(properties.inject_to_capture_ms_p50) IS NOT NULL))) + 1 >= 14) AS inject_to_capture_ok,
+         quantileExactLowIf(0.5)(toFloat(properties.capture_to_encoded_ms_p50), (toFloat(properties.capture_to_encoded_ms_n) >= 5 AND toFloat(properties.capture_to_encoded_ms_p50) IS NOT NULL)) AS capture_to_encoded_med,
+         (uniqExactIf(properties.rc_session_id, (toFloat(properties.capture_to_encoded_ms_n) >= 5 AND toFloat(properties.capture_to_encoded_ms_p50) IS NOT NULL)) >= 50
+           AND dateDiff('day', minIf(timestamp, (toFloat(properties.capture_to_encoded_ms_n) >= 5 AND toFloat(properties.capture_to_encoded_ms_p50) IS NOT NULL)), maxIf(timestamp, (toFloat(properties.capture_to_encoded_ms_n) >= 5 AND toFloat(properties.capture_to_encoded_ms_p50) IS NOT NULL))) + 1 >= 14) AS capture_to_encoded_ok,
+         quantileExactLowIf(0.5)(toFloat(properties.encoded_to_packetized_ms_p50), (toFloat(properties.encoded_to_packetized_ms_n) >= 5 AND toFloat(properties.encoded_to_packetized_ms_p50) IS NOT NULL)) AS encoded_to_packetized_med,
+         (uniqExactIf(properties.rc_session_id, (toFloat(properties.encoded_to_packetized_ms_n) >= 5 AND toFloat(properties.encoded_to_packetized_ms_p50) IS NOT NULL)) >= 50
+           AND dateDiff('day', minIf(timestamp, (toFloat(properties.encoded_to_packetized_ms_n) >= 5 AND toFloat(properties.encoded_to_packetized_ms_p50) IS NOT NULL)), maxIf(timestamp, (toFloat(properties.encoded_to_packetized_ms_n) >= 5 AND toFloat(properties.encoded_to_packetized_ms_p50) IS NOT NULL))) + 1 >= 14) AS encoded_to_packetized_ok,
+         quantileExactLowIf(0.5)(toFloat(properties.video_net_ms_p50), (toFloat(properties.video_net_ms_n) >= 5 AND toFloat(properties.video_net_ms_p50) IS NOT NULL)) AS video_net_med,
+         (uniqExactIf(properties.rc_session_id, (toFloat(properties.video_net_ms_n) >= 5 AND toFloat(properties.video_net_ms_p50) IS NOT NULL)) >= 50
+           AND dateDiff('day', minIf(timestamp, (toFloat(properties.video_net_ms_n) >= 5 AND toFloat(properties.video_net_ms_p50) IS NOT NULL)), maxIf(timestamp, (toFloat(properties.video_net_ms_n) >= 5 AND toFloat(properties.video_net_ms_p50) IS NOT NULL))) + 1 >= 14) AS video_net_ok,
+         quantileExactLowIf(0.5)(toFloat(properties.jb_delay_ms_p50), (toFloat(properties.jb_delay_ms_n) >= 5 AND toFloat(properties.jb_delay_ms_p50) IS NOT NULL)) AS jb_delay_med,
+         (uniqExactIf(properties.rc_session_id, (toFloat(properties.jb_delay_ms_n) >= 5 AND toFloat(properties.jb_delay_ms_p50) IS NOT NULL)) >= 50
+           AND dateDiff('day', minIf(timestamp, (toFloat(properties.jb_delay_ms_n) >= 5 AND toFloat(properties.jb_delay_ms_p50) IS NOT NULL)), maxIf(timestamp, (toFloat(properties.jb_delay_ms_n) >= 5 AND toFloat(properties.jb_delay_ms_p50) IS NOT NULL))) + 1 >= 14) AS jb_delay_ok,
+         quantileExactLowIf(0.5)(toFloat(properties.decode_ms_p50), (toFloat(properties.decode_ms_n) >= 5 AND toFloat(properties.decode_ms_p50) IS NOT NULL)) AS decode_med,
+         (uniqExactIf(properties.rc_session_id, (toFloat(properties.decode_ms_n) >= 5 AND toFloat(properties.decode_ms_p50) IS NOT NULL)) >= 50
+           AND dateDiff('day', minIf(timestamp, (toFloat(properties.decode_ms_n) >= 5 AND toFloat(properties.decode_ms_p50) IS NOT NULL)), maxIf(timestamp, (toFloat(properties.decode_ms_n) >= 5 AND toFloat(properties.decode_ms_p50) IS NOT NULL))) + 1 >= 14) AS decode_ok,
+         quantileExactLowIf(0.5)(toFloat(properties.receive_to_present_ms_p50), (toFloat(properties.receive_to_present_ms_n) >= 5 AND toFloat(properties.receive_to_present_ms_p50) IS NOT NULL)) AS receive_to_present_med,
+         (uniqExactIf(properties.rc_session_id, (toFloat(properties.receive_to_present_ms_n) >= 5 AND toFloat(properties.receive_to_present_ms_p50) IS NOT NULL)) >= 50
+           AND dateDiff('day', minIf(timestamp, (toFloat(properties.receive_to_present_ms_n) >= 5 AND toFloat(properties.receive_to_present_ms_p50) IS NOT NULL)), maxIf(timestamp, (toFloat(properties.receive_to_present_ms_n) >= 5 AND toFloat(properties.receive_to_present_ms_p50) IS NOT NULL))) + 1 >= 14) AS receive_to_present_ok
   FROM events
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
@@ -214,7 +214,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
     WHERE event = 'remote_control_latency_summary'
       AND timestamp > now() - INTERVAL 14 DAY
       AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
-      AND toFloat(properties.input_leg_ms_n) >= 5
+      AND (toFloat(properties.input_leg_ms_n) >= 5 AND toFloat(properties.input_leg_ms_p50) IS NOT NULL)
     GROUP BY sid
   )
 
@@ -230,7 +230,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
-    AND toFloat(properties.input_leg_ms_n) >= 5
+    AND (toFloat(properties.input_leg_ms_n) >= 5 AND toFloat(properties.input_leg_ms_p95) IS NOT NULL)
 
   UNION ALL
 
@@ -266,16 +266,17 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
     FROM (
       SELECT properties.rc_session_id AS sid,
              quantileExactLow(0.5)(toFloat(properties.input_leg_ms_p50)) AS session_p50,
-             argMax(toString(properties.same_edge), timestamp) AS edge,
+             argMax(ifNull(toString(properties.same_edge), 'unknown'), timestamp) AS edge,
              min(timestamp) AS first_ts,
              max(timestamp) AS last_ts
       FROM events
       WHERE event = 'remote_control_latency_summary'
         AND timestamp > now() - INTERVAL 14 DAY
         AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
-        AND toFloat(properties.input_leg_ms_n) >= 5
-        AND properties.same_edge IN ('true', 'false')
+        AND (toFloat(properties.input_leg_ms_n) >= 5 AND toFloat(properties.input_leg_ms_p50) IS NOT NULL)
       GROUP BY sid
+      -- The latest interval decides; a session ending `unknown` is left out.
+      HAVING edge IN ('true', 'false')
     )
   )
 
@@ -291,7 +292,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
-    AND toFloat(properties.jb_delay_ms_n) >= 5
+    AND (toFloat(properties.jb_delay_ms_n) >= 5 AND toFloat(properties.jb_delay_ms_p50) IS NOT NULL)
 
   UNION ALL
 
@@ -306,7 +307,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
-    AND toFloat(properties.jb_target_ms_n) >= 5
+    AND (toFloat(properties.jb_target_ms_n) >= 5 AND toFloat(properties.jb_target_ms_p50) IS NOT NULL)
     AND properties.jb_min_ms IN ('1_19', '20_49', '50_99', '100_199')
 
   UNION ALL
@@ -321,7 +322,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
-    AND toFloat(properties.receive_to_present_ms_n) >= 5
+    AND (toFloat(properties.receive_to_present_ms_n) >= 5 AND toFloat(properties.receive_to_present_ms_p50) IS NOT NULL)
 
   UNION ALL
 
@@ -334,8 +335,8 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
          multiIf(NOT all_ok, 'INSUFFICIENT', value > 50, 'FIRES', 'CLEAR') AS fires
   FROM (
     SELECT *,
-           photon_sessions >= 50 AND photon_days >= 14 AND input_leg_ok AND replay_inject_ok AND inject_to_capture_ok
-             AND capture_to_encoded_ok AND encoded_to_packetized_ok AND video_net_ok AS all_ok
+           (photon_sessions >= 50 AND photon_days >= 14 AND input_leg_ok AND replay_inject_ok AND inject_to_capture_ok
+             AND capture_to_encoded_ok AND encoded_to_packetized_ok AND video_net_ok) AS all_ok
     FROM stage_stats
   )
 
@@ -351,7 +352,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
-    AND toFloat(properties.inject_to_capture_ms_n) >= 5
+    AND (toFloat(properties.inject_to_capture_ms_n) >= 5 AND toFloat(properties.inject_to_capture_ms_p50) IS NOT NULL)
 
   UNION ALL
 
@@ -368,9 +369,9 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
          multiIf(NOT photon_ok, 'INSUFFICIENT', value > 0.4, 'FIRES', every_ok, 'CLEAR', 'INSUFFICIENT') AS fires
   FROM (
     SELECT *,
-           photon_sessions >= 50 AND photon_days >= 14 AND photon_med > 0 AS photon_ok,
-           input_leg_ok AND replay_inject_ok AND inject_to_capture_ok AND capture_to_encoded_ok AND encoded_to_packetized_ok
-             AND video_net_ok AND jb_delay_ok AND decode_ok AND receive_to_present_ok AS every_ok
+           (photon_sessions >= 50 AND photon_days >= 14 AND photon_med > 0) AS photon_ok,
+           (input_leg_ok AND replay_inject_ok AND inject_to_capture_ok AND capture_to_encoded_ok AND encoded_to_packetized_ok
+             AND video_net_ok AND jb_delay_ok AND decode_ok AND receive_to_present_ok) AS every_ok
     FROM stage_stats
   )
 )

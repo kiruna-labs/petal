@@ -138,6 +138,21 @@ test('an absent stage is INSUFFICIENT, never a guessed 0', () => {
   // ...but a present stage over it still fires.
   assert.equal(verdicts(fleet({ controller: { video_net_ms: null, decode_ms: [40, 60] } })).stage_share_of_photon, 'FIRES');
 
+  // A stage with samples but no value for the percentile a rule reads.
+  const noP95 = fleet({ host: { input_leg_ms: [30, 70] } }).map((event) => {
+    const { input_leg_ms_p95: _drop, ...properties } = event.properties;
+    return { ...event, properties };
+  });
+  assert.equal(verdicts(noP95).a_input_leg_p95_fleet, 'INSUFFICIENT');
+
+  // A session whose latest edge is `unknown` is not classified from an older
+  // value: here every cross-edge session ends unknown.
+  const endsUnknown = fleet({
+    host: (s) => ({ input_leg_ms: s % 2 ? [19, 30] : [3, 10] }),
+    hostDims: (s, minute) => (s % 2 && minute === 1 ? { same_edge: 'unknown' } : {}),
+  });
+  assert.equal(verdicts(endsUnknown).a_cross_edge_penalty, 'INSUFFICIENT');
+
   // Fewer than 5 samples in an interval do not count.
   const thin = fleet({ controller: { jb_delay_ms: [35, 50] } }).map((event) =>
     event.properties.jb_delay_ms_n ? { ...event, properties: { ...event.properties, jb_delay_ms_n: 4 } } : event,
@@ -157,6 +172,8 @@ test('self-hosted SFUs, other events and old events are left out', () => {
   const selfHosted = fleet({ host: { input_leg_ms: [30, 70] }, extra: { self_hosted_sfu: 'true' } });
   assert.equal(verdicts([...fleet(), ...selfHosted]).a_input_leg_p95_fleet, 'CLEAR');
   assert.equal(verdicts(selfHosted).a_input_leg_p95_fleet, 'INSUFFICIENT');
+  const unnamed = fleet({ host: { input_leg_ms: [30, 70] } }).map(({ event: _name, ...rest }) => rest);
+  assert.equal(verdicts(unnamed).a_input_leg_p95_fleet, 'INSUFFICIENT');
   const other = fleet({ host: { input_leg_ms: [30, 70] } }).map((event) => ({ ...event, event: 'meeting_joined' }));
   assert.equal(verdicts(other).a_input_leg_p95_fleet, 'INSUFFICIENT');
   const old = fleet({ host: { input_leg_ms: [30, 70] } }).map((event) => ({ ...event, timestamp: Date.parse(event.timestamp) - 30 * DAY }));

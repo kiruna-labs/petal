@@ -3,11 +3,12 @@
 // `decision-tile` insight in docs/telemetry/remote-control-latency-dashboard.sql
 // (tests keep the rule ids and thresholds in lockstep with that SQL).
 //
-// Input: `remote_control_latency_summary` events as `{ timestamp, properties }`
-// (a PostHog export). One row per rule: FIRES, CLEAR, or INSUFFICIENT. A stage
-// with no data, or too few sessions or days behind it, is INSUFFICIENT, never
-// a guessed 0. Host and controller mint their own `rc_session_id`, so the two
-// sides cannot be joined; multi-stage rules compare fleet medians.
+// Input: PostHog events `{ event, timestamp, properties }`; only
+// `remote_control_latency_summary` counts. One row per rule: FIRES, CLEAR or
+// INSUFFICIENT. A stage with no data, or too few sessions or days behind it,
+// is INSUFFICIENT, never a guessed 0. Host and controller mint their own
+// `rc_session_id`, so the two sides cannot be joined; multi-stage rules
+// compare fleet medians.
 //
 // CLI: node scripts/ci/rc-latency-decision-tile.mjs <events.json> [--now <iso>]
 import { readFileSync } from 'node:fs';
@@ -68,8 +69,9 @@ function enough({ sessions, spanDays }) {
   return sessions >= MIN_SESSIONS && spanDays >= MIN_SPAN_DAYS;
 }
 
-function withStage(events, stage, minSamples = MIN_INTERVAL_SAMPLES) {
-  return events.filter((event) => (num(event.p[`${stage}_n`]) ?? 0) >= minSamples && num(event.p[`${stage}_p50`]) !== null);
+// Intervals with enough samples of `stage` AND a value for the field read.
+function withStage(events, stage, { field = 'p50', minSamples = MIN_INTERVAL_SAMPLES } = {}) {
+  return events.filter((event) => (num(event.p[`${stage}_n`]) ?? 0) >= minSamples && num(event.p[`${stage}_${field}`]) !== null);
 }
 
 // Fleet median of one stage's per-interval p50, or null when the stage lacks
@@ -87,7 +89,7 @@ function verdict(ok, fires) {
 
 function singleStageRule(stage, field, limit) {
   return (events) => {
-    const intervals = withStage(events, stage);
+    const intervals = withStage(events, stage, { field });
     const cov = coverage(intervals);
     const value = median(intervals.map((event) => num(event.p[`${stage}_${field}`])));
     return { value, ...cov, fires: verdict(enough(cov), value > limit) };
@@ -131,7 +133,7 @@ export const RULES = [
     evaluate(events) {
       // The detector ran in a minute that recorded input_excess_delay_ms;
       // input_stall_count is omitted when 0, so only those minutes count.
-      const minutes = withStage(events, 'input_excess_delay_ms', 1);
+      const minutes = withStage(events, 'input_excess_delay_ms', { minSamples: 1 });
       const value = minutes.length ? minutes.filter((event) => (num(event.p.input_stall_count) ?? 0) > 0).length / minutes.length : null;
       const cov = coverage(minutes);
       return { value, ...cov, fires: verdict(enough(cov), value > 0.1) };
@@ -143,14 +145,18 @@ export const RULES = [
     threshold: 'cross-edge minus same-edge session median input_leg_ms_p50 > 15 ms with > 30% cross-edge sessions',
     sql: ['value > 15', 'cross_share > 0.3'],
     evaluate(events) {
-      const intervals = withStage(events, 'input_leg_ms').filter((event) => ['true', 'false'].includes(String(event.p.same_edge)));
-      const sessions = new Map();
-      for (const event of [...intervals].sort((a, b) => a.ts - b.ts)) {
-        const entry = sessions.get(event.p.rc_session_id) ?? { values: [], edge: null };
+      // A session's edge is its latest interval's; one that ends `unknown`
+      // (or unset) is left out, never classified from an older value.
+      const all = new Map();
+      for (const event of [...withStage(events, 'input_leg_ms')].sort((a, b) => a.ts - b.ts)) {
+        const entry = all.get(event.p.rc_session_id) ?? { values: [], events: [], edge: null };
         entry.values.push(num(event.p.input_leg_ms_p50));
-        entry.edge = String(event.p.same_edge); // latest interval wins
-        sessions.set(event.p.rc_session_id, entry);
+        entry.events.push(event);
+        entry.edge = String(event.p.same_edge ?? 'unknown');
+        all.set(event.p.rc_session_id, entry);
       }
+      const sessions = new Map([...all].filter(([, entry]) => entry.edge === 'true' || entry.edge === 'false'));
+      const intervals = [...sessions.values()].flatMap((entry) => entry.events);
       const group = (edge) => [...sessions.values()].filter((entry) => entry.edge === edge).map((entry) => median(entry.values));
       const cross = group('false');
       const same = group('true');
@@ -248,7 +254,7 @@ export const RULES = [
 export function decisionEvents(events, { now = Date.now(), windowDays = WINDOW_DAYS } = {}) {
   const since = windowDays === null ? -Infinity : timeMs(now) - windowDays * DAY_MS;
   return (events ?? [])
-    .filter((event) => event && (event.event === undefined || event.event === EVENT_NAME))
+    .filter((event) => event?.event === EVENT_NAME)
     .map((event) => ({ ts: timeMs(event.timestamp), p: event.properties ?? {} }))
     .filter((event) => Number.isFinite(event.ts) && event.ts > since)
     .filter((event) => String(event.p.self_hosted_sfu) !== 'true');
