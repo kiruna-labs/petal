@@ -3,7 +3,8 @@
 //! Stage/dimension keys, histogram vectors and the summary log line are
 //! pinned by `contracts/petal-contracts.json` (`latencyHistogramVectors`,
 //! `remoteControlLatencySummary`). What lands with its first producer, not
-//! here: the TS mirror (#375), the Sentry degraded diagnostic (#371/#376).
+//! here: the Sentry degraded diagnostic (#371/#376). The TS mirror is
+//! `shared/logic/rcLatencyAggregator.ts` (#375); the web controller feeds it.
 //!
 //! Producers call only [`record_stage`], [`record_stage_with_max`], [`add_counter`] and
 //! [`set_dimension`]. The owner
@@ -196,11 +197,13 @@ closed_keys!(Stage {
     PubRttMs => "pub_rtt_ms",
     SubRttMs => "sub_rtt_ms",
     VideoNetMs => "video_net_ms",
+    CaptureToReceiveMs => "capture_to_receive_ms",
     JbDelayMs => "jb_delay_ms",
     JbTargetMs => "jb_target_ms",
     DecodeMs => "decode_ms",
     ProcessingMs => "processing_ms",
     ReceiveToPresentMs => "receive_to_present_ms",
+    CaptureToPresentMs => "capture_to_present_ms",
     PhotonMs => "photon_ms",
 });
 
@@ -212,19 +215,27 @@ closed_keys!(Dimension {
     IceProtocol => "ice_protocol",
     WindowCodec => "window_codec",
     ContentChange => "content_change",
+    JbMinMs => "jb_min_ms",
+    FrameMetadata => "frame_metadata",
 });
 
-const DIMENSION_COUNT: usize = 7;
+const DIMENSION_COUNT: usize = 9;
 
-// Sum-per-interval counters. A zero counter is never emitted.
+// Sum-per-interval counters. A zero counter is never emitted. The receive
+// counters (frames_dropped ..) are fed by the web controller today (#375).
 closed_keys!(Counter {
     InputStallCount => "input_stall_count",
+    FramesDropped => "frames_dropped",
+    FreezeCount => "freeze_count",
+    NackCount => "nack_count",
+    PliCount => "pli_count",
 });
 
 // Max-per-interval values that qualify the stage samples recorded with them.
 // Emitted whenever set, 0 included, but never make an interval emit alone.
 closed_keys!(MaxCounter {
     OffsetErrMs => "offset_err_ms",
+    PacketsLostPctX100 => "packets_lost_pct_x100",
 });
 
 impl Dimension {
@@ -237,6 +248,8 @@ impl Dimension {
             Self::IceProtocol => Some(&["udp", "tcp", "unknown"]),
             Self::WindowCodec => Some(&["h264", "h265", "vp8", "vp9", "av1", "unknown"]),
             Self::ContentChange => Some(&["detected", "unknown"]),
+            Self::FrameMetadata => Some(&["available", "unavailable"]),
+            Self::JbMinMs => Some(&["0", "1_19", "20_49", "50_99", "100_199", "200_plus"]),
         }
     }
 
@@ -595,6 +608,7 @@ mod tests {
         max_events_per_session: u32,
         log_prefix: String,
         example: Example,
+        controller_example: Example,
     }
 
     #[derive(Deserialize)]
@@ -616,6 +630,8 @@ mod tests {
         stages: serde_json::Map<String, serde_json::Value>,
         #[serde(default)]
         counters: serde_json::Map<String, serde_json::Value>,
+        #[serde(default)]
+        max_counters: serde_json::Map<String, serde_json::Value>,
         dimensions: serde_json::Map<String, serde_json::Value>,
     }
 
@@ -717,11 +733,9 @@ mod tests {
         assert_eq!(contract.log_prefix, LOG_PREFIX);
     }
 
-    #[test]
-    fn example_summary_renders_the_contract_properties_and_log_line() {
-        let example = fixture().summary.example;
+    fn render_example(example: Example, role: RcRole) {
         let input = example.summary;
-        assert_eq!(input.role, RcRole::Host.key());
+        assert_eq!(input.role, role.key());
         let stats = |value: &serde_json::Value| HistogramStats {
             p50: value["p50"].as_u64().unwrap() as u32,
             p95: value["p95"].as_u64().unwrap() as u32,
@@ -729,11 +743,11 @@ mod tests {
             n: value["n"].as_u64().unwrap() as u32,
         };
         let summary = Summary {
-            role: RcRole::Host,
+            role,
             rc_session_id: input.rc_session_id,
             interval_s: input.interval_s,
             is_final: input.is_final,
-            // Summaries hold stages in schema order (serde_json's Map is sorted).
+            // Summaries hold keys in schema order (serde_json's Map is sorted).
             stages: Stage::ALL
                 .iter()
                 .filter_map(|stage| Some((*stage, stats(input.stages.get(stage.key())?))))
@@ -742,7 +756,10 @@ mod tests {
                 .iter()
                 .filter_map(|c| Some((*c, input.counters.get(c.key())?.as_u64()?)))
                 .collect(),
-            max_counters: vec![],
+            max_counters: MaxCounter::ALL
+                .iter()
+                .filter_map(|c| Some((*c, input.max_counters.get(c.key())?.as_u64()?)))
+                .collect(),
             dimensions: Dimension::ALL
                 .iter()
                 .filter_map(|d| {
@@ -755,6 +772,14 @@ mod tests {
         assert_eq!(properties, example.properties);
         // The log line pins key order as well as values.
         assert_eq!(summary.log_line(), example.log_line);
+    }
+
+    #[test]
+    fn example_summary_renders_the_contract_properties_and_log_line() {
+        let contract = fixture().summary;
+        render_example(contract.example, RcRole::Host);
+        // #375: the web controller's keys render identically on both sides.
+        render_example(contract.controller_example, RcRole::Controller);
         let empty = summary_with(vec![(Stage::PhotonMs, HistogramStats { p50: 0, p95: 0, max: 0, n: 0 })]);
         assert!(!empty.log_line().contains("photon_ms"), "an n = 0 stage is never rendered");
     }

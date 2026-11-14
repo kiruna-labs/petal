@@ -14,6 +14,7 @@ import {
   type RemoteControlModifiers
 } from './trackNames.ts';
 import { remoteControlInputRttMs } from '@petal/shared/logic/remoteControlTiming';
+import { ClockWindows, estimatePeerToLocalOffsetMs, type ClockEstimate } from './latencyProbeClock.ts';
 import { canonicalRemoteControlFingerprint, decodeRemoteControlHotPath, newRemoteControlInputId, parseRemoteControlJson, remoteControlGrantEnvelopeIsValid, remoteControlPublishOptions } from './remoteControl.ts';
 import {
   decodePhotonSentinelFrame,
@@ -177,6 +178,8 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
   }>();
   const outstandingLatencyProbes = new Map<string, Map<number, number>>();
   const latencyProbeMetrics: HarnessLatencyProbeMetric[] = [];
+  // #375: host clock offsets for the controller's capture-to-present stage.
+  const peerClocks = new ClockWindows();
   let latencyProbeTimer: ReturnType<typeof setInterval> | null = null;
   let latencyProbeSeq = 0;
   let completedClickReplay: HarnessCompletedClickReplay | null = null;
@@ -1309,7 +1312,17 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
 
     const sentAt = takeOutstandingLatencyProbe(senderIdentity, parsed.probeId);
     if (sentAt === undefined) return;
-    const rttMs = Math.max(0, Date.now() - sentAt);
+    const receivedAt = Date.now();
+    const rttMs = Math.max(0, receivedAt - sentAt);
+    if (parsed.receiverReceiveTimeMs !== undefined && parsed.receiverSendTimeMs !== undefined) {
+      const offsetMs = estimatePeerToLocalOffsetMs(
+        sentAt,
+        parsed.receiverReceiveTimeMs,
+        parsed.receiverSendTimeMs,
+        receivedAt
+      );
+      if (offsetMs !== null) peerClocks.record(senderIdentity, offsetMs, rttMs, receivedAt);
+    }
     latencyProbeMetrics.push({
       probeId: parsed.probeId,
       peerIdentity: senderIdentity,
@@ -1334,6 +1347,11 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
       latencyProbeTimer = null;
     }
     outstandingLatencyProbes.clear();
+    peerClocks.clear();
+  }
+
+  function peerClockEstimate(peerIdentity: string, nowMs = Date.now()): ClockEstimate | null {
+    return peerClocks.estimate(peerIdentity, nowMs);
   }
 
   function resetRemoteControlSession() {
@@ -1475,6 +1493,7 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
     handleLatencyProbePayload,
     startLatencyProbe,
     stopLatencyProbe,
+    peerClockEstimate,
     resetRemoteControlSession,
     enableRemoteControlHostEmulation,
     remoteControlHostLedger

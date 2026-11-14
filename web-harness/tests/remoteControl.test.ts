@@ -1153,6 +1153,36 @@ test('latency probe handler records RTT only for locally generated probes', asyn
   assert.ok(metrics[0].rttMs >= 0);
 });
 
+test('a timestamped pong gives the controller a host clock offset; stopping the probe drops it', () => {
+  const ctx = remoteControlContext(() => Promise.resolve(), () => {}, ['native-1']);
+  const api = setupHarnessApi(ctx, {
+    nextRemoteControlSeq: () => 1,
+    publishRemoteControl: () => Promise.resolve(),
+    startRemoteControl: () => {},
+    stopRemoteControl: () => {}
+  });
+  const ping = ctx.hook.latencyProbe?.ping();
+  assert.ok(ping);
+  // The host clock runs 250 ms ahead of ours.
+  const hostNow = Date.now() + 250;
+  api.handleLatencyProbePayload(
+    encodeJson({
+      ...ping,
+      kind: 'pong',
+      senderId: 'native-1',
+      receiverReceiveTimeMs: hostNow,
+      receiverSendTimeMs: hostNow
+    } satisfies LatencyProbeMessage),
+    'native-1'
+  );
+  const estimate = api.peerClockEstimate('native-1');
+  assert.ok(estimate);
+  assert.ok(Math.abs(estimate.offsetMs + 250) <= estimate.errMs + 1, `offset ${estimate.offsetMs}`);
+  assert.equal(api.peerClockEstimate('native-2'), null);
+  api.stopLatencyProbe();
+  assert.equal(api.peerClockEstimate('native-1'), null);
+});
+
 test('latency probe records RTT samples for three targeted peers independently', async () => {
   const published: Array<{ message: LatencyProbeMessage; options: Record<string, unknown> }> = [];
   const peerIdentities = ['native-1', 'native-2', 'native-3'];

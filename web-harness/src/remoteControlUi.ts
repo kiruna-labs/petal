@@ -32,6 +32,12 @@ import {
   nextLocalEchoRippleId,
   type EchoPoint,
 } from '@petal/shared/logic/localEcho';
+import { RcLatencyAggregator, rcLatencySummaryLogLine } from '@petal/shared/logic/rcLatencyAggregator';
+import { remoteControlLatencySummary } from './analytics.ts';
+import { browserSupportsFrameMetadata, createRcReceiverTiming, type RcReceiverTarget } from './rcReceiverTiming.ts';
+
+/** #375: control-state reconcile and receiver stats poll period. */
+export const RC_LATENCY_SYNC_MS = 1000;
 
 const remoteControlEncoder = new TextEncoder();
 
@@ -77,6 +83,44 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
   }>();
   const resultFeedbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pendingDiscreteTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  // #375: controller latency summary. Reconciled every second against the live
+  // grant (authority, not event order) so every stop path ends the session; the
+  // grant and release sites also sync at once so no frame lands after release.
+  const rcLatency = new RcLatencyAggregator('controller', {
+    emit: (summary) => {
+      logEvent(rcLatencySummaryLogLine(summary));
+      remoteControlLatencySummary(summary);
+    },
+  });
+  const receiverTiming = createRcReceiverTiming({
+    aggregator: rcLatency,
+    clock: (hostIdentity, nowMs) => ctx.cb.peerClockEstimate?.(hostIdentity, nowMs) ?? null,
+    publisherStats: async () => (await state.room?.engine?.pcManager?.publisher?.getStats?.()) ?? null,
+    frameMetadataSupported: () => browserSupportsFrameMetadata(state.frameMetadataWorker),
+  });
+
+  function controlledReceiverTarget(): RcReceiverTarget | null {
+    const active = state.activeRemoteControl;
+    const room = state.room;
+    if (!active || !room || typeof document === 'undefined') return null;
+    const tile = document.getElementById?.(active.tileId);
+    const video = tile?.querySelector?.('video');
+    const trackSid = tile?.dataset.trackSid;
+    if (!video || !trackSid || tile?.dataset.owner !== active.targetUserId) return null;
+    const track = room.remoteParticipants.get(active.targetUserId)?.trackPublications?.get(trackSid)?.track;
+    if (!track || track.kind !== 'video') return null;
+    return { hostIdentity: active.targetUserId, track, video };
+  }
+
+  function syncRcLatency() {
+    const active = Boolean(state.room && state.activeRemoteControl?.grantToken);
+    // Monotonic, like Rust's Instant: a wall-clock step must not skew the cadence.
+    rcLatency.sync(active, performance.now());
+    void receiverTiming.sync(active ? controlledReceiverTarget() : null);
+  }
+  const rcLatencyTimer = setInterval(syncRcLatency, RC_LATENCY_SYNC_MS);
+  (rcLatencyTimer as { unref?: () => void }).unref?.();
 
   function nextRemoteControlSeq(): number {
     state.remoteControlSeq =
@@ -440,6 +484,7 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
     ) {
       if (typeof message.grantToken === 'string') {
         active.grantToken = message.grantToken;
+        syncRcLatency();
       }
       if (message.controlSessionId) {
         active.controlSessionId = message.controlSessionId;
@@ -496,6 +541,7 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
         clearLocalEcho(document.getElementById(active.tileId) as HTMLDivElement | null);
       }
       state.activeRemoteControl = null;
+      syncRcLatency();
       updateRemoteControlAffordances();
     }
     const tile = tileForRemoteControlStatus(message);
@@ -789,6 +835,7 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
     }
     composingTiles.delete(stopped.tileId);
     state.activeRemoteControl = null;
+    syncRcLatency();
     updateRemoteControlAffordances();
     const stoppedTile =
       typeof document !== 'undefined' && typeof document.getElementById === 'function'

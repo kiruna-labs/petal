@@ -39,8 +39,8 @@ const tiles = readFileSync(new URL('../src/tiles.ts', import.meta.url), 'utf8');
 const pipelineStats = readFileSync(new URL('../src/pipelineStats.ts', import.meta.url), 'utf8');
 const pkg = readFileSync(new URL('../package.json', import.meta.url), 'utf8');
 
-test('closed allowlist is twelve names and never posthog-js', () => {
-  assert.equal(EVENT_NAMES.length, 12);
+test('closed allowlist is thirteen names and never posthog-js', () => {
+  assert.equal(EVENT_NAMES.length, 13);
   assert.doesNotMatch(pkg, /posthog-js/);
   assert.doesNotMatch(pkg, /"posthog"/);
   assert.match(analyticsSrc, /VITE_PETAL_POSTHOG_KEY/);
