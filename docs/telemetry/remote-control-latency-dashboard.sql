@@ -197,6 +197,7 @@ WITH stage_stats AS (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
+    AND ifNull(toString(properties.rc_session_id), '') != ''
 )
 SELECT rule, value, threshold, sessions, span_days, fires FROM (
   SELECT 'a_input_leg_p50_share' AS rule,
@@ -214,6 +215,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
     WHERE event = 'remote_control_latency_summary'
       AND timestamp > now() - INTERVAL 14 DAY
       AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
+      AND ifNull(toString(properties.rc_session_id), '') != ''
       AND (toFloat(properties.input_leg_ms_n) >= 5 AND toFloat(properties.input_leg_ms_p50) IS NOT NULL)
     GROUP BY sid
   )
@@ -230,6 +232,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
+    AND ifNull(toString(properties.rc_session_id), '') != ''
     AND (toFloat(properties.input_leg_ms_n) >= 5 AND toFloat(properties.input_leg_ms_p95) IS NOT NULL)
 
   UNION ALL
@@ -244,6 +247,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
+    AND ifNull(toString(properties.rc_session_id), '') != ''
     AND toFloat(properties.input_excess_delay_ms_n) >= 1
 
   UNION ALL
@@ -273,6 +277,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
       WHERE event = 'remote_control_latency_summary'
         AND timestamp > now() - INTERVAL 14 DAY
         AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
+        AND ifNull(toString(properties.rc_session_id), '') != ''
         AND (toFloat(properties.input_leg_ms_n) >= 5 AND toFloat(properties.input_leg_ms_p50) IS NOT NULL)
       GROUP BY sid
       -- The latest interval decides; a session ending `unknown` is left out.
@@ -292,6 +297,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
+    AND ifNull(toString(properties.rc_session_id), '') != ''
     AND (toFloat(properties.jb_delay_ms_n) >= 5 AND toFloat(properties.jb_delay_ms_p50) IS NOT NULL)
 
   UNION ALL
@@ -307,6 +313,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
+    AND ifNull(toString(properties.rc_session_id), '') != ''
     AND (toFloat(properties.jb_target_ms_n) >= 5 AND toFloat(properties.jb_target_ms_p50) IS NOT NULL)
     AND properties.jb_min_ms IN ('1_19', '20_49', '50_99', '100_199')
 
@@ -322,6 +329,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
+    AND ifNull(toString(properties.rc_session_id), '') != ''
     AND (toFloat(properties.receive_to_present_ms_n) >= 5 AND toFloat(properties.receive_to_present_ms_p50) IS NOT NULL)
 
   UNION ALL
@@ -352,6 +360,7 @@ SELECT rule, value, threshold, sessions, span_days, fires FROM (
   WHERE event = 'remote_control_latency_summary'
     AND timestamp > now() - INTERVAL 14 DAY
     AND ifNull(toString(properties.self_hosted_sfu), '') != 'true'
+    AND ifNull(toString(properties.rc_session_id), '') != ''
     AND (toFloat(properties.inject_to_capture_ms_n) >= 5 AND toFloat(properties.inject_to_capture_ms_p50) IS NOT NULL)
 
   UNION ALL

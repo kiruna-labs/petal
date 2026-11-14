@@ -199,6 +199,9 @@ test('rule ids and thresholds match the SQL decision tile', () => {
     assert.ok(segment.includes("'INSUFFICIENT'"), `${rule.rule}: no INSUFFICIENT branch`);
   }
   for (const constant of ['>= 50', '>= 14', '>= 5']) assert.ok(tile.query.includes(constant), constant);
+  // Like the JS evaluator, every scan drops rows with no session id.
+  const scans = tile.query.match(/FROM events\b/g).length;
+  assert.equal(tile.query.split("ifNull(toString(properties.rc_session_id), '') != ''").length - 1, scans);
 });
 
 test('the CLI prints the rule table for an events file', () => {
