@@ -113,7 +113,10 @@ Native: `rc_latency_telemetry.rs`. The host is fed by the replay stages
 head-of-line stall detector in `rc_input_timing.rs` (`input_excess_delay_ms`,
 `input_stall_count`), and the offset-corrected one-way input leg
 (`input_leg_ms`, `input_leg_lossy_ms`, `offset_err_ms`); the controller by
-`input_rtt_ms` (#371). Web (#375): `shared/logic/rcLatencyAggregator.ts`,
+`input_rtt_ms` (#371) and, for the window it controls, the receive path
+in `rc_receiver_timing.rs` (#374): `capture_to_receive_ms`, `decode_ms`, the
+stats-delta stages and counters, `sub_rtt_ms` and the estimated
+`receive_to_present_ms`. Web (#375): `shared/logic/rcLatencyAggregator.ts`,
 fed by the web controller's receive path for the controlled window only
 (`web-harness/src/rcReceiverTiming.ts`): the stats-delta stages and counters,
 `sub_rtt_ms` / `pub_rtt_ms`, `receive_to_present_ms`, and the probe-offset
@@ -141,9 +144,10 @@ dashboard".
 | `final` | boolean | The partial emitted when control ended |
 | `<stage>_p50`, `<stage>_p95`, `<stage>_max`, `<stage>_n` | integer ms / count | Per stage: `input_leg_ms`, `input_leg_lossy_ms`, `input_rtt_ms`, `input_excess_delay_ms`, `replay_inject_ms`, `replay_complete_ms`, `inject_to_capture_ms`, `capture_interval_ms`, `capture_to_encoded_ms`, `encoded_to_packetized_ms`, `pub_rtt_ms`, `sub_rtt_ms`, `video_net_ms`, `capture_to_receive_ms`, `jb_delay_ms`, `jb_target_ms`, `decode_ms`, `processing_ms`, `receive_to_present_ms`, `capture_to_present_ms`, `photon_ms`. A stage with no samples is omitted, never sent as 0. |
 | `input_stall_count` | integer | Sum over the interval (#371): ordered controller inputs that arrived more than 50 ms later than their send spacing while the controller was actively sending. Omitted when 0; an interval with only a non-zero counter still emits. |
-| `frames_dropped`, `freeze_count`, `nack_count`, `pli_count` | integer | Sum over the interval (#375): the controlled window's inbound-rtp counter deltas. Omitted when 0; a counter that went backwards (resubscribe) contributes nothing. |
-| `offset_err_ms` | integer ms | Max over the interval (#371): the clock-offset error bound (half the best probe round trip) of the offset-corrected samples (`input_leg_ms` / `input_leg_lossy_ms` on the host, `capture_to_receive_ms` / `capture_to_present_ms` on the web controller). Sent whenever such a sample was recorded, 0 included; never emits an interval on its own. |
-| `packets_lost_pct_x100` | integer | Max over the interval (#375): the worst 1 s packet loss on the controlled window, in hundredths of a percent. Never emits an interval on its own. |
+| `frames_dropped`, `freeze_count`, `nack_count`, `pli_count` | integer | Sum over the interval (#375, native #374): the controlled window's inbound-rtp counter deltas. Omitted when 0; a counter that went backwards (resubscribe) contributes nothing. |
+| `freeze_duration_ms` | integer ms | Sum over the interval (#374): Δ`totalFreezesDuration` of the controlled window, rounded. Omitted when 0. |
+| `offset_err_ms` | integer ms | Max over the interval (#371): the clock-offset error bound (half the best probe round trip) of the offset-corrected samples (`input_leg_ms` / `input_leg_lossy_ms` on the host, `capture_to_receive_ms` / `capture_to_present_ms` on the web controller, `capture_to_receive_ms` on the native controller, #374). Sent whenever such a sample was recorded, 0 included; never emits an interval on its own. |
+| `packets_lost_pct_x100` | integer | Max over the interval (#375, native #374): the worst 1 s packet loss on the controlled window, in hundredths of a percent. Never emits an interval on its own. |
 | `lk_region` | token | SFU edge region (coarse, not the user's location); `unknown` for a self-hosted SFU; removed from the session if a reconnect's server sends no info (#372) |
 | `same_edge`, `self_hosted_sfu` | `true` \| `false` \| `unknown` | `same_edge` compares the two sides' salted node hashes (`lkNodeHash`, never the node id); `self_hosted_sfu` is `false` only for a `*.livekit.cloud` URL (#372) |
 | `ice_candidate_type` | `host` \| `srflx` \| `prflx` \| `relay` \| `unknown` | Local candidate of the selected pair, worst of the publisher and subscriber PCs, resampled every 10 s and right after a reconnect; `unknown` while no pair is selected or a reconnect awaits its first sample (#372) |
@@ -151,15 +155,16 @@ dashboard".
 | `window_codec` | `h264` \| `h265` \| `vp8` \| `vp9` \| `av1` \| `unknown` | |
 | `content_change` | `detected` \| `unknown` | |
 | `jb_min_ms` | `0` \| `1_19` \| `20_49` \| `50_99` \| `100_199` \| `200_plus` | Bucket of the latest 1 s average of the controlled window's `jitterBufferMinimumDelay` (#374/#375). A bucket, never raw ms. |
-| `frame_metadata` | `available` \| `unavailable` | Whether the host's capture stamp could be joined to presented frames (#375). `unavailable` without the worker or an encoded-transform API, or until the first frame joins. |
+| `frame_metadata` | `available` \| `unavailable` | Whether the host's capture stamp could be joined to presented frames (#375). `unavailable` without the worker or an encoded-transform API, or until the first frame joins. Native (#374): `available` once a timing event carried the capture stamp. |
+| `present_timing` | `estimated` | Native controller only (#374): `receive_to_present_ms` is the compositor hand-off plus one display refresh, not a measured present. |
 
 Dimensions appear only once a producer sets them. Histograms are fixed
 log-spaced buckets (about 5%) over 0-5000 ms; percentiles are nearest-rank.
 Every send passes the single consent check (#377's usage-stats opt-out):
 `usage_stats_enabled()` in `analytics.rs`, `usageStatsEnabled()` in the web
 `analytics.ts`.
-Native receive counters (#374) and the Sentry `remote-control-latency-degraded`
-diagnostic (#371/#376) are added to this table with their producers. Do not map
+The Sentry `remote-control-latency-degraded` diagnostic (#371/#376) is added
+to this table with its producer. Do not map
 `log::error!` onto these; emit from the same call sites that today `warn!`
 the watchdog, once per transition, with the buckets above.
 

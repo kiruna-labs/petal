@@ -2958,6 +2958,9 @@
       "frame_metadata": [
         "available",
         "unavailable"
+      ],
+      "present_timing": [
+        "estimated"
       ]
     },
     "counters": [
@@ -2965,7 +2968,8 @@
       "frames_dropped",
       "freeze_count",
       "nack_count",
-      "pli_count"
+      "pli_count",
+      "freeze_duration_ms"
     ],
     "maxCounters": [
       "offset_err_ms",
@@ -3134,6 +3138,7 @@
         "framesDecoded": 100,
         "framesDropped": 2,
         "freezeCount": 0,
+        "totalFreezesDuration": 0.5,
         "nackCount": 5,
         "pliCount": 1,
         "packetsLost": 10,
@@ -3149,6 +3154,7 @@
         "framesDecoded": 130,
         "framesDropped": 3,
         "freezeCount": 1,
+        "totalFreezesDuration": 0.75,
         "nackCount": 9,
         "pliCount": 1,
         "packetsLost": 12,
@@ -3162,6 +3168,7 @@
         "processing_ms": 40,
         "frames_dropped": 1,
         "freeze_count": 1,
+        "freeze_duration_ms": 250,
         "nack_count": 4,
         "pli_count": 0,
         "packets_lost_pct_x100": 100
@@ -3179,6 +3186,7 @@
         "framesDecoded": 100,
         "framesDropped": 2,
         "freezeCount": 0,
+        "totalFreezesDuration": 0.5,
         "nackCount": 5,
         "pliCount": 1,
         "packetsLost": 10,
@@ -3194,6 +3202,7 @@
         "framesDecoded": 100,
         "framesDropped": 2,
         "freezeCount": 0,
+        "totalFreezesDuration": 0.5,
         "nackCount": 5,
         "pliCount": 1,
         "packetsLost": 10,
@@ -3207,6 +3216,7 @@
         "processing_ms": null,
         "frames_dropped": 0,
         "freeze_count": 0,
+        "freeze_duration_ms": 0,
         "nack_count": 0,
         "pli_count": 0,
         "packets_lost_pct_x100": null
@@ -3224,6 +3234,7 @@
         "framesDecoded": 900,
         "framesDropped": 20,
         "freezeCount": 3,
+        "totalFreezesDuration": 2.0,
         "nackCount": 40,
         "pliCount": 4,
         "packetsLost": 50,
@@ -3239,6 +3250,7 @@
         "framesDecoded": 15,
         "framesDropped": 0,
         "freezeCount": 0,
+        "totalFreezesDuration": 0.0,
         "nackCount": 1,
         "pliCount": 1,
         "packetsLost": 0,
@@ -3252,6 +3264,7 @@
         "processing_ms": null,
         "frames_dropped": null,
         "freeze_count": null,
+        "freeze_duration_ms": null,
         "nack_count": null,
         "pli_count": null,
         "packets_lost_pct_x100": null
@@ -3282,6 +3295,7 @@
         "framesDecoded": 130,
         "framesDropped": 3,
         "freezeCount": 1,
+        "totalFreezesDuration": 0.75,
         "nackCount": 9,
         "pliCount": 1,
         "packetsLost": 12,
@@ -3295,6 +3309,7 @@
         "processing_ms": null,
         "frames_dropped": 1,
         "freeze_count": 1,
+        "freeze_duration_ms": null,
         "nack_count": 4,
         "pli_count": 0,
         "packets_lost_pct_x100": 100
@@ -3312,6 +3327,7 @@
         "framesDecoded": 100,
         "framesDropped": 2,
         "freezeCount": 0,
+        "totalFreezesDuration": 0.5,
         "nackCount": 5,
         "pliCount": 1,
         "packetsLost": 10,
@@ -3327,6 +3343,7 @@
         "framesDecoded": 130,
         "framesDropped": 2,
         "freezeCount": 0,
+        "totalFreezesDuration": 0.5,
         "nackCount": 5,
         "pliCount": 1,
         "packetsLost": 8,
@@ -3340,6 +3357,7 @@
         "processing_ms": 40,
         "frames_dropped": 0,
         "freeze_count": 0,
+        "freeze_duration_ms": 0,
         "nack_count": 0,
         "pli_count": 0,
         "packets_lost_pct_x100": 0
@@ -3357,6 +3375,7 @@
         "framesDecoded": 100,
         "framesDropped": 2,
         "freezeCount": 0,
+        "totalFreezesDuration": 0.5,
         "nackCount": 5,
         "pliCount": 1,
         "packetsLost": 10,
@@ -3372,6 +3391,7 @@
         "framesDecoded": 130,
         "framesDropped": 2,
         "freezeCount": 0,
+        "totalFreezesDuration": 0.5,
         "nackCount": 5,
         "pliCount": 1,
         "packetsLost": 11,
@@ -3385,6 +3405,7 @@
         "processing_ms": 40,
         "frames_dropped": 0,
         "freeze_count": 0,
+        "freeze_duration_ms": 0,
         "nack_count": 0,
         "pli_count": 0,
         "packets_lost_pct_x100": 3333

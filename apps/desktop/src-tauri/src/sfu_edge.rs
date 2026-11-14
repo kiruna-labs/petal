@@ -164,10 +164,12 @@ fn protocol_rank(value: &str) -> u8 {
     }
 }
 
-/// The selected pair's local candidate on one peer connection: the
-/// transport's `selectedCandidatePairId`, else a nominated succeeded pair.
-/// A relay's latency-relevant protocol is the client-to-TURN leg.
-pub(crate) fn selected_ice_path(stats: &[RtcStats]) -> Option<IcePath> {
+/// One peer connection's selected candidate pair: the transport's
+/// `selectedCandidatePairId`, else a nominated succeeded pair. Shared with
+/// `rc_receiver_timing`'s `sub_rtt_ms` (#374).
+pub(crate) fn selected_candidate_pair(
+    stats: &[RtcStats],
+) -> Option<&livekit::webrtc::stats::dictionaries::CandidatePairStats> {
     use livekit::webrtc::stats::IceCandidatePairState;
     let pairs: HashMap<&str, &livekit::webrtc::stats::dictionaries::CandidatePairStats> = stats
         .iter()
@@ -176,7 +178,7 @@ pub(crate) fn selected_ice_path(stats: &[RtcStats]) -> Option<IcePath> {
             _ => None,
         })
         .collect();
-    let selected = stats
+    stats
         .iter()
         .find_map(|s| match s {
             RtcStats::Transport(t) => pairs
@@ -188,7 +190,13 @@ pub(crate) fn selected_ice_path(stats: &[RtcStats]) -> Option<IcePath> {
             pairs.values().copied().find(|p| {
                 p.nominated && p.state == Some(IceCandidatePairState::Succeeded)
             })
-        })?;
+        })
+}
+
+/// The selected pair's local candidate on one peer connection.
+/// A relay's latency-relevant protocol is the client-to-TURN leg.
+pub(crate) fn selected_ice_path(stats: &[RtcStats]) -> Option<IcePath> {
+    let selected = selected_candidate_pair(stats)?;
     let local = stats.iter().find_map(|s| match s {
         RtcStats::LocalCandidate(c) if c.rtc.id == selected.local_candidate_id => {
             Some(&c.local_candidate)

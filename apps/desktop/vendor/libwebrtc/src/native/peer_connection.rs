@@ -414,14 +414,8 @@ impl PeerConnection {
         self.sys_handle.get_stats(ctx, |ctx, stats| {
             let tx = ctx.0.downcast::<oneshot::Sender<Result<Vec<RtcStats>, RtcError>>>().unwrap();
 
-            if stats.is_empty() {
-                let _ = tx.send(Ok(vec![]));
-                return;
-            }
-
-            // Unwrap because it should not happens
-            let vec = serde_json::from_str(&stats).unwrap();
-            let _ = tx.send(Ok(vec));
+            // PETAL PATCH (#374): never unwrap a report parse in this callback.
+            let _ = tx.send(crate::stats::parse_stats_report(&stats));
         });
 
         rx.await.map_err(|_| RtcError {

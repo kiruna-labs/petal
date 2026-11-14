@@ -154,7 +154,7 @@ impl LatencyHistogram {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RcRole {
     Host,
-    /// #371: the controlling side; today only `input_rtt_ms`.
+    /// #371: the controlling side (`input_rtt_ms`, #374 receive path).
     Controller,
 }
 
@@ -217,18 +217,21 @@ closed_keys!(Dimension {
     ContentChange => "content_change",
     JbMinMs => "jb_min_ms",
     FrameMetadata => "frame_metadata",
+    PresentTiming => "present_timing",
 });
 
-const DIMENSION_COUNT: usize = 9;
+const DIMENSION_COUNT: usize = 10;
 
 // Sum-per-interval counters. A zero counter is never emitted. The receive
-// counters (frames_dropped ..) are fed by the web controller today (#375).
+// counters (frames_dropped ..) come from the web (#375) and native (#374)
+// controllers.
 closed_keys!(Counter {
     InputStallCount => "input_stall_count",
     FramesDropped => "frames_dropped",
     FreezeCount => "freeze_count",
     NackCount => "nack_count",
     PliCount => "pli_count",
+    FreezeDurationMs => "freeze_duration_ms",
 });
 
 // Max-per-interval values that qualify the stage samples recorded with them.
@@ -249,6 +252,9 @@ impl Dimension {
             Self::WindowCodec => Some(&["h264", "h265", "vp8", "vp9", "av1", "unknown"]),
             Self::ContentChange => Some(&["detected", "unknown"]),
             Self::FrameMetadata => Some(&["available", "unavailable"]),
+            // #374: native `receive_to_present_ms` is enqueue/Present plus one
+            // refresh; no present callback exists to measure it.
+            Self::PresentTiming => Some(&["estimated"]),
             Self::JbMinMs => Some(&["0", "1_19", "20_49", "50_99", "100_199", "200_plus"]),
         }
     }
@@ -469,6 +475,15 @@ impl Aggregator {
         });
     }
 
+    /// Raise a max counter for this interval with no stage sample (#374: the
+    /// 1 s packet-loss value). Never makes an interval emit on its own.
+    pub(crate) fn note_max(&self, counter: MaxCounter, value: u64) {
+        self.with_session_nonblocking(|session| {
+            let slot = &mut session.max_counters[counter.index()];
+            *slot = Some(slot.map_or(value, |current| current.max(value)));
+        });
+    }
+
     /// False for a value outside the dimension's closed set (old value kept)
     /// or when no session is active.
     pub(crate) fn set_dimension(&self, dimension: Dimension, value: &str) -> bool {
@@ -477,7 +492,11 @@ impl Aggregator {
         }
         let mut set = false;
         self.with_session_nonblocking(|session| {
-            session.dimensions[dimension.index()] = Some(value.to_string());
+            // #374: set per presented frame, so an unchanged value never allocates.
+            let slot = &mut session.dimensions[dimension.index()];
+            if slot.as_deref() != Some(value) {
+                *slot = Some(value.to_string());
+            }
             set = true;
         });
         set
@@ -527,7 +546,7 @@ impl Aggregator {
 static HOST: Aggregator = Aggregator::new(RcRole::Host);
 static CONTROLLER: Aggregator = Aggregator::new(RcRole::Controller);
 
-fn aggregator(role: RcRole) -> &'static Aggregator {
+pub(crate) fn aggregator(role: RcRole) -> &'static Aggregator {
     match role {
         RcRole::Host => &HOST,
         RcRole::Controller => &CONTROLLER,

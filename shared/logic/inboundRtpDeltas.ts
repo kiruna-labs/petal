@@ -15,6 +15,7 @@ export type InboundRtpCounters = {
   framesDecoded?: number | null;
   framesDropped?: number | null;
   freezeCount?: number | null;
+  totalFreezesDuration?: number | null;
   nackCount?: number | null;
   pliCount?: number | null;
   packetsLost?: number | null;
@@ -31,6 +32,7 @@ export const INBOUND_RTP_COUNTER_KEYS = [
   'framesDecoded',
   'framesDropped',
   'freezeCount',
+  'totalFreezesDuration',
   'nackCount',
   'pliCount',
   'packetsLost',
@@ -45,6 +47,7 @@ export type InboundRtpDeltas = {
   processing_ms: number | null;
   frames_dropped: number | null;
   freeze_count: number | null;
+  freeze_duration_ms: number | null;
   nack_count: number | null;
   pli_count: number | null;
   packets_lost_pct_x100: number | null;
@@ -78,6 +81,10 @@ function delta(previous: InboundRtpCounters, current: InboundRtpCounters, key: k
   return after - before;
 }
 
+function scaled(value: number | null, factor: number): number | null {
+  return value === null ? null : value * factor;
+}
+
 /** Per-unit average in ms: Δseconds / Δcount × 1000, null without a positive count. */
 function averageMs(
   previous: InboundRtpCounters,
@@ -106,6 +113,7 @@ export function inboundRtpDeltas(previous: InboundRtpCounters, current: InboundR
     processing_ms: averageMs(previous, current, 'totalProcessingDelay', 'framesDecoded'),
     frames_dropped: delta(previous, current, 'framesDropped'),
     freeze_count: delta(previous, current, 'freezeCount'),
+    freeze_duration_ms: scaled(delta(previous, current, 'totalFreezesDuration'), 1000),
     nack_count: delta(previous, current, 'nackCount'),
     pli_count: delta(previous, current, 'pliCount'),
     packets_lost_pct_x100:

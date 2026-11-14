@@ -1538,11 +1538,28 @@ verdict parses the line, and the web client reproduces it
   Δ`jitterBuffer*Delay` / Δ`jitterBufferEmittedCount` × 1000; `decode_ms` /
   `processing_ms` are Δ`totalDecodeTime` / Δ`totalProcessingDelay` /
   Δ`framesDecoded` × 1000; `frames_dropped`, `freeze_count`, `nack_count`,
-  `pli_count` are plain deltas; `packets_lost_pct_x100` is
+  `pli_count` are plain deltas; `freeze_duration_ms` (#374) is
+  Δ`totalFreezesDuration` × 1000; `packets_lost_pct_x100` is
   round(Δlost / (Δlost + Δreceived) × 10000), with a falling `packetsLost`
   counted as 0 lost. A missing or `null` (non-finite) input, a counter that
   went backwards, or a zero denominator gives `null`, never 0. Compare floats
-  within 1e-6. TS: `shared/logic/inboundRtpDeltas.ts`.
+  within 1e-6. TS: `shared/logic/inboundRtpDeltas.ts`; Rust:
+  `rc_receiver_timing.rs` (`inbound_rtp_deltas`), both run every vector.
+  The native parser reads an absent stats field as 0, so a native snapshot
+  is never "missing"; the null rules bite on the web side.
+- Native controller receive path (#374, `rc_receiver_timing.rs`), only for
+  the window this controller holds a grant on: `capture_to_receive_ms` =
+  WebrtcReceive − (host capture stamp + probe offset), from the track's
+  subscribe timing events (the controller now pings the hosts it controls);
+  `decode_ms` = DecoderOutput − DecoderUpload joined by `frame_id` (the 1 s
+  stats average only until the first joined frame, or for a publication
+  without the frame-metadata trailer); the 1 s receiver stats give the
+  vectors above plus `sub_rtt_ms` (selected candidate pair; a native RTT of
+  0 is no sample). `receive_to_present_ms` is the compositor hand-off
+  (macOS layer enqueue, Windows `Present`) − decode + one display refresh,
+  and is always estimated: `present_timing=estimated`. The web controller's
+  `receive_to_present_ms` is a different span (packet receive to expected
+  display) and does not set `present_timing`.
 - `jbMinMsBucketVectors` (#375/#374): the `jb_min_ms` dimension is the
   bucket of that interval average (`0` below 0.5 ms, then `1_19`, `20_49`,
   `50_99`, `100_199`, `200_plus`), never raw ms.
@@ -1560,7 +1577,7 @@ verdict parses the line, and the web client reproduces it
   The web controller summary (#375) carries `lk_region`, `self_hosted_sfu`
   and `same_edge` (`edgeDimensions`); it has no ICE producer yet.
 
-No wire field changed in #370 or #375, so there is no old-peer fixture
+No wire field changed in #370, #374 or #375, so there is no old-peer fixture
 (#375 reads the existing `petal.latency-probe` pong timestamps and the
 existing frame-metadata trailer). The #371
 timing fields are wire fields; see "Timing fields" under Remote Control. The

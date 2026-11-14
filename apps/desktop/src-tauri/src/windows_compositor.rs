@@ -371,6 +371,10 @@ struct StoredI420Frame {
     v_stride: usize,
     width: u32,
     height: u32,
+    /// #374: decode stamp of a frame from a window we control. Taken at its
+    /// first successful Present, so a re-present (device loss, resize) of
+    /// the stored frame never records twice.
+    present_stamp: Option<u64>,
 }
 
 /// One latest-frame mailbox per remote window, plus a deduplicated FIFO of
@@ -717,10 +721,10 @@ impl Compositor {
         }
         let device_lost = {
             let window = self.windows.get_mut(key).expect("window present");
-            let Some(frame) = window.latest_frame.take() else {
+            let Some(mut frame) = window.latest_frame.take() else {
                 return;
             };
-            let device_lost = present_frame(&self.device, &self.context, window, &frame);
+            let device_lost = present_frame(&self.device, &self.context, window, &mut frame);
             window.latest_frame = Some(frame);
             device_lost
         };
@@ -731,10 +735,10 @@ impl Compositor {
             let Some(window) = self.windows.get_mut(key) else {
                 return;
             };
-            let Some(frame) = window.latest_frame.take() else {
+            let Some(mut frame) = window.latest_frame.take() else {
                 return;
             };
-            let _ = present_frame(&self.device, &self.context, window, &frame);
+            let _ = present_frame(&self.device, &self.context, window, &mut frame);
             window.latest_frame = Some(frame);
         }
     }
@@ -2219,6 +2223,7 @@ pub(crate) async fn push_frame(
     v_stride: usize,
     width: u32,
     height: u32,
+    present_stamp: Option<u64>,
 ) {
     // Feed the no-frame watchdog (subscriber.rs) before the key moves into
     // the mailbox.
@@ -2236,6 +2241,7 @@ pub(crate) async fn push_frame(
             v_stride,
             width,
             height,
+            present_stamp,
         },
     );
 }
@@ -3262,7 +3268,7 @@ fn present_frame(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     window: &mut RemoteWindow,
-    frame: &StoredI420Frame,
+    frame: &mut StoredI420Frame,
 ) -> bool {
     let frame_size = (frame.width, frame.height);
     if frame_size != window.published_frame_size {
@@ -3498,7 +3504,33 @@ fn present_frame(
     if let Err(error) = unsafe { window.swap_chain.Present(1, DXGI_PRESENT(0)).ok() } {
         return device_removed(&error);
     }
+    if let Some(decoded_at_us) = frame.present_stamp.take() {
+        // #374: estimated (Present return + one DWM refresh); a windowed
+        // swap chain gives no reliable per-frame present time.
+        if let Some(refresh_ms) = dwm_refresh_interval_ms() {
+            crate::rc_receiver_timing::record_present(
+                decoded_at_us,
+                crate::time_util::now_us(),
+                refresh_ms,
+            );
+        }
+    }
     false
+}
+
+/// One DWM composition refresh in ms, or `None` when DWM reports no rate.
+fn dwm_refresh_interval_ms() -> Option<f64> {
+    use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
+    let mut info = DWM_TIMING_INFO {
+        cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: a null HWND asks for the whole-desktop composition timing
+    // (Windows 8.1+); `info` is a correctly sized out-parameter.
+    unsafe { DwmGetCompositionTimingInfo(HWND::default(), &mut info) }.ok()?;
+    let rate = info.rateRefresh;
+    (rate.uiNumerator > 0 && rate.uiDenominator > 0)
+        .then(|| 1000.0 * f64::from(rate.uiDenominator) / f64::from(rate.uiNumerator))
 }
 
 fn region_frame_is_new_source_size(canonical: Option<(u32, u32)>, incoming: (u32, u32)) -> bool {
@@ -3951,6 +3983,7 @@ mod tests {
             v_stride: 1,
             width: 2,
             height: 2,
+            present_stamp: None,
         }
     }
 
@@ -4048,6 +4081,7 @@ mod tests {
             v_stride: w / 2,
             width: w as u32,
             height: h as u32,
+            present_stamp: None,
         }
     }
 

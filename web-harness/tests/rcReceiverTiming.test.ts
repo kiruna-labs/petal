@@ -199,8 +199,8 @@ test('a stale poll finishing late cannot unlock overlapping polls in the next se
 test('stats polls record jitter-buffer deltas, counters, loss and both RTTs', async () => {
   const { track, timing, target, summary } = harness();
   track.reports.push(
-    inbound({ jitterBufferDelay: 1, jitterBufferEmittedCount: 100, jitterBufferMinimumDelay: 0, totalDecodeTime: 0.2, framesDecoded: 100, freezeCount: 0, packetsLost: 10, packetsReceived: 1000 }),
-    inbound({ jitterBufferDelay: 1.6, jitterBufferEmittedCount: 130, jitterBufferMinimumDelay: 0.3, totalDecodeTime: 0.29, framesDecoded: 130, freezeCount: 2, packetsLost: 12, packetsReceived: 1198 })
+    inbound({ jitterBufferDelay: 1, jitterBufferEmittedCount: 100, jitterBufferMinimumDelay: 0, totalDecodeTime: 0.2, framesDecoded: 100, freezeCount: 0, totalFreezesDuration: 0.5, packetsLost: 10, packetsReceived: 1000 }),
+    inbound({ jitterBufferDelay: 1.6, jitterBufferEmittedCount: 130, jitterBufferMinimumDelay: 0.3, totalDecodeTime: 0.29, framesDecoded: 130, freezeCount: 2, totalFreezesDuration: 0.75, packetsLost: 12, packetsReceived: 1198 })
   );
   await timing.sync(target);
   await timing.sync(target);
@@ -210,7 +210,7 @@ test('stats polls record jitter-buffer deltas, counters, loss and both RTTs', as
   assert.equal(emitted.stages.sub_rtt_ms?.n, 2);
   assert.equal(emitted.stages.sub_rtt_ms?.p50, 8);
   assert.equal(emitted.stages.pub_rtt_ms?.p50, 3);
-  assert.deepEqual(emitted.counters, { freeze_count: 2 });
+  assert.deepEqual(emitted.counters, { freeze_count: 2, freeze_duration_ms: 250 });
   assert.equal(emitted.maxCounters.packets_lost_pct_x100, 100);
   assert.equal(emitted.dimensions.jb_min_ms, '1_19', 'bucketed, never raw ms');
 });
