@@ -21,6 +21,7 @@ changes are documented in that directory's `PETAL_PATCH.md`, per Apache-2.0
 | `vendor/libwebrtc` | https://github.com/livekit/rust-sdks | 0.3.38 | Apache-2.0 | `LICENSE`, `NOTICE` |
 | `vendor/webrtc-sys` | https://github.com/livekit/rust-sdks | 0.3.35 | Apache-2.0 | `LICENSE`, `NOTICE.md` |
 | `vendor/tauri-nspanel` | https://github.com/ahkohd/tauri-nspanel (rev `a3122e8`) | 2.1.0 | MIT OR Apache-2.0 | `LICENSE_MIT`, `LICENSE_APACHE-2.0` |
+| `vendor/shiguredo_rtmp` | https://github.com/shiguredo/rtmp-rs | 2026.1.0-canary.6 | Apache-2.0 | `LICENSE` |
 
 A machine-readable inventory of every dependency (CycloneDX) is committed
 under `sbom/`, with the latest license/advisory audit in
@@ -50,6 +51,7 @@ Approximately 720 crates resolve in `Cargo.lock`. The overwhelming majority are
 | `tauri` and `tauri-plugin-*` | Apache-2.0 OR MIT | Application framework |
 | `livekit`, `livekit-api`, `livekit-protocol`, `livekit-runtime`, `webrtc-sys` | Apache-2.0 | Real-time transport |
 | `tauri-nspanel` | MIT / Apache-2.0 | Vendored (see above). The crate manifest declares **no** SPDX field, but the checkout ships both `LICENSE_MIT` and `LICENSE_APACHE-2.0`; `deny.toml` carries a `licenses.clarify` entry so `cargo deny` accepts it. |
+| `shiguredo_rtmp` | Apache-2.0 | RTMP publisher for live streaming (Shiguredo Inc.). Vendored (see above); exact-pinned canary release. |
 | `cssparser`, `cssparser-macros`, `selectors`, `dtoa-short`, `option-ext` | MPL-2.0 | Transitive via Tauri/wry, statically linked. MPL-2.0 is per-file copyleft: unmodified use requires source availability (satisfied by crates.io) plus this notice. It imposes no condition on Petal's own license. |
 
 ## npm dependencies
