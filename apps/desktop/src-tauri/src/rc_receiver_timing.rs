@@ -404,6 +404,15 @@ pub(crate) async fn run<E, F, Fut>(
     }
 }
 
+/// Whether the publication advertises the frame-metadata trailer, the same
+/// test the SDK uses to attach a receiver handler on subscribe (#374).
+pub(crate) fn has_frame_metadata(features: &[livekit::prelude::PacketTrailerFeature]) -> bool {
+    use livekit::prelude::PacketTrailerFeature;
+    features.iter().any(|feature| {
+        matches!(feature, PacketTrailerFeature::PtfUserTimestamp | PacketTrailerFeature::PtfFrameId)
+    })
+}
+
 /// Start receive timing for one subscribed window track. Call it BEFORE
 /// `NativeVideoStream::new` on that track: decoder-output events are wired
 /// into the stream only if the subscription exists first (#374).
@@ -661,6 +670,15 @@ mod tests {
         assert_eq!(selected_candidate_pair_rtt_ms(&stats), Some(4.0));
         assert!(livekit::webrtc::stats::parse_stats_report("").expect("empty").is_empty());
         assert!(livekit::webrtc::stats::parse_stats_report("[{\"type\":").is_err(), "malformed is an error, not a panic");
+    }
+
+    #[test]
+    fn only_a_publication_whose_handler_the_sdk_attached_is_subscribed() {
+        use livekit::prelude::PacketTrailerFeature as F;
+        assert!(has_frame_metadata(&[F::PtfUserTimestamp, F::PtfFrameId]));
+        assert!(has_frame_metadata(&[F::PtfFrameId]));
+        assert!(!has_frame_metadata(&[]));
+        assert!(!has_frame_metadata(&[F::PtfUserData]), "no handler: subscribing would add one");
     }
 
     #[test]

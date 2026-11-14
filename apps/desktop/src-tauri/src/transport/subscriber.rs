@@ -1463,7 +1463,9 @@ pub(crate) fn start_compositor_feed(
                         crate::transport::publisher::shared_window_sharer_client_from_metadata(
                             &participant.metadata(),
                         );
-                    let has_frame_metadata = !publication.frame_metadata_features().is_empty();
+                    let has_frame_metadata = crate::rc_receiver_timing::has_frame_metadata(
+                        &publication.frame_metadata_features(),
+                    );
                     tokio::spawn(async move {
                         // #907: cloned before `.rtc_track()` below consumes
                         // `video_track` -- this handle drives the periodic
@@ -2821,7 +2823,9 @@ pub(crate) fn start_compositor_feed(
                         video_track,
                         key,
                         source_kind == crate::transport::publisher::SharedSourceKind::DisplayRegion,
-                        !publication.frame_metadata_features().is_empty(),
+                        crate::rc_receiver_timing::has_frame_metadata(
+                            &publication.frame_metadata_features(),
+                        ),
                         generation.clone(),
                         frames_this_interval.clone(),
                         cancel_token,
