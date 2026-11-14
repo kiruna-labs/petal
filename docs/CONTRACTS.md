@@ -866,6 +866,17 @@ Kinds and additive capability envelope:
   operation; `submitted` means the host submitted input to the OS but did not
   observe the target application's effect. A successful disposition cannot
   carry `failureCode`. (Fixture vector: `result-applied-v2`.)
+- `inputFrame` (#376): host-to-controller, reliable, targeted at the
+  controller (`targetUserId`), sent by the window owner (`controllerId`, as on
+  `result`). `seq` is the controller's input `seq`; `frameId` the trailer
+  `frame_id` of the first published frame that shows that input;
+  `contentChange` is `detected` (the capture had dirty rects) or `unknown`
+  ("the next frame"; a newer or missing value reads as `unknown`). Sent only
+  for discrete ops (pointer down/click, a non-repeat key down, text, and the
+  first wheel of a burst: 500 ms of wheel silence), at most 4/s per
+  controller, never for a pointer move. A missing or non-u32 `frameId` drops
+  the packet. Old controllers ignore the kind (`RemoteControlType::Unknown`;
+  the web parser's kind list). (Fixture vector: `input-frame`.)
 
 `modifiers` is `{ "alt": boolean, "ctrl": boolean, "meta": boolean, "shift": boolean }`.
 
@@ -1094,7 +1105,7 @@ Transport policy is authoritative in the contract fixture:
 | Packet | Reliability | Destination | Authority |
 |---|---|---|---|
 | `request`, `release` | reliable | host | authenticated controller |
-| `status`, `result` | reliable | controller | authenticated host |
+| `status`, `result`, `inputFrame` | reliable | controller | authenticated host |
 | pointer move with no held buttons | lossy | host | authenticated controller |
 | held-pointer or discrete pointer | reliable | host | authenticated controller |
 | legacy wheel | reliable | host | authenticated controller |
@@ -1560,6 +1571,22 @@ verdict parses the line, and the web client reproduces it
   and is always estimated: `present_timing=estimated`. The web controller's
   `receive_to_present_ms` is a different span (packet receive to expected
   display) and does not set `present_timing`.
+- Press-to-photon (#376): `photon_ms` = presentation of the first frame
+  whose trailer id is `>=` the host's `inputFrame.frameId` − the controller's
+  own production instant for that input `seq` (`sentAtMs` moved onto the
+  monotonic clock, at most 2 s back). Both ends are the controller's clock,
+  so no offset. Web presentation is the rVFC `expectedDisplayTime` (the same
+  loop as `capture_to_present_ms`); native is the compositor hand-off + one
+  refresh (estimated). `photonCorrelator` pins the bounds (64 sent inputs, 2 s
+  for an unannounced one, 2 s presented-frame ring for a frame that beat the
+  `inputFrame`, 1 s timeout); `photonCorrelatorVectors` and
+  `photonInputFilterVectors` are run by `shared/logic/photonCorrelator.ts` and
+  `rc_photon.rs`. An announced input not presented within 1 s adds one
+  `photon_timeout`, never a sample. A drop in the presented frame id, a new
+  subscription, a re-grant or a release clears the state. The controller sets
+  `content_change` from the host's `contentChange`. Host: macOS only (the
+  #373 match point in the ScreenCaptureKit callback; the frame id is the one
+  that publish accepted). A Windows host sends no `inputFrame` yet.
 - `jbMinMsBucketVectors` (#375/#374): the `jb_min_ms` dimension is the
   bucket of that interval average (`0` below 0.5 ms, then `1_19`, `20_49`,
   `50_99`, `100_199`, `200_plus`), never raw ms.
@@ -1580,7 +1607,8 @@ verdict parses the line, and the web client reproduces it
 No wire field changed in #370, #374 or #375, so there is no old-peer fixture
 (#375 reads the existing `petal.latency-probe` pong timestamps and the
 existing frame-metadata trailer). The #371
-timing fields are wire fields; see "Timing fields" under Remote Control. The
+timing fields are wire fields; see "Timing fields" under Remote Control.
+#376's `inputFrame` is an additive kind with its own fixture. The
 `telemetrySessionId` status field from #369's design is not added yet; the
 host mints its own `rc_session_id`.
 

@@ -195,7 +195,7 @@ export function decodeRemoteControlHotPath(payload: Uint8Array, targetUserId: st
 export function parseRemoteControlJson(payload: string): RemoteControlMessage | null {
   let value: Record<string, unknown>;
   try { value = JSON.parse(payload) as Record<string, unknown>; } catch { return null; }
-  const kinds = ['request', 'release', 'status', 'pointer', 'wheel', 'key', 'text', 'result'];
+  const kinds = ['request', 'release', 'status', 'pointer', 'wheel', 'key', 'text', 'result', 'inputFrame'];
   if (value.v !== 1 || typeof value.kind !== 'string' || !kinds.includes(value.kind)) return null;
   if (value.action !== undefined && !['move', 'down', 'up', 'click'].includes(String(value.action))) return null;
   if (value.targetKind !== undefined && !['window', 'display'].includes(String(value.targetKind))) {
@@ -255,6 +255,12 @@ export function parseRemoteControlJson(payload: string): RemoteControlMessage | 
     ].includes(String(value.status))
   )
     return null;
+  // #376: an inputFrame without a usable frame id names no frame.
+  if (value.kind === 'inputFrame') {
+    const frameId = wireMs(value.frameId);
+    if (frameId === undefined || frameId > 0xffff_ffff) return null;
+    if (value.contentChange !== 'detected') value.contentChange = 'unknown';
+  }
   // #371: additive timing fields; a malformed value is dropped, never fatal.
   if (value.sentAtMs !== undefined && wireMs(value.sentAtMs) === undefined) delete value.sentAtMs;
   if (value.hostHoldMs !== undefined && (value.kind !== 'result' || wireMs(value.hostHoldMs) === undefined)) {
@@ -454,7 +460,7 @@ function putOptionalNumber(out: number[], value: number | undefined, width: 1 | 
 }
 
 function kindCode(kind: RemoteControlMessage['kind']): number {
-  return ({ request: 1, release: 2, status: 3, pointer: 4, wheel: 5, key: 6, text: 7, result: 8 } as const)[kind];
+  return ({ request: 1, release: 2, status: 3, pointer: 4, wheel: 5, key: 6, text: 7, result: 8, inputFrame: 9 } as const)[kind];
 }
 
 function actionCode(action: string | undefined): number {

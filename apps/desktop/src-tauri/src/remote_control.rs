@@ -486,6 +486,8 @@ fn message_from_binary(
         sent_at_ms,
         host_hold_ms: None,
         lk_node_hash: None,
+        frame_id: None,
+        content_change: None,
         modifiers: RemoteControlModifiers {
             alt: modifiers & 1 != 0,
             ctrl: modifiers & 2 != 0,
@@ -1432,6 +1434,7 @@ fn clear_control_caches_for_window(window_id: u32) {
     input_latency_markers()
         .lock_unpoisoned()
         .retain(|(marker_window, _), _| *marker_window != window_id);
+    crate::rc_photon::host_clear_window(window_id);
 }
 
 pub(crate) fn invalidate_control_frame(window_id: u32) {
@@ -1480,6 +1483,7 @@ fn clear_all_control_state() {
     target_pid_cache().lock_unpoisoned().clear();
     control_frame_cache().lock_unpoisoned().clear();
     input_latency_markers().lock_unpoisoned().clear();
+    crate::rc_photon::host_clear();
 }
 
 /// #373: the capture callback for `window_id` delivered a frame. A frame
@@ -1487,6 +1491,7 @@ fn clear_all_control_state() {
 /// controller, and records `inject_to_capture_ms` for each; an idle frame
 /// consumes nothing. Markers older than `INPUT_LATENCY_MARKER_TTL` expire.
 pub(crate) fn note_captured_frame(window_id: u32, capture_seq: u64, change: CapturedContentChange) {
+    crate::rc_photon::host_note_captured(window_id, capture_seq, change);
     let now = Instant::now();
     for marker in take_input_latency_markers(window_id, change, now) {
         let inject_to_capture = now.saturating_duration_since(marker.injected_at);
@@ -1529,6 +1534,82 @@ fn take_input_latency_markers(
         .cloned()
         .collect();
     keys.into_iter().filter_map(|key| markers.remove(&key)).collect()
+}
+
+/// #376: a capture of `window_id` was published as trailer `frame_id`. Tell
+/// each controller whose discrete input that capture (or an earlier one)
+/// first showed. Reliable and targeted, like `result`; never on pointer moves.
+pub(crate) fn announce_published_frame(app: &AppHandle, window_id: u32, capture_seq: u64, frame_id: u32) {
+    let announcements = crate::rc_photon::host_take_published(window_id, capture_seq, frame_id);
+    if announcements.is_empty() {
+        return;
+    }
+    let Some((publisher, local_identity)) = app
+        .try_state::<SessionState>()
+        .and_then(|state| state.control_channel_snapshot())
+    else {
+        return;
+    };
+    for announcement in announcements {
+        let message = input_frame_packet(&local_identity, &announcement);
+        let publisher = publisher.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = publish_message(publisher, message).await {
+                log::debug!("remote-control: inputFrame publish failed: {error}");
+            }
+        });
+    }
+}
+
+fn input_frame_packet(local_identity: &str, announcement: &crate::rc_photon::Announcement) -> RemoteControlMessage {
+    RemoteControlMessage {
+        v: VERSION,
+        message_type: RemoteControlType::InputFrame,
+        action: None,
+        target_user_id: announcement.controller_id.clone(),
+        controller_id: local_identity.to_string(),
+        window_id: announcement.window_id,
+        seq: announcement.seq,
+        target_kind: None,
+        share_instance_id: None,
+        controller_capabilities: Vec::new(),
+        host_capabilities: Vec::new(),
+        reason: None,
+        control_session_id: None,
+        input_id: None,
+        input_seq: None,
+        operation_fingerprint_version: None,
+        operation_fingerprint: None,
+        outcome: None,
+        delivery_route: None,
+        failure_code: None,
+        result_capability: None,
+        x: None,
+        y: None,
+        button: None,
+        buttons: None,
+        click_count: None,
+        delta_x: None,
+        delta_y: None,
+        delta_mode: None,
+        key: None,
+        code: None,
+        repeat: false,
+        location: None,
+        text: None,
+        status: None,
+        message: None,
+        grant_token: None,
+        supports_binary_hot_path: false,
+        supports_redundant_input: false,
+        supports_binary_hot_path_v2: false,
+        sent_at_ms: None,
+        host_hold_ms: None,
+        lk_node_hash: None,
+        frame_id: Some(announcement.frame_id),
+        content_change: Some(announcement.content_change.to_string()),
+        modifiers: RemoteControlModifiers::default(),
+    }
 }
 
 /// Every injected input gets a marker (#370: the summary covers all input;
@@ -3643,6 +3724,7 @@ fn replay_one_task(task: ReplayTask, inject: &ReplayInjector) {
         ReplayRunOutcome::Completed(Ok(())) => {
             let injected_at_ms = now_ms();
             record_input_latency_marker(&task.message, injected_at_ms);
+            crate::rc_photon::host_note_injected(&task.message);
             #[cfg(target_os = "macos")]
             crate::session::note_remote_interaction(task.message.window_id, task.message.seq);
             let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -4010,6 +4092,7 @@ fn should_log_latency_probe(message: &RemoteControlMessage) -> bool {
         | RemoteControlType::Release
         | RemoteControlType::Status
         | RemoteControlType::Result
+        | RemoteControlType::InputFrame
         | RemoteControlType::Unknown => false,
     }
 }
@@ -4201,6 +4284,8 @@ fn status_packet_for(status: &RemoteControlStatus, local_identity: &str) -> Remo
         lk_node_hash: (status.status == "active")
             .then(crate::sfu_edge::local_node_hash)
             .flatten(),
+        frame_id: None,
+        content_change: None,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -4254,6 +4339,8 @@ fn discrete_result_packet(
         sent_at_ms: None,
         host_hold_ms: None,
         lk_node_hash: None,
+        frame_id: None,
+        content_change: None,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -5281,6 +5368,13 @@ fn handle_message(
                     reason: None,
                 },
             );
+        }
+        // #376: controller-directed. Only the window's owner may announce
+        // frames for it (`controller_id` is the verified sender here).
+        RemoteControlType::InputFrame => {
+            if remote_window_exists(&message.controller_id, message.window_id) {
+                crate::rc_photon::controller_input_frame(&message);
+            }
         }
         RemoteControlType::Pointer
         | RemoteControlType::Wheel
@@ -6493,6 +6587,8 @@ fn clipboard_key_message(
         sent_at_ms: None,
         host_hold_ms: None,
         lk_node_hash: None,
+        frame_id: None,
+        content_change: None,
         modifiers,
     }
 }
@@ -6753,6 +6849,7 @@ pub async fn remote_control_send(app: AppHandle, draft: RemoteControlDraft) -> R
                 }
                 let summary = message_summary(&chunk_message);
                 rc_input_timing::controller_sent(&chunk_message);
+                crate::rc_photon::controller_sent(&chunk_message);
                 if let Err(e) = publish_controller_input(publisher.clone(), chunk_message).await {
                     log::warn!("remote-control: chunked text publish failed for {summary}: {e}");
                     return Err(e);
@@ -6776,6 +6873,7 @@ pub async fn remote_control_send(app: AppHandle, draft: RemoteControlDraft) -> R
     let summary = message_summary(&message);
     // #371: after the v2 envelope is assigned, so the result can be paired.
     rc_input_timing::controller_sent(&message);
+    crate::rc_photon::controller_sent(&message);
     match publish_controller_input(publisher, message).await {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -6851,6 +6949,8 @@ pub async fn remote_control_set_active(
         host_hold_ms: None,
         // #372: the host records `same_edge` against this.
         lk_node_hash: if active { crate::sfu_edge::local_node_hash() } else { None },
+        frame_id: None,
+        content_change: None,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -6998,6 +7098,8 @@ pub async fn remote_control_request_escalation(
         sent_at_ms: Some(now_ms()),
         host_hold_ms: None,
         lk_node_hash: crate::sfu_edge::local_node_hash(),
+        frame_id: None,
+        content_change: None,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -11696,6 +11798,7 @@ pub(crate) mod input {
             | RemoteControlType::Release
             | RemoteControlType::Status
             | RemoteControlType::Result
+            | RemoteControlType::InputFrame
             | RemoteControlType::Unknown => false,
         }
     }
@@ -11801,6 +11904,7 @@ pub(crate) mod input {
             | RemoteControlType::Release
             | RemoteControlType::Status
             | RemoteControlType::Result
+            | RemoteControlType::InputFrame
             | RemoteControlType::Unknown => return Ok(()),
         };
         if result.is_ok() {
@@ -15990,6 +16094,8 @@ pub(crate) mod input {
                 sent_at_ms: None,
                 host_hold_ms: None,
                 lk_node_hash: None,
+                frame_id: None,
+                content_change: None,
                 modifiers: RemoteControlModifiers::default(),
             }
         }
@@ -23075,6 +23181,8 @@ mod tests {
             sent_at_ms: None,
             host_hold_ms: None,
             lk_node_hash: None,
+            frame_id: None,
+            content_change: None,
             modifiers: RemoteControlModifiers::default(),
         }
     }
@@ -24001,6 +24109,8 @@ mod tests {
             sent_at_ms: None,
             host_hold_ms: None,
             lk_node_hash: None,
+            frame_id: None,
+            content_change: None,
             modifiers: RemoteControlModifiers::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -24233,6 +24343,8 @@ mod tests {
             sent_at_ms: None,
             host_hold_ms: None,
             lk_node_hash: None,
+            frame_id: None,
+            content_change: None,
             modifiers: RemoteControlModifiers {
                 alt: false,
                 ctrl: false,
@@ -24312,6 +24424,8 @@ mod tests {
             sent_at_ms: None,
             host_hold_ms: None,
             lk_node_hash: None,
+            frame_id: None,
+            content_change: None,
             modifiers: RemoteControlModifiers::default(),
         };
         let value = serde_json::to_value(msg).unwrap();
@@ -24536,6 +24650,7 @@ mod tests {
             ("release", "reliable", "host", "authenticatedController"),
             ("status", "reliable", "controller", "authenticatedHost"),
             ("result", "reliable", "controller", "authenticatedHost"),
+            ("inputFrame", "reliable", "controller", "authenticatedHost"),
             (
                 "pointerMoveNoButtons",
                 "lossy",
@@ -26968,6 +27083,56 @@ mod tests {
         assert_eq!(input::ax_gesture_count_for_tests(), 1);
         clear_all_control_caches();
         assert_eq!(input::ax_gesture_count_for_tests(), 0);
+    }
+
+    /// #376: the host chain from an injected discrete input, through the
+    /// real #373 capture entry point, to the published `inputFrame` packet:
+    /// reliable, targeted at the controller, and shaped like the fixture.
+    #[test]
+    fn issue376_injected_click_becomes_a_reliable_targeted_input_frame() {
+        // clear_all_control_caches (other tests) empties the host photon state.
+        #[cfg(target_os = "macos")]
+        let _guard = input::ax_test_lock();
+        let ids = remote_control_test_ids("issue376_input_frame");
+        let click = test_message(
+            RemoteControlType::Pointer,
+            Some(RemoteControlAction::Click),
+            41,
+            ids.window_id,
+            ids.controller_id.clone(),
+        );
+        crate::rc_photon::host_note_injected(&click);
+        note_captured_frame(ids.window_id, 900, CapturedContentChange::None);
+        assert!(crate::rc_photon::host_take_published(ids.window_id, 900, 5).is_empty());
+        note_captured_frame(ids.window_id, 901, CapturedContentChange::Detected);
+        let announcements = crate::rc_photon::host_take_published(ids.window_id, 901, 6);
+        assert_eq!(announcements.len(), 1);
+        let packet_message = input_frame_packet("host-identity", &announcements[0]);
+        let packet = remote_control_engine().data_packet_for(&packet_message);
+        assert!(packet.reliable);
+        assert_eq!(
+            packet.destination_identities,
+            vec![livekit::prelude::ParticipantIdentity(ids.controller_id.clone())]
+        );
+        let json: serde_json::Value = serde_json::from_slice(&packet.payload).unwrap();
+        let fixture = contract_fixture()
+            .remote_control_messages
+            .into_iter()
+            .find(|m| m.name == "input-frame")
+            .unwrap();
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().filter(|k| *k != "modifiers").cloned().collect();
+        keys.sort();
+        assert_eq!(keys, fixture.fields);
+        assert_eq!(
+            (&json["kind"], &json["seq"], &json["frameId"], &json["contentChange"], &json["controllerId"]),
+            (
+                &serde_json::json!("inputFrame"),
+                &serde_json::json!(41),
+                &serde_json::json!(6),
+                &serde_json::json!("detected"),
+                &serde_json::json!("host-identity")
+            )
+        );
     }
 
     /// #373: inject-to-capture markers are per (window, controller), only a

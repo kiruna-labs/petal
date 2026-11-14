@@ -36,6 +36,12 @@ import {
 import { RcLatencyAggregator, rcLatencySummaryLogLine } from '@petal/shared/logic/rcLatencyAggregator';
 import { remoteControlLatencySummary } from './analytics.ts';
 import { browserSupportsFrameMetadata, createRcReceiverTiming, type RcReceiverTarget } from './rcReceiverTiming.ts';
+import {
+  PHOTON_SENT_TTL_MS,
+  PhotonCorrelator,
+  PhotonInputFilter,
+  type PhotonOutcome,
+} from '@petal/shared/logic/photonCorrelator';
 
 /** #375: control-state reconcile and receiver stats poll period. */
 export const RC_LATENCY_SYNC_MS = 1000;
@@ -94,8 +100,41 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
       remoteControlLatencySummary(summary);
     },
   });
+  // #376: press-to-photon on this browser's monotonic clock (performance.now):
+  // discrete sends by seq, the host's inputFrame, and presented frames from
+  // the receiver-timing rVFC loop below.
+  const photon = new PhotonCorrelator();
+  const photonFilter = new PhotonInputFilter();
+  let photonContentChange: 'detected' | 'unknown' | null = null;
+  function recordPhoton(outcomes: PhotonOutcome[]) {
+    for (const outcome of outcomes) {
+      if (outcome.kind === 'timeout') {
+        rcLatency.addCounter('photon_timeout', 1);
+        continue;
+      }
+      rcLatency.recordStage('photon_ms', outcome.ms);
+      if (photonContentChange) rcLatency.setDimension('content_change', photonContentChange);
+    }
+  }
+  function notePhotonSend(message: RemoteControlMessage) {
+    const active = state.activeRemoteControl;
+    if (!active?.grantToken || active.targetUserId !== message.targetUserId || active.windowId !== message.windowId) return;
+    const nowPerf = performance.now();
+    if (!photonFilter.admit(message as { kind: string; action?: string; repeat?: boolean }, nowPerf)) return;
+    // sentAtMs is the production stamp (before any queue); move it onto the monotonic clock.
+    const waitedMs = typeof message.sentAtMs === 'number' ? Math.min(Math.max(0, Date.now() - message.sentAtMs), PHOTON_SENT_TTL_MS) : 0;
+    recordPhoton(photon.noteSent(message.seq, nowPerf - waitedMs));
+  }
+
   const receiverTiming = createRcReceiverTiming({
     aggregator: rcLatency,
+    photon: {
+      presented: (frameId, presentMs) => recordPhoton(photon.notePresented(frameId, presentMs)),
+      reset: () => {
+        photon.reset();
+        photonContentChange = null;
+      },
+    },
     clock: (hostIdentity, nowMs) => ctx.cb.peerClockEstimate?.(hostIdentity, nowMs) ?? null,
     publisherStats: async () => (await state.room?.engine?.pcManager?.publisher?.getStats?.()) ?? null,
     frameMetadataSupported: () => browserSupportsFrameMetadata(state.frameMetadataWorker),
@@ -116,6 +155,8 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
 
   function syncRcLatency() {
     const active = Boolean(state.room && state.activeRemoteControl?.grantToken);
+    // #376: before the sync, so a timeout lands in the interval it belongs to.
+    recordPhoton(photon.expire(performance.now()));
     // Monotonic, like Rust's Instant: a wall-clock step must not skew the cadence.
     rcLatency.sync(active, performance.now());
     if (active) {
@@ -396,6 +437,23 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
       logEvent(`remote control result ${message.outcome} window_id=${message.windowId} input=${message.inputId}`, message.outcome === 'applied' ? 'ok' : 'warn');
       return;
     }
+    if (message.kind === 'inputFrame') {
+      // #376: only the controlled window's owner, to us, about our session.
+      const active = state.activeRemoteControl;
+      if (
+        !active ||
+        !senderIdentity ||
+        senderIdentity !== message.controllerId ||
+        state.room?.localParticipant.identity !== message.targetUserId ||
+        active.targetUserId !== message.controllerId ||
+        active.windowId !== message.windowId
+      ) {
+        return;
+      }
+      photonContentChange = message.contentChange;
+      recordPhoton(photon.noteInputFrame(message.seq, message.frameId, performance.now()));
+      return;
+    }
     if (message.kind !== 'status') return;
     // #370 corrective pass (Moderate finding): `parseRemoteControlJson`
     // already validates `status` against the canonical wire status list --
@@ -595,7 +653,10 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
     if (!state.room) return Promise.resolve();
     // #371: builders stamp sentAtMs at production; this only covers a
     // controller->host packet built without one. Host statuses never carry it.
-    if (CONTROLLER_TO_HOST_KINDS.has(message.kind)) message = stampSentAtMs(message);
+    if (CONTROLLER_TO_HOST_KINDS.has(message.kind)) {
+      message = stampSentAtMs(message);
+      notePhotonSend(message);
+    }
     // #370 corrective pass (Bug C): never attempt the binary encoding unless
     // the CURRENT active session for this exact (windowId, targetUserId) has
     // observed the host advertise `supportsBinaryHotPath` on a real "active"

@@ -120,7 +120,10 @@ stats-delta stages and counters, `sub_rtt_ms` and the estimated
 fed by the web controller's receive path for the controlled window only
 (`web-harness/src/rcReceiverTiming.ts`): the stats-delta stages and counters,
 `sub_rtt_ms` / `pub_rtt_ms`, `receive_to_present_ms`, and the probe-offset
-`capture_to_receive_ms` / `capture_to_present_ms`; the event's common
+`capture_to_receive_ms` / `capture_to_present_ms`; both controllers record
+press-to-photon `photon_ms` / `photon_timeout` (#376, `rc_photon.rs` and
+`shared/logic/photonCorrelator.ts`) on their own clock, with `content_change`
+from the host's `inputFrame`; the event's common
 `client` property says which client sent it. Both native roles get the edge dimensions from
 `sfu_edge.rs` (`lk_region`, `same_edge`, `self_hosted_sfu`,
 `ice_candidate_type`, `ice_protocol`, #372); the web controller gets
@@ -146,6 +149,7 @@ dashboard".
 | `input_stall_count` | integer | Sum over the interval (#371): ordered controller inputs that arrived more than 50 ms later than their send spacing while the controller was actively sending. Omitted when 0; an interval with only a non-zero counter still emits. |
 | `frames_dropped`, `freeze_count`, `nack_count`, `pli_count` | integer | Sum over the interval (#375, native #374): the controlled window's inbound-rtp counter deltas. Omitted when 0; a counter that went backwards (resubscribe) contributes nothing. |
 | `freeze_duration_ms` | integer ms | Sum over the interval (#374): Δ`totalFreezesDuration` of the controlled window, rounded. Omitted when 0. |
+| `photon_timeout` | integer | Sum over the interval (#376, controller): inputs the host announced with `inputFrame` whose frame was not presented within 1 s. They are never scored as a `photon_ms` sample. Omitted when 0. |
 | `offset_err_ms` | integer ms | Max over the interval (#371): the clock-offset error bound (half the best probe round trip) of the offset-corrected samples (`input_leg_ms` / `input_leg_lossy_ms` on the host, `capture_to_receive_ms` / `capture_to_present_ms` on the web controller, `capture_to_receive_ms` on the native controller, #374). Sent whenever such a sample was recorded, 0 included; never emits an interval on its own. |
 | `packets_lost_pct_x100` | integer | Max over the interval (#375, native #374): the worst 1 s packet loss on the controlled window, in hundredths of a percent. Never emits an interval on its own. |
 | `lk_region` | token | SFU edge region (coarse, not the user's location); `unknown` for a self-hosted SFU; removed from the session if a reconnect's server sends no info (#372) |

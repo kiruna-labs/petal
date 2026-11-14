@@ -1886,6 +1886,20 @@ fn trace_interaction_push(
     );
 }
 
+/// #376: only a frame the source ACCEPTED is encoded, so only it can carry a
+/// trailer `frame_id` the controller will see. Raw-capture pushes only: the
+/// #373 match point (`note_captured_frame`) numbers raw captures.
+fn announce_input_frames(
+    app: &tauri::AppHandle,
+    window_id: u32,
+    capture_seq: u64,
+    timing: Option<crate::transport::publisher::PublishedFrameTiming>,
+) {
+    if let Some(timing) = timing.filter(|t| t.source_accepted) {
+        crate::remote_control::announce_published_frame(app, window_id, capture_seq, timing.frame_id);
+    }
+}
+
 /// Per-window "last remote input applied" timestamp for the interaction-burst
 /// policy (#290 step 5). Reuses `note_remote_interaction`'s existing
 /// epoch/timestamp plumbing -- every typing/wheel/drag event that lands on
@@ -6067,6 +6081,7 @@ fn spawn_share_pump(
             if wake == SharePumpWake::RejectedPushRetry {
                 if rejected_push_retry.take_due() {
                     let current = pump_published.lock_unpoisoned().clone();
+                    let capture_seq = dirty_rect_pump.parked_frame().map(|(frame, _)| frame.sequence);
                     let timing = dirty_rect_pump.parked_frame().and_then(|(frame, ts)| {
                         pump_capture_config
                             .with_current_region_frame(frame, || current.push_frame(frame, ts))
@@ -6079,6 +6094,9 @@ fn spawn_share_pump(
                         "retry",
                         timing,
                     );
+                    if let Some(capture_seq) = capture_seq {
+                        announce_input_frames(&pump_app, window_id, capture_seq, timing);
+                    }
                     record_published_frame_timing(&pump_diagnostics, window_id, timing);
                     rejected_push_retry
                         .observe_push(timing.map(|t| t.source_accepted), Instant::now());
@@ -6656,6 +6674,7 @@ fn spawn_share_pump(
             let Some((frame, ts)) = dirty_rect_pump.parked_frame() else {
                 continue;
             };
+            let capture_seq = frame.sequence;
             let Some(timing) = pump_capture_config
                 .with_current_region_frame(frame, || current.push_frame(frame, ts))
             else {
@@ -6682,6 +6701,7 @@ fn spawn_share_pump(
                 "raw",
                 timing,
             );
+            announce_input_frames(&pump_app, window_id, capture_seq, timing);
             rejected_push_retry.observe_push(timing.map(|t| t.source_accepted), Instant::now());
             record_published_frame_timing(&pump_diagnostics, window_id, timing);
             if !push_reached_source(timing) {

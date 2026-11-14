@@ -45,6 +45,8 @@ export const RC_LATENCY_COUNTERS = [
   'nack_count',
   'pli_count',
   'freeze_duration_ms',
+  // #376: an announced input whose frame was not presented within 1 s.
+  'photon_timeout',
 ] as const;
 export type RcLatencyCounter = (typeof RC_LATENCY_COUNTERS)[number];
 
