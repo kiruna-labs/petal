@@ -22,6 +22,9 @@ export interface RejoinSeams {
   join: () => Promise<void>;
   /** Undo a join that completed after the user cancelled (Leave/unmount). */
   leave: () => Promise<void>;
+  /** Terminal failure: release what native held for the rejoin -- remote
+   * windows kept on their last frame across it (#360). */
+  release?: () => Promise<void>;
   sleep: (ms: number) => Promise<void>;
   /** True once the user left or the route unmounted. */
   cancelled: () => boolean;
@@ -56,6 +59,10 @@ export async function runBoundedRejoin(
     }
     return { kind: 'rejoined', attempts: attempt };
   }
+  // #360: the user may have left (or the route moved on) during the last
+  // attempt; a cancelled run must not release anything.
+  if (seams.cancelled()) return { kind: 'cancelled' };
+  await seams.release?.().catch(() => {});
   return { kind: 'failed', attempts: total, lastError };
 }
 
