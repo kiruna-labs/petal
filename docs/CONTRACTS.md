@@ -1556,8 +1556,9 @@ verdict parses the line, and the web client reproduces it
   region, since a self-hosted region is operator config text) and `icePath`
   (canned `getStats` reports for the publisher and subscriber PCs and the
   expected `ice_candidate_type` / `ice_protocol`, rule in `icePathRule`).
-  Native samples ICE on the first diagnostics tick and every 10 s after;
-  the web client has no ICE producer until its summary lands (#375).
+  Native samples ICE on the first diagnostics tick and every 10 s after.
+  The web controller summary (#375) carries `lk_region`, `self_hosted_sfu`
+  and `same_edge` (`edgeDimensions`); it has no ICE producer yet.
 
 No wire field changed in #370 or #375, so there is no old-peer fixture
 (#375 reads the existing `petal.latency-probe` pong timestamps and the

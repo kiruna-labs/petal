@@ -302,6 +302,9 @@ test('the control lifecycle polls only the controlled window and stops on releas
       inbound({ jitterBufferDelay: 2.2, jitterBufferEmittedCount: 160 })
     );
     ctx.state.activeRemoteControl!.grantToken = 'grant';
+    // #372: the edge dimensions ride the same summary (a cross-edge host).
+    (ctx.state as { lkEdge?: unknown }).lkEdge = { lkRegion: 'us-east-1', selfHostedSfu: 'false', lkNodeHash: '69e94d0a' };
+    (ctx.state.activeRemoteControl as { hostLkNodeHash?: string }).hostLkNodeHash = 'e4c80fa5';
     for (let i = 0; i < 3; i += 1) {
       mock.timers.tick(RC_LATENCY_SYNC_MS);
       await flush();
@@ -331,6 +334,9 @@ test('the control lifecycle polls only the controlled window and stops on releas
     assert.equal(events[0].properties.sub_rtt_ms_n, 3);
     assert.equal(events[0].properties.jb_delay_ms_p50, 20);
     assert.equal(events[0].properties.frame_metadata, 'unavailable', 'no worker in node');
+    assert.equal(events[0].properties.same_edge, 'false');
+    assert.equal(events[0].properties.lk_region, 'us-east-1');
+    assert.equal(events[0].properties.self_hosted_sfu, 'false');
     assert.ok(logs.some((line) => line.startsWith('remote-control-latency-summary: role=controller ')));
   } finally {
     mock.timers.reset();

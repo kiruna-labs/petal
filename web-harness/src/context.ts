@@ -384,6 +384,8 @@ export interface HarnessHook {
 
 export interface ActiveRemoteControl {
   tileId: string;
+  /** #372: the host's `lkNodeHash` from its `active` status, for `same_edge`. */
+  hostLkNodeHash?: string;
   targetUserId: string;
   windowId: number;
   pointerId: number | null;

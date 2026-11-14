@@ -1,5 +1,5 @@
 import { stampSentAtMs } from '@petal/shared/logic/remoteControlTiming';
-import { sameEdge } from '@petal/shared/logic/lkNodeHash';
+import { edgeDimensions, sameEdge } from '@petal/shared/logic/lkNodeHash';
 import type { ActiveRemoteControl, HarnessContext } from './context.ts';
 import { REMOTE_CONTROL_TOPIC, type RemoteControlCapability, type RemoteControlMessage } from './trackNames.ts';
 import {
@@ -118,6 +118,11 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
     const active = Boolean(state.room && state.activeRemoteControl?.grantToken);
     // Monotonic, like Rust's Instant: a wall-clock step must not skew the cadence.
     rcLatency.sync(active, performance.now());
+    if (active) {
+      // #372: re-stamped every tick, so a refreshed edge or host hash lands.
+      const edge = edgeDimensions(state.lkEdge, state.activeRemoteControl?.hostLkNodeHash);
+      for (const [key, value] of Object.entries(edge)) rcLatency.setDimension(key as keyof typeof edge, value);
+    }
     void receiverTiming.sync(active ? controlledReceiverTarget() : null);
   }
   const rcLatencyTimer = setInterval(syncRcLatency, RC_LATENCY_SYNC_MS);
@@ -483,12 +488,13 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
       grantEnvelopeIsValid &&
       message.status === 'active'
     ) {
+      // #372: read by syncRcLatency for the summary's `same_edge`.
+      active.hostLkNodeHash = message.lkNodeHash;
       if (typeof message.grantToken === 'string') {
         active.grantToken = message.grantToken;
         syncRcLatency();
       }
-      // #372: the same edge dimensions the native summary records, logged
-      // until the web latency summary lands (#375). Hashes only.
+      // #372: the same edge dimensions, in the log too. Hashes only.
       logEvent(
         `remote control edge window_id=${message.windowId} same_edge=${sameEdge(state.lkEdge?.lkNodeHash, message.lkNodeHash)} lk_region=${state.lkEdge?.lkRegion ?? 'unknown'} self_hosted_sfu=${state.lkEdge?.selfHostedSfu ?? 'unknown'}`
       );

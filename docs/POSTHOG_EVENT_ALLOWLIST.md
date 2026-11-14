@@ -120,7 +120,9 @@ fed by the web controller's receive path for the controlled window only
 `capture_to_receive_ms` / `capture_to_present_ms`; the event's common
 `client` property says which client sent it. Both native roles get the edge dimensions from
 `sfu_edge.rs` (`lk_region`, `same_edge`, `self_hosted_sfu`,
-`ice_candidate_type`, `ice_protocol`, #372). The schema is
+`ice_candidate_type`, `ice_protocol`, #372); the web controller gets
+`lk_region`, `same_edge` and `self_hosted_sfu` (`edgeDimensions` in
+`shared/logic/lkNodeHash.ts`), no ICE yet. The schema is
 pinned by `contracts/petal-contracts.json` -> `remoteControlLatencySummary`;
 tracking issue #369 says which phase feeds which stage. The same fields go
 to `petal.log` as one `remote-control-latency-summary:` line per interval.

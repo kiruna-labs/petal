@@ -94,3 +94,17 @@ export function currentServerInfo(room: {
   const latest = room.engine?.latestJoinResponse;
   return latest ? latest.serverInfo : room.serverInfo;
 }
+
+/** The edge dimensions of a control session's latency summary (#372); empty
+ * while the local edge is unknown or being refreshed. ICE is native-only. */
+export function edgeDimensions(
+  local: LocalEdge | null | undefined,
+  peerHash: string | undefined
+): Partial<Record<'lk_region' | 'self_hosted_sfu' | 'same_edge', string>> {
+  if (!local) return {};
+  return {
+    ...(local.lkRegion ? { lk_region: local.lkRegion } : {}),
+    self_hosted_sfu: local.selfHostedSfu,
+    same_edge: sameEdge(local.lkNodeHash, peerHash),
+  };
+}
