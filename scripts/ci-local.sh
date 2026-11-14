@@ -75,6 +75,10 @@ node --test "$ROOT/scripts/test-e2e-gate-verdict.mjs"
 node --test "$ROOT/scripts/test-remote-control-latency-verdict.mjs"
 node --test "$ROOT/scripts/test-share-freeze-verdict.mjs"
 
+step "Telemetry: RC latency dashboard SQL lockstep, dry-run sync, decision tile (#379)"
+node --test "$ROOT/scripts/test-posthog-sync-latency-dashboard.mjs"
+node --test "$ROOT/scripts/test-rc-latency-decision-tile.mjs"
+
 step "CI: loopback network impairment helper, both directions (#378)"
 "$ROOT/scripts/test-ci-net-impair.sh"
 
