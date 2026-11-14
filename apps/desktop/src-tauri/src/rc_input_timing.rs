@@ -157,8 +157,21 @@ pub(crate) const VANISHED_HOST_GRACE: Duration = Duration::from_secs(10);
 /// host that vanishes without a `stopped` cannot leave the session open.
 #[derive(Debug, Default)]
 pub(crate) struct ControllerTargets {
-    /// Value: when the target's window was first seen missing.
-    targets: HashMap<ControlTargetKey, Option<Instant>>,
+    targets: HashMap<ControlTargetKey, Target>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Target {
+    /// When the target's window was first seen missing.
+    missing_since: Option<Instant>,
+    /// #374: unique per activation, so a release + re-grant of the same
+    /// window inside one await is still seen as a new control session.
+    grant: u64,
+}
+
+fn next_grant() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ControllerTargets {
@@ -168,7 +181,13 @@ impl ControllerTargets {
                 // A re-grant (possibly on a new share instance) replaces
                 // whatever this host's window had.
                 self.targets.retain(|target, _| !same_window(target, &key));
-                self.targets.insert(key, None);
+                self.targets.insert(
+                    key,
+                    Target {
+                        missing_since: None,
+                        grant: next_grant(),
+                    },
+                );
             }
             // When both sides name a share instance it must match, so a late
             // `stopped` for an old instance spares the new one.
@@ -190,7 +209,7 @@ impl ControllerTargets {
     /// One presence observation per target; ends a target whose window has
     /// been missing for [`VANISHED_HOST_GRACE`].
     pub(crate) fn observe_presence(&mut self, key: &ControlTargetKey, present: bool, now: Instant) {
-        let Some(missing_since) = self.targets.get_mut(key) else {
+        let Some(Target { missing_since, .. }) = self.targets.get_mut(key) else {
             return;
         };
         if present {
@@ -207,11 +226,12 @@ impl ControllerTargets {
         !self.targets.is_empty()
     }
 
-    /// #374: whether this controller holds a grant on exactly this host window.
-    pub(crate) fn controls_window(&self, host_identity: &str, window_id: u32) -> bool {
+    /// #374: the live grant on exactly this host window, if we hold one.
+    pub(crate) fn window_grant(&self, host_identity: &str, window_id: u32) -> Option<u64> {
         self.targets
-            .keys()
-            .any(|key| key.window_id == window_id && key.host_identity == host_identity)
+            .iter()
+            .find(|(key, _)| key.window_id == window_id && key.host_identity == host_identity)
+            .map(|(_, target)| target.grant)
     }
 
     #[cfg(test)]
@@ -486,9 +506,9 @@ pub(crate) fn controller_result(message: &RemoteControlMessage, result_recv_ms: 
     }
 }
 
-/// Controller (#374): whether we hold a grant on this host window right now.
-pub(crate) fn controls_window(host_identity: &str, window_id: u32) -> bool {
-    lock(controller_targets()).controls_window(host_identity, window_id)
+/// Controller (#374): the grant we hold on this host window right now.
+pub(crate) fn window_grant(host_identity: &str, window_id: u32) -> Option<u64> {
+    lock(controller_targets()).window_grant(host_identity, window_id)
 }
 
 /// Controller (#374): the hosts we hold a grant on, for the latency probe.
@@ -986,16 +1006,19 @@ mod tests {
         let mut active = message(RemoteControlType::Status, None);
         active.controller_id = "host-receive".to_string();
         controller_status(&active, ControllerStatusEffect::Activate);
-        assert!(controls_window("host-receive", 42));
-        assert!(!controls_window("host-receive", 7), "another window of the same host");
-        assert!(!controls_window("host-other", 42), "the same window id on another host");
+        let first = window_grant("host-receive", 42).expect("granted");
+        assert_eq!(window_grant("host-receive", 7), None, "another window of the same host");
+        assert_eq!(window_grant("host-other", 42), None, "the same window id on another host");
+        controller_status(&active, ControllerStatusEffect::Terminate);
+        controller_status(&active, ControllerStatusEffect::Activate);
+        assert_ne!(window_grant("host-receive", 42), Some(first), "a re-grant is a new session");
         assert!(controlled_hosts().contains("host-receive"));
         record_host_clock("host-receive", 25_000, 4.0);
         let estimate = host_clock("host-receive", now_ms()).expect("fresh host clock");
         assert_eq!((estimate.offset_ms, estimate.err_ms), (25.0, 2.0));
         assert_eq!(host_clock("host-receive", now_ms() + CLOCK_OFFSET_STALE_MS + 1), None);
         controller_status(&active, ControllerStatusEffect::Terminate);
-        assert!(!controls_window("host-receive", 42));
+        assert_eq!(window_grant("host-receive", 42), None);
         sync_controller_at(|_, _| true, Instant::now());
         assert_eq!(host_clock("host-receive", now_ms()), None, "cleared with control");
         clear_all();

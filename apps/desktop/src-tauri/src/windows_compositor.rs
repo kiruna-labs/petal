@@ -374,7 +374,7 @@ struct StoredI420Frame {
     /// #374: decode stamp of a frame from a window we control. Taken at its
     /// first successful Present, so a re-present (device loss, resize) of
     /// the stored frame never records twice.
-    present_stamp: Option<u64>,
+    present_stamp: Option<crate::rc_receiver_timing::PresentStamp>,
 }
 
 /// One latest-frame mailbox per remote window, plus a deduplicated FIFO of
@@ -2223,7 +2223,7 @@ pub(crate) async fn push_frame(
     v_stride: usize,
     width: u32,
     height: u32,
-    present_stamp: Option<u64>,
+    present_stamp: Option<crate::rc_receiver_timing::PresentStamp>,
 ) {
     // Feed the no-frame watchdog (subscriber.rs) before the key moves into
     // the mailbox.
@@ -3504,12 +3504,14 @@ fn present_frame(
     if let Err(error) = unsafe { window.swap_chain.Present(1, DXGI_PRESENT(0)).ok() } {
         return device_removed(&error);
     }
-    if let Some(decoded_at_us) = frame.present_stamp.take() {
+    if let Some(stamp) = frame.present_stamp.take() {
         // #374: estimated (Present return + one DWM refresh); a windowed
         // swap chain gives no reliable per-frame present time.
         if let Some(refresh_ms) = dwm_refresh_interval_ms() {
             crate::rc_receiver_timing::record_present(
-                decoded_at_us,
+                stamp,
+                &window.key.0,
+                window.key.1,
                 crate::time_util::now_us(),
                 refresh_ms,
             );

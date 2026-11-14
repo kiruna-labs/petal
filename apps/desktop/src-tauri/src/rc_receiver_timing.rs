@@ -15,6 +15,7 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
@@ -260,6 +261,8 @@ const DELTA_COUNTERS: [(fn(&InboundRtpDeltas) -> Option<f64>, Counter); 5] = [
 /// of that window ends, so nothing straddles two control sessions.
 #[derive(Debug, Default)]
 pub(crate) struct ReceiverTiming {
+    /// The grant this state belongs to; a different one starts over.
+    grant: Option<u64>,
     joiner: TimingJoiner,
     previous: Option<InboundRtpCounters>,
     /// A capture stamp arrived on this track while controlled.
@@ -273,14 +276,15 @@ impl ReceiverTiming {
     pub(crate) fn on_event(
         &mut self,
         event: &SubscribeTimingEvent,
-        controlled: bool,
+        grant: Option<u64>,
         clock: impl FnOnce() -> Option<ClockEstimate>,
         aggregator: &Aggregator,
     ) {
-        if !controlled {
+        let Some(grant) = grant else {
             self.reset();
             return;
-        }
+        };
+        self.adopt(grant);
         if event.stage == SubscribeTimingStage::WebrtcReceive && event.capture_timestamp_us > 0 {
             self.metadata_seen = true;
         }
@@ -344,7 +348,16 @@ impl ReceiverTiming {
         }
     }
 
+    /// Bind to `grant`, dropping everything gathered under any other one.
+    pub(crate) fn adopt(&mut self, grant: u64) {
+        if self.grant != Some(grant) {
+            self.reset();
+            self.grant = Some(grant);
+        }
+    }
+
     pub(crate) fn reset(&mut self) {
+        self.grant = None;
         self.joiner.clear();
         self.previous = None;
         self.metadata_seen = false;
@@ -362,12 +375,24 @@ where
     }
 }
 
-/// The per-track loop. `controlled` and `clock` are read live: control can
-/// start long after subscribe and end at any time.
+async fn finish_poll<Fut>(in_flight: &mut Option<(u64, Pin<Box<Fut>>)>) -> Option<Vec<RtcStats>>
+where
+    Fut: Future<Output = Option<Vec<RtcStats>>>,
+{
+    match in_flight.as_mut() {
+        Some((_, poll)) => poll.as_mut().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The per-track loop. `grant` and `clock` are read live: control can start
+/// long after subscribe and end at any time. The stats poll runs beside the
+/// event drain (#374: a 2 s poll must not overflow the 256-event buffer),
+/// and lands only if the same grant is still live when it returns.
 pub(crate) async fn run<E, F, Fut>(
     mut events: Option<E>,
     mut poll_stats: F,
-    controlled: impl Fn() -> bool,
+    grant: impl Fn() -> Option<u64>,
     clock: impl Fn(u64) -> Option<ClockEstimate>,
     aggregator: &Aggregator,
     cancel: CancellationToken,
@@ -377,27 +402,34 @@ pub(crate) async fn run<E, F, Fut>(
     Fut: Future<Output = Option<Vec<RtcStats>>>,
 {
     let mut state = ReceiverTiming::default();
+    let mut in_flight: Option<(u64, Pin<Box<Fut>>)> = None;
     let mut tick = tokio::time::interval(STATS_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break,
-            _ = tick.tick() => {
-                if !controlled() {
-                    state.reset();
-                    continue;
-                }
-                let stats = poll_stats().await;
-                // A release during the await must not land in the session.
-                if controlled() {
-                    state.on_stats(stats.as_deref(), aggregator);
-                } else {
-                    state.reset();
+            stats = finish_poll(&mut in_flight) => {
+                let polled_under = in_flight.take().map(|(g, _)| g);
+                match grant() {
+                    Some(live) if polled_under == Some(live) && state.grant == Some(live) => {
+                        state.on_stats(stats.as_deref(), aggregator);
+                    }
+                    Some(live) => state.adopt(live),
+                    None => state.reset(),
                 }
             }
+            _ = tick.tick() => match grant() {
+                None => state.reset(),
+                Some(live) => {
+                    state.adopt(live);
+                    if in_flight.is_none() {
+                        in_flight = Some((live, Box::pin(poll_stats())));
+                    }
+                }
+            },
             event = next_event(&mut events) => match event {
-                Some(event) => state.on_event(&event, controlled(), || clock(now_ms()), aggregator),
+                Some(event) => state.on_event(&event, grant(), || clock(now_ms()), aggregator),
                 None => events = None,
             },
         }
@@ -441,7 +473,7 @@ pub(crate) fn spawn_for_window_track(
                         .ok()
                 }
             },
-            move || rc_input_timing::controls_window(&host_identity, window_id),
+            move || rc_input_timing::window_grant(&host_identity, window_id),
             move |now| rc_input_timing::host_clock(&clock_host, now),
             rc_latency_telemetry::aggregator(RcRole::Controller),
             cancel,
@@ -450,10 +482,22 @@ pub(crate) fn spawn_for_window_track(
     });
 }
 
-/// The decode-side stamp a controlled window's frame carries to the
-/// compositor hand-off; `None` (no work later) for every other window.
-pub(crate) fn controlled_frame_stamp(host_identity: &str, window_id: u32, decoded_at_us: u64) -> Option<u64> {
-    rc_input_timing::controls_window(host_identity, window_id).then_some(decoded_at_us)
+/// What a controlled window's frame carries to the compositor hand-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PresentStamp {
+    decoded_at_us: u64,
+    grant: u64,
+}
+
+/// The decode-side stamp for a frame of a window we control; `None` (no
+/// work later) for every other window.
+pub(crate) fn controlled_frame_stamp(
+    host_identity: &str,
+    window_id: u32,
+    decoded_at_us: u64,
+) -> Option<PresentStamp> {
+    rc_input_timing::window_grant(host_identity, window_id)
+        .map(|grant| PresentStamp { decoded_at_us, grant })
 }
 
 /// `hand-off - decoded + one refresh`: an estimate, since neither
@@ -475,19 +519,40 @@ fn record_present_into(aggregator: &Aggregator, decoded_at_us: u64, handed_off_u
 }
 
 /// Compositor hand-off of a frame stamped by [`controlled_frame_stamp`].
-pub(crate) fn record_present(decoded_at_us: u64, handed_off_us: u64, refresh_ms: f64) {
-    record_present_into(
+pub(crate) fn record_present(
+    stamp: PresentStamp,
+    host_identity: &str,
+    window_id: u32,
+    handed_off_us: u64,
+    refresh_ms: f64,
+) {
+    record_present_checked(
         rc_latency_telemetry::aggregator(RcRole::Controller),
-        decoded_at_us,
+        stamp,
+        rc_input_timing::window_grant(host_identity, window_id),
         handed_off_us,
         refresh_ms,
     );
 }
 
+/// #374: a frame decoded under a grant that has since ended (or been
+/// replaced) by its hand-off records nothing.
+fn record_present_checked(
+    aggregator: &Aggregator,
+    stamp: PresentStamp,
+    live_grant: Option<u64>,
+    handed_off_us: u64,
+    refresh_ms: f64,
+) {
+    if live_grant == Some(stamp.grant) {
+        record_present_into(aggregator, stamp.decoded_at_us, handed_off_us, refresh_ms);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -673,6 +738,86 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_presented_after_its_grant_ended_records_nothing() {
+        let aggregator = Aggregator::new(RcRole::Controller);
+        let now = Instant::now();
+        aggregator.sync_at(true, now);
+        let stamp = PresentStamp {
+            decoded_at_us: 1_000_000,
+            grant: 5,
+        };
+        record_present_checked(&aggregator, stamp, None, 1_004_000, 8.0);
+        record_present_checked(&aggregator, stamp, Some(6), 1_004_000, 8.0);
+        assert!(
+            aggregator.sync_at(true, now + rc_latency_telemetry::EMIT_INTERVAL).is_none(),
+            "released, and re-granted as a new session"
+        );
+        record_present_checked(&aggregator, stamp, Some(5), 1_004_000, 8.0);
+        let summary = aggregator
+            .sync_at(true, now + rc_latency_telemetry::EMIT_INTERVAL * 2)
+            .unwrap();
+        assert_eq!(summary.stages[0].1.n, 1);
+    }
+
+    /// Codex r1 (#374): a slow stats poll must not stall the event drain,
+    /// and a poll that returns under a different grant is discarded.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_poll_never_blocks_events_and_a_regrant_discards_it() {
+        let aggregator: &'static Aggregator = Box::leak(Box::new(Aggregator::new(RcRole::Controller)));
+        let started = Instant::now();
+        aggregator.sync_at(true, started);
+        let grant = Arc::new(AtomicU64::new(21));
+        let (answer_tx, answer_rx) = tokio::sync::oneshot::channel::<Option<String>>();
+        let answer_rx = Arc::new(Mutex::new(Some(answer_rx)));
+        let (tx, rx) = futures::channel::mpsc::unbounded::<SubscribeTimingEvent>();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn({
+            let grant = grant.clone();
+            let cancel = cancel.clone();
+            async move {
+                run(
+                    Some(rx),
+                    move || {
+                        let answer = answer_rx.lock().unwrap().take();
+                        async move {
+                            let json = answer?.await.ok()??;
+                            livekit::webrtc::stats::parse_stats_report(&json).ok()
+                        }
+                    },
+                    move || Some(grant.load(Ordering::SeqCst)),
+                    |_| clock(),
+                    aggregator,
+                    cancel,
+                )
+                .await;
+            }
+        });
+        let settle = || async {
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        };
+        settle().await; // first tick: the poll is now in flight and unanswered
+        for id in 1..=3u32 {
+            let receive = 2_000_000 + u64::from(id) * 33_000;
+            tx.unbounded_send(event(SubscribeTimingStage::WebrtcReceive, receive, receive - 55_000, Some(id)))
+                .unwrap();
+        }
+        settle().await;
+        grant.store(22, Ordering::SeqCst); // released and re-granted mid-poll
+        answer_tx.send(Some(report_json(30, 30, 0.6, 0.0, 0.004))).unwrap();
+        settle().await;
+        cancel.cancel();
+        task.await.unwrap();
+        let summary = aggregator
+            .sync_at(true, started + rc_latency_telemetry::EMIT_INTERVAL)
+            .expect("the events landed");
+        let stage = |wanted: Stage| summary.stages.iter().find(|(s, _)| *s == wanted).map(|(_, h)| h.n);
+        assert_eq!(stage(Stage::CaptureToReceiveMs), Some(3), "drained while the poll hung");
+        assert_eq!(stage(Stage::SubRttMs), None, "the old grant's poll was discarded");
+    }
+
+    #[test]
     fn only_a_publication_whose_handler_the_sdk_attached_is_subscribed() {
         use livekit::prelude::PacketTrailerFeature as F;
         assert!(has_frame_metadata(&[F::PtfUserTimestamp, F::PtfFrameId]));
@@ -704,7 +849,8 @@ mod tests {
         let aggregator: &'static Aggregator = Box::leak(Box::new(Aggregator::new(RcRole::Controller)));
         let started = Instant::now();
         aggregator.sync_at(true, started);
-        let controlled = Arc::new(AtomicBool::new(false));
+        // 0 = no grant.
+        let grant = Arc::new(AtomicU64::new(0));
         let polls = Arc::new(AtomicU64::new(0));
         // Each poll answers the next snapshot; snapshot 3 is a counter reset.
         let snapshots = Arc::new(Mutex::new(VecDeque::from([
@@ -716,7 +862,7 @@ mod tests {
         let (tx, rx) = futures::channel::mpsc::unbounded::<SubscribeTimingEvent>();
         let cancel = CancellationToken::new();
         let task = tokio::spawn({
-            let controlled = controlled.clone();
+            let grant = grant.clone();
             let polls = polls.clone();
             let snapshots = snapshots.clone();
             let cancel = cancel.clone();
@@ -728,7 +874,7 @@ mod tests {
                         let next = snapshots.lock().unwrap().pop_front();
                         async move { next.and_then(|json| livekit::webrtc::stats::parse_stats_report(&json).ok()) }
                     },
-                    move || controlled.load(Ordering::SeqCst),
+                    move || Some(grant.load(Ordering::SeqCst)).filter(|g| *g != 0),
                     |_| clock(),
                     aggregator,
                     cancel,
@@ -748,7 +894,7 @@ mod tests {
         settle().await;
         assert_eq!(polls.load(Ordering::SeqCst), 0, "no stats poll without control");
 
-        controlled.store(true, Ordering::SeqCst);
+        grant.store(11, Ordering::SeqCst);
         for (id, receive, upload, output) in [(2u32, 1_040_000u64, 1_041_000u64, 1_044_000u64), (3, 1_073_000, 1_074_000, 1_076_000)] {
             tx.unbounded_send(event(SubscribeTimingStage::WebrtcReceive, receive, receive - 55_000, Some(id))).unwrap();
             tx.unbounded_send(event(SubscribeTimingStage::DecoderUpload, upload, 1, Some(id))).unwrap();
@@ -761,7 +907,7 @@ mod tests {
         }
         assert_eq!(polls.load(Ordering::SeqCst), 4);
 
-        controlled.store(false, Ordering::SeqCst);
+        grant.store(0, Ordering::SeqCst);
         tx.unbounded_send(event(SubscribeTimingStage::WebrtcReceive, 1_090_000, 1_050_000, Some(9))).unwrap();
         settle().await;
         tokio::time::advance(STATS_INTERVAL * 2).await;

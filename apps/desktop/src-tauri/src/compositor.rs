@@ -1178,7 +1178,7 @@ struct PendingDisplaySample {
     /// #374: decode stamp of a frame from a window we control; recorded as
     /// `receive_to_present_ms` at its enqueue. A frame superseded in the queue
     /// was never shown, so it records nothing.
-    present_stamp: Option<u64>,
+    present_stamp: Option<crate::rc_receiver_timing::PresentStamp>,
 }
 
 #[derive(Debug)]
@@ -4002,7 +4002,7 @@ pub fn push_frame(
     cv_pixel_buffer: *mut std::ffi::c_void,
     source_width: u32,
     source_height: u32,
-    present_stamp: Option<u64>,
+    present_stamp: Option<crate::rc_receiver_timing::PresentStamp>,
 ) {
     let key = RemoteWindowKey::new(owner_identity, window_id);
 
@@ -4214,7 +4214,7 @@ fn drain_pending_display_samples_on_main(app: &AppHandle, key: &RemoteWindowKey)
     let mut cleared_hold = false;
     let panel = app.get_webview_window(&panel_label_for_key(key));
     let geometry = panel.as_ref().and_then(content_geometry);
-    let mut presented: Vec<(u64, u64)> = Vec::new();
+    let mut presented = Vec::new();
     let should_reveal = with_state(|s| {
         let Some(win) = s.windows.get_mut(key) else {
             if let Some(win) = s.retired.get_mut(key) {
@@ -4242,8 +4242,8 @@ fn drain_pending_display_samples_on_main(app: &AppHandle, key: &RemoteWindowKey)
             }
             display.enqueue_prepared(&pending.sample);
             record_display_enqueue(win, now_ms());
-            if let Some(decoded_at_us) = pending.present_stamp {
-                presented.push((decoded_at_us, crate::time_util::now_us()));
+            if let Some(stamp) = pending.present_stamp {
+                presented.push((stamp, crate::time_util::now_us()));
             }
             win.layer_has_content = true;
         }
@@ -4283,9 +4283,15 @@ fn drain_pending_display_samples_on_main(app: &AppHandle, key: &RemoteWindowKey)
         let refresh_ms = panel
             .as_ref()
             .and_then(crate::platform::appkit::screen_refresh_interval_ms);
-        for (decoded_at_us, enqueued_at_us) in presented {
+        for (stamp, enqueued_at_us) in presented {
             if let Some(refresh_ms) = refresh_ms {
-                crate::rc_receiver_timing::record_present(decoded_at_us, enqueued_at_us, refresh_ms);
+                crate::rc_receiver_timing::record_present(
+                    stamp,
+                    &key.owner_identity,
+                    key.window_id,
+                    enqueued_at_us,
+                    refresh_ms,
+                );
             }
         }
     }
