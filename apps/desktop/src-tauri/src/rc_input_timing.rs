@@ -405,13 +405,19 @@ pub(crate) fn controller_status(message: &RemoteControlMessage, effect: Controll
         window_id: message.window_id,
         share_instance_id: message.share_instance_id.clone(),
     };
-    let active = {
+    let (active, hosts) = {
         let mut targets = lock(controller_targets());
         targets.apply_status(key, effect);
-        targets.is_active()
+        let hosts: Vec<String> = targets.keys().into_iter().map(|k| k.host_identity).collect();
+        (targets.is_active(), hosts)
     };
     if effect == ControllerStatusEffect::Activate {
         rc_latency_telemetry::sync(RcRole::Controller, active);
+        // #372: `controller_id` is the verified host on a status packet.
+        crate::sfu_edge::note_peer_node_hash(&message.controller_id, message.lk_node_hash.as_deref());
+    }
+    if effect != ControllerStatusEffect::Feedback {
+        crate::sfu_edge::set_session_peers(RcRole::Controller, hosts);
     }
 }
 
@@ -869,8 +875,65 @@ mod tests {
         assert!(!targets.is_active());
     }
 
+    /// Both tests below drive the global controller target table.
+    fn controller_targets_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        lock(&LOCK)
+    }
+
+    /// #372: the host's `active` status carries its `lkNodeHash`; the real
+    /// controller-status path stamps `same_edge` on the controller summary.
+    #[test]
+    fn active_status_lk_node_hash_sets_controller_same_edge() {
+        let _targets = controller_targets_test_lock();
+        crate::sfu_edge::set_local_for_test(
+            Some(crate::sfu_edge::LocalEdge {
+                lk_region: Some("us-east-1".to_string()),
+                self_hosted_sfu: "false",
+                node_hash: Some("69e94d0a".to_string()),
+            }),
+            // Same state as the host test in remote_control.rs: the module
+            // state is global and the two may run in parallel.
+            Some(crate::sfu_edge::IcePath {
+                candidate_type: "relay",
+                protocol: "tcp",
+            }),
+        );
+        let mut active = message(RemoteControlType::Status, None);
+        active.controller_id = "host-same-edge".to_string();
+        // A cross-edge host: `false` holds even if a sibling test's hashless
+        // host is active at the same time (`same_edge_all`).
+        active.lk_node_hash = Some("e4c80fa5".to_string());
+        // Sibling tests share the controller aggregator; retry until an
+        // interval reflects this activation.
+        let mut line = String::new();
+        for _ in 0..20 {
+            controller_status(&active, ControllerStatusEffect::Activate);
+            rc_latency_telemetry::record_stage(RcRole::Controller, Stage::InputRttMs, 12.0);
+            let Some(summary) = rc_latency_telemetry::take_interval_for_test(RcRole::Controller) else {
+                continue;
+            };
+            line = summary.log_line();
+            if line.contains("same_edge=false") {
+                break;
+            }
+        }
+        assert!(line.contains("role=controller"), "{line}");
+        assert!(line.contains("same_edge=false"), "{line}");
+        assert!(line.contains("lk_region=us-east-1"), "{line}");
+        lock(controller_targets()).apply_status(
+            ControlTargetKey {
+                host_identity: "host-same-edge".to_string(),
+                window_id: 42,
+                share_instance_id: None,
+            },
+            ControllerStatusEffect::Terminate,
+        );
+    }
+
     #[test]
     fn a_vanished_host_closes_the_controller_session_after_the_grace() {
+        let _targets = controller_targets_test_lock();
         clear_all();
         let mut active = message(RemoteControlType::Status, None);
         active.controller_id = "host-gone".to_string();

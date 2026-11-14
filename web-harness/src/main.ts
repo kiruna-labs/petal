@@ -328,6 +328,7 @@ const ctx: HarnessContext = {
     layoutModeButtons: null,
     speakerSmoothingTimer: null,
     activeRemoteControl: null,
+    lkEdge: null,
     remoteControlSeq: 0,
     viewerDemandSeq: 0,
     audioCtx: null,

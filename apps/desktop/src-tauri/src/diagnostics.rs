@@ -87,6 +87,8 @@ const HISTORY_CAP: usize = 120;
 const JOURNAL_CAP: usize = 500;
 /// Stats poll cadence.
 const POLL_INTERVAL_MS: u64 = 1000;
+/// #372: ICE path resample cadence, in poll ticks (first tick, then ~10 s).
+const ICE_SAMPLE_EVERY_N_TICKS: u32 = 10;
 const HIGH_RTT_MS: f64 = 150.0;
 const HIGH_JITTER_MS: f64 = 30.0;
 const HIGH_LOSS_PCT: f64 = 2.0;
@@ -3089,12 +3091,17 @@ pub fn start_for_room(
         "diagnostics: started for room '{}' (generation {my_gen})",
         crate::logging::log_safe_quoted(&room_display_name)
     );
+    // #372: the edge this connection landed on, for the latency summary
+    // and `meeting_joined` (which the join path emits right after this).
+    crate::sfu_edge::note_room_connected(&room, &server_url);
 
     // ---- Task 1: room-event journal + quality/reconnect bookkeeping ----
     {
         let state = state.clone();
         let app = app.clone();
         let mut events = room.subscribe();
+        let edge_room = room.clone();
+        let edge_url = server_url.clone();
         tauri::async_runtime::spawn(async move {
             use livekit::RoomEvent;
             while let Some(event) = events.recv().await {
@@ -3273,12 +3280,19 @@ pub fn start_for_room(
                     RoomEvent::Reconnected => {
                         state.journal_append(&app, "connection", "Reconnected".to_string());
                         crate::analytics::reconnect_recovered();
+                        // #372: a full reconnect can land on another edge node.
+                        crate::sfu_edge::note_room_connected(&edge_room, &edge_url);
+                        let ice_room = edge_room.clone();
+                        tauri::async_runtime::spawn(async move {
+                            crate::sfu_edge::sample_ice_path(&ice_room).await;
+                        });
                     }
                     RoomEvent::Disconnected { reason } => {
                         if reason != livekit::DisconnectReason::ClientInitiated {
                             crate::analytics::reconnect_failed();
                         }
                         state.journal_append(&app, "connection", format!("Left room ({reason:?})"));
+                        crate::sfu_edge::note_room_left(&edge_room);
                         {
                             let mut inner = state.lock();
                             inner.connected = false;
@@ -3359,6 +3373,11 @@ pub fn start_for_room(
                 }
                 observe_memory_pressure_transition(&mut last_pressure_level);
                 observe_descriptor_pressure(&mut descriptor_episode);
+                // #372: the selected ICE pair can change mid-call (TURN
+                // fallback, network switch); a sample is two `getStats` calls.
+                if memory_tick % ICE_SAMPLE_EVERY_N_TICKS == 1 {
+                    crate::sfu_edge::sample_ice_path(&room).await;
+                }
 
                 let (sample, mut tracks) = collect_tick(&room, &mut prev_bytes, dt_ms).await;
                 state.apply_track_overlays(&mut tracks, sample.rtt_ms);

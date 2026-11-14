@@ -1558,6 +1558,86 @@ test('#580 request without a share tile fails loudly instead of publishing a tok
   }
 });
 
+// #372: lkNodeHash is additive, on request and status only.
+test('#372: lkNodeHash fixtures parse; old-peer, misplaced and malformed values are handled', () => {
+  const byName = new Map(contractFixture.remoteControlMessages.map((vector) => [vector.name, vector.message]));
+  const request = parseRemoteControlJson(JSON.stringify(byName.get('request-lk-node-hash')));
+  assert.equal(request?.kind, 'request');
+  assert.equal(request?.kind === 'request' ? request.lkNodeHash : null, 'e4c80fa5');
+  const status = parseRemoteControlJson(JSON.stringify(byName.get('status-active-lk-node-hash')));
+  assert.equal(status?.kind === 'status' ? status.lkNodeHash : null, '69e94d0a');
+  // Old peers: the pre-#372 fixtures carry none and still parse.
+  for (const legacy of ['request', 'status']) {
+    const parsed = parseRemoteControlJson(JSON.stringify(byName.get(legacy))) as Record<string, unknown> | null;
+    assert.ok(parsed, legacy);
+    assert.equal(parsed?.lkNodeHash, undefined, legacy);
+  }
+  const malformed = parseRemoteControlJson(
+    JSON.stringify({ ...byName.get('request-lk-node-hash'), lkNodeHash: 'ND_raw-node-id' })
+  ) as Record<string, unknown> | null;
+  assert.equal(malformed?.kind, 'request', 'a bad hash never rejects the packet');
+  assert.equal(malformed?.lkNodeHash, undefined);
+  const misplaced = parseRemoteControlJson(JSON.stringify({ ...byName.get('key'), lkNodeHash: '69e94d0a' }));
+  assert.equal((misplaced as Record<string, unknown> | null)?.lkNodeHash, undefined);
+});
+
+test('#372: the web request carries lkNodeHash and an active status logs same_edge', async () => {
+  const priorDocument = (globalThis as { document?: unknown }).document;
+  (globalThis as { document?: unknown }).document = { querySelectorAll: () => [], getElementById: () => null };
+  try {
+    const published: Uint8Array[] = [];
+    const logs: string[] = [];
+    const ctx = remoteControlContext(
+      async (data) => {
+        published.push(data);
+      },
+      (message) => logs.push(message)
+    );
+    (ctx.state as { lkEdge?: unknown }).lkEdge = {
+      lkRegion: 'us-east-1',
+      selfHostedSfu: 'false',
+      lkNodeHash: '69e94d0a'
+    };
+    const ui = setupRemoteControlUi(ctx);
+    const tile = {
+      id: 'tile-7',
+      dataset: { owner: 'native-host', windowId: '7' },
+      focus: () => {}
+    } as unknown as HTMLDivElement;
+    ui.startRemoteControl(tile);
+    await flushPromiseContinuations();
+    const request = JSON.parse(new TextDecoder().decode(published.at(-1)!));
+    assert.equal(request.kind, 'request');
+    assert.equal(request.lkNodeHash, '69e94d0a');
+
+    const status = (extra: Record<string, unknown>) =>
+      new TextEncoder().encode(
+        JSON.stringify({
+          v: 1,
+          kind: 'status',
+          windowId: 7,
+          targetUserId: 'web',
+          controllerId: 'native-host',
+          seq: 1,
+          status: 'active',
+          message: 'Remote control active for shared window',
+          grantToken: 'tok',
+          ...extra
+        })
+      );
+    ui.handleRemoteControlPayload(status({ lkNodeHash: '69e94d0a' }), 'native-host');
+    assert.match(logs.join('\n'), /remote control edge window_id=7 same_edge=true lk_region=us-east-1 self_hosted_sfu=false/);
+    ui.handleRemoteControlPayload(status({ lkNodeHash: 'e4c80fa5' }), 'native-host');
+    assert.match(logs.at(-1) ?? '', /same_edge=false/);
+    // An old host sends no hash.
+    ui.handleRemoteControlPayload(status({}), 'native-host');
+    assert.match(logs.at(-1) ?? '', /same_edge=unknown/);
+    assert.ok(!logs.join('\n').includes('ND_'), 'no raw node id is ever logged');
+  } finally {
+    (globalThis as { document?: unknown }).document = priorDocument;
+  }
+});
+
 // #371: sentAtMs and hostHoldMs are additive envelope fields.
 test('#371: sentAtMs/hostHoldMs fixtures parse, and absent or malformed values are dropped', () => {
   const byName = new Map(contractFixture.remoteControlMessages.map((vector) => [vector.name, vector.message]));

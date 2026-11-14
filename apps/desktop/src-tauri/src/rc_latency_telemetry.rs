@@ -483,6 +483,14 @@ impl Aggregator {
         set
     }
 
+    /// Remove a dimension that no longer has data (#372: a reconnect whose
+    /// server sent no info must not keep the old edge's region).
+    pub(crate) fn clear_dimension(&self, dimension: Dimension) {
+        self.with_session_nonblocking(|session| {
+            session.dimensions[dimension.index()] = None;
+        });
+    }
+
     /// Reconcile with the current control state. Returns the summary that
     /// became due, if any; emission happens outside the lock.
     pub(crate) fn sync_at(&self, active: bool, now: Instant) -> Option<Summary> {
@@ -548,6 +556,11 @@ pub(crate) fn set_dimension(role: RcRole, dimension: Dimension, value: &str) -> 
     aggregator(role).set_dimension(dimension, value)
 }
 
+/// Remove a dimension from `role`'s active session (missing data is omitted).
+pub(crate) fn clear_dimension(role: RcRole, dimension: Dimension) {
+    aggregator(role).clear_dimension(dimension);
+}
+
 /// Reconcile `role` with whether control is active right now, and emit any
 /// interval that became due. Called from the remote-control sweeper tick.
 pub(crate) fn sync(role: RcRole, active: bool) {
@@ -564,6 +577,13 @@ pub(crate) fn take_host_interval_for_test() -> Option<Summary> {
     // starting in the future and hold back every later forced take.
     let mut guard = HOST.session.lock().unwrap_or_else(|p| p.into_inner());
     guard.as_mut()?.take_interval(RcRole::Host, Instant::now(), false)
+}
+
+/// Test hook: force `role`'s current interval out now.
+#[cfg(test)]
+pub(crate) fn take_interval_for_test(role: RcRole) -> Option<Summary> {
+    let mut guard = aggregator(role).session.lock().unwrap_or_else(|p| p.into_inner());
+    guard.as_mut()?.take_interval(role, Instant::now(), false)
 }
 
 #[cfg(test)]

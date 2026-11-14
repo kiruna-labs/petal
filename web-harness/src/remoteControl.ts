@@ -1,4 +1,5 @@
 import { wireMs } from '@petal/shared/logic/remoteControlTiming';
+import { isLkNodeHash } from '@petal/shared/logic/lkNodeHash';
 import { normalizedPointInContainedMedia } from './telepointer.ts';
 import {
   REMOTE_CONTROL_TOPIC,
@@ -258,6 +259,13 @@ export function parseRemoteControlJson(payload: string): RemoteControlMessage | 
   if (value.sentAtMs !== undefined && wireMs(value.sentAtMs) === undefined) delete value.sentAtMs;
   if (value.hostHoldMs !== undefined && (value.kind !== 'result' || wireMs(value.hostHoldMs) === undefined)) {
     delete value.hostHoldMs;
+  }
+  // #372: only a request or status may carry a well-formed lkNodeHash.
+  if (
+    value.lkNodeHash !== undefined &&
+    ((value.kind !== 'request' && value.kind !== 'status') || !isLkNodeHash(value.lkNodeHash))
+  ) {
+    delete value.lkNodeHash;
   }
   if (value.kind === 'result') {
     // Delivery metadata is additive. Keep a correlated, known terminal

@@ -922,6 +922,24 @@ Timing fields (#371), additive and optional:
   hot-path frame v2 carries `sentAtMs` too (see "Binary hot-path frame"), so
   binary hover moves feed `input_leg_lossy_ms`; a v1 frame carries none.
 
+Edge field (#372), additive and optional:
+
+- `lkNodeHash`: the sender's LiveKit node as the first 8 lowercase hex chars
+  of SHA-256(`"petal-lk-node:" + node_id`) (`lkEdgeTelemetry.nodeHashRule`).
+  A controller puts it on `request`; a host on its `active` status. Each side
+  records `same_edge` = (local hash == peer hash), or `unknown` when either is
+  missing or malformed. With several concurrent peers (a host holding grants
+  for more than one controller, #374) it is `false` if any known peer is on
+  another node, else `unknown` if any hash is missing, else `true`. A host
+  re-sends its hash, read from the live room, on every `active` status
+  (including the re-emission after a reconnect); a controller sends its hash
+  only on `request`, so a controller that reconnects onto another node is
+  not reflected until it requests again. The raw `node_id` never leaves the
+  client. A
+  malformed value, or the field on any other kind, is dropped, never fatal.
+  Old peers ignore it (fixtures `request` / `status` are the old-peer view;
+  `request-lk-node-hash` / `status-active-lk-node-hash` carry it).
+
 Unknown future values in optional `targetKind`, capability, reason,
 `deliveryRoute`, or `failureCode` metadata are ignored rather than making an
 otherwise known packet unparsable. Unknown packet `kind`, required `action`,
@@ -1528,6 +1546,19 @@ verdict parses the line, and the web client reproduces it
 - `jbMinMsBucketVectors` (#375/#374): the `jb_min_ms` dimension is the
   bucket of that interval average (`0` below 0.5 ms, then `1_19`, `20_49`,
   `50_99`, `100_199`, `200_plus`), never raw ms.
+
+- `lkEdgeTelemetry` (#372): the edge dimensions' classifiers, shared by
+  `sfu_edge.rs` and `shared/logic/lkNodeHash.ts`. `nodeHashVectors`
+  (`lkNodeHash`), the `sameEdge` truth table, `selfHostedSfu` (`false` only
+  for a `livekit.cloud` / `*.livekit.cloud` host, `unknown` with no parseable
+  host), `regionTokens` (`lk_region`: the server region lowercased, other
+  characters `_`, 32 chars max; `unknown` for any non-Cloud SFU or an empty
+  region, since a self-hosted region is operator config text) and `icePath`
+  (canned `getStats` reports for the publisher and subscriber PCs and the
+  expected `ice_candidate_type` / `ice_protocol`, rule in `icePathRule`).
+  Native samples ICE on the first diagnostics tick and every 10 s after.
+  The web controller summary (#375) carries `lk_region`, `self_hosted_sfu`
+  and `same_edge` (`edgeDimensions`); it has no ICE producer yet.
 
 No wire field changed in #370 or #375, so there is no old-peer fixture
 (#375 reads the existing `petal.latency-probe` pong timestamps and the

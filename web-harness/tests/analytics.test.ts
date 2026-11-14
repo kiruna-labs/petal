@@ -50,6 +50,17 @@ test('closed allowlist is thirteen names and never posthog-js', () => {
   assert.match(analyticsSrc, /client: 'web'/);
 });
 
+test('#372: meeting_joined omits lk_region when no server info was read', () => {
+  const events = installTestSink();
+  try {
+    meetingJoined();
+    assert.equal(events[0]?.name, 'meeting_joined');
+    assert.equal(events[0]?.properties.lk_region, undefined);
+  } finally {
+    uninstallTestSink();
+  }
+});
+
 test('keyless capture is a no-op outside the test sink', () => {
   uninstallTestSink();
   assert.equal(apiKey(), undefined);
@@ -60,16 +71,18 @@ test('keyless capture is a no-op outside the test sink', () => {
 test('payloads only carry allowlisted keys and client=web', () => {
   const events = installTestSink();
   try {
-    meetingJoined();
+    meetingJoined('us-east-1');
     shareStarted('picker');
     permissionDenied('mic');
     assert.equal(events[0]?.name, 'meeting_joined');
+    // #372: the edge region rides meeting_joined.
+    assert.equal(events[0]?.properties.lk_region, 'us-east-1');
     assert.equal(events[0]?.properties.client, 'web');
     for (const event of events) {
       for (const key of Object.keys(event.properties)) {
         assert.ok(
           commonPropertyKeys().includes(key) ||
-            ['source', 'kind', 'reason', 'duration_bucket', 'reconnect_count_bucket', 'outcome', 'change'].includes(
+            ['source', 'kind', 'reason', 'duration_bucket', 'reconnect_count_bucket', 'outcome', 'change', 'lk_region'].includes(
               key
             ),
           `leaked property ${key}`

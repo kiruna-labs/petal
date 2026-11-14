@@ -93,7 +93,10 @@ contact any of these.
 - **What is sent:** only the closed list of events and properties in
   [`docs/POSTHOG_EVENT_ALLOWLIST.md`](docs/POSTHOG_EVENT_ALLOWLIST.md). Every
   event carries the app version, OS, OS version, CPU architecture and
-  `client` (`native` or `web`). Durations are sent as coarse buckets. Room
+  `client` (`native` or `web`). `meeting_joined` also carries the LiveKit
+  server's region (`lk_region`: the edge you were routed to, not your
+  location; `unknown` for a self-hosted server). Durations are sent as
+  coarse buckets. Room
   names, identities, display names, window titles, device names, key codes,
   clipboard contents, pointer coordinates and tokens are never sent.
 - **Anonymous id:** each install picks a random 128-bit id, stored locally

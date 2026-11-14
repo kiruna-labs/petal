@@ -1729,6 +1729,62 @@
         "v",
         "windowId"
       ]
+    },
+    {
+      "name": "request-lk-node-hash",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 6,
+        "kind": "request",
+        "lkNodeHash": "e4c80fa5"
+      },
+      "fields": [
+        "controllerId",
+        "kind",
+        "lkNodeHash",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "status-active-lk-node-hash",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "web-1",
+        "controllerId": "native-1",
+        "windowId": 42,
+        "seq": 14,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "status",
+        "status": "active",
+        "message": "Remote control active for shared window",
+        "supportsBinaryHotPath": true,
+        "supportsRedundantInput": true,
+        "supportsBinaryHotPathV2": true,
+        "lkNodeHash": "69e94d0a"
+      },
+      "fields": [
+        "controllerId",
+        "grantToken",
+        "kind",
+        "lkNodeHash",
+        "message",
+        "seq",
+        "status",
+        "supportsBinaryHotPath",
+        "supportsBinaryHotPathV2",
+        "supportsRedundantInput",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
     }
   ],
   "remoteClipboardMessages": [
@@ -3925,6 +3981,527 @@
       { "counter": 2376, "blocks": "0000110111101100" },
       { "counter": 32768, "blocks": "1100000000000000" },
       { "counter": 65535, "blocks": "1000000000000000" }
+    ]
+  },
+  "lkEdgeTelemetry": {
+    "issue": "#372",
+    "nodeHashSalt": "petal-lk-node:",
+    "nodeHashRule": "lkNodeHash = first 8 lowercase hex chars of SHA-256(UTF-8(nodeHashSalt + node_id)); empty node_id -> absent. The raw node_id never leaves the client.",
+    "nodeHashVectors": [
+      {
+        "nodeId": "ND_7xKqM2pLz9Rb",
+        "lkNodeHash": "69e94d0a"
+      },
+      {
+        "nodeId": "ND_Hq4cV8nTw3Ej",
+        "lkNodeHash": "e4c80fa5"
+      },
+      {
+        "nodeId": "localnode",
+        "lkNodeHash": "02adc8a7"
+      },
+      {
+        "nodeId": "ND_édge",
+        "lkNodeHash": "a2296352"
+      },
+      {
+        "nodeId": "",
+        "lkNodeHash": null
+      }
+    ],
+    "sameEdge": [
+      {
+        "local": "69e94d0a",
+        "peer": "69e94d0a",
+        "expected": "true"
+      },
+      {
+        "local": "69e94d0a",
+        "peer": "e4c80fa5",
+        "expected": "false"
+      },
+      {
+        "local": null,
+        "peer": "e4c80fa5",
+        "expected": "unknown"
+      },
+      {
+        "local": "69e94d0a",
+        "peer": null,
+        "expected": "unknown"
+      },
+      {
+        "local": null,
+        "peer": null,
+        "expected": "unknown"
+      },
+      {
+        "local": "69e94d0a",
+        "peer": "NOT-HEX!",
+        "expected": "unknown"
+      },
+      {
+        "local": "69e94d0a",
+        "peer": "69E94D0A",
+        "expected": "unknown"
+      }
+    ],
+    "selfHostedSfu": [
+      {
+        "url": "wss://petal-x1y2z3.livekit.cloud",
+        "expected": "false"
+      },
+      {
+        "url": "WSS://Petal-X1Y2Z3.LiveKit.Cloud:443/rtc?access_token=redacted",
+        "expected": "false"
+      },
+      {
+        "url": "ws://localhost:7880",
+        "expected": "true"
+      },
+      {
+        "url": "wss://lk.example.com",
+        "expected": "true"
+      },
+      {
+        "url": "wss://livekit.cloud.example.com",
+        "expected": "true"
+      },
+      {
+        "url": "wss://notlivekit.cloud",
+        "expected": "true"
+      },
+      {
+        "url": "ws://[::1]:7880",
+        "expected": "true"
+      },
+      {
+        "url": "",
+        "expected": "unknown"
+      },
+      {
+        "url": "not a url",
+        "expected": "unknown"
+      }
+    ],
+    "regionTokens": [
+      {
+        "region": "us-east-1",
+        "selfHostedSfu": "false",
+        "expected": "us-east-1"
+      },
+      {
+        "region": "Oregon",
+        "selfHostedSfu": "false",
+        "expected": "oregon"
+      },
+      {
+        "region": "eu central/2",
+        "selfHostedSfu": "false",
+        "expected": "eu_central_2"
+      },
+      {
+        "region": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "selfHostedSfu": "false",
+        "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "region": "",
+        "selfHostedSfu": "false",
+        "expected": "unknown"
+      },
+      {
+        "region": "ü",
+        "selfHostedSfu": "false",
+        "expected": "unknown"
+      },
+      {
+        "region": "İstanbul-1",
+        "selfHostedSfu": "false",
+        "expected": "_stanbul-1"
+      },
+      {
+        "region": "acme-dc-1",
+        "selfHostedSfu": "true",
+        "expected": "unknown"
+      },
+      {
+        "region": "us-east-1",
+        "selfHostedSfu": "unknown",
+        "expected": "unknown"
+      }
+    ],
+    "icePathRule": "Per peer connection: the transport's selectedCandidatePairId, else a nominated succeeded candidate-pair; its local-candidate gives candidateType and protocol (a relay uses relayProtocol, tls counting as tcp). Publisher and subscriber combine worst-per-dimension: relay > prflx > srflx > host, tcp > udp, unknown never overrides a known value. No selected pair on either PC -> no path (null); the native sampler then records unknown, and a connection never sampled omits both dimensions.",
+    "icePath": [
+      {
+        "name": "host-udp",
+        "publisher": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0,
+            "selectedCandidatePairId": "CP1"
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CP1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "L1",
+            "remoteCandidateId": "R1",
+            "nominated": true,
+            "state": "succeeded"
+          },
+          {
+            "type": "local-candidate",
+            "id": "L1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "candidateType": "host",
+            "protocol": "udp"
+          }
+        ],
+        "subscriber": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0,
+            "selectedCandidatePairId": "CP1"
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CP1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "L1",
+            "remoteCandidateId": "R1",
+            "nominated": true,
+            "state": "succeeded"
+          },
+          {
+            "type": "local-candidate",
+            "id": "L1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "candidateType": "host",
+            "protocol": "udp"
+          }
+        ],
+        "expected": {
+          "candidateType": "host",
+          "protocol": "udp"
+        }
+      },
+      {
+        "name": "relay-tcp-beats-srflx-udp",
+        "publisher": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0,
+            "selectedCandidatePairId": "CP1"
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CP1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "L1",
+            "remoteCandidateId": "R1",
+            "nominated": true,
+            "state": "succeeded"
+          },
+          {
+            "type": "local-candidate",
+            "id": "L1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "candidateType": "relay",
+            "protocol": "udp",
+            "relayProtocol": "tcp"
+          }
+        ],
+        "subscriber": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0,
+            "selectedCandidatePairId": "CP1"
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CP1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "L1",
+            "remoteCandidateId": "R1",
+            "nominated": true,
+            "state": "succeeded"
+          },
+          {
+            "type": "local-candidate",
+            "id": "L1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "candidateType": "srflx",
+            "protocol": "udp"
+          }
+        ],
+        "expected": {
+          "candidateType": "relay",
+          "protocol": "tcp"
+        }
+      },
+      {
+        "name": "relay-tls-counts-as-tcp",
+        "publisher": [],
+        "subscriber": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0,
+            "selectedCandidatePairId": "CP1"
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CP1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "L1",
+            "remoteCandidateId": "R1",
+            "nominated": true,
+            "state": "succeeded"
+          },
+          {
+            "type": "local-candidate",
+            "id": "L1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "candidateType": "relay",
+            "protocol": "udp",
+            "relayProtocol": "tls"
+          }
+        ],
+        "expected": {
+          "candidateType": "relay",
+          "protocol": "tcp"
+        }
+      },
+      {
+        "name": "relay-udp",
+        "publisher": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0,
+            "selectedCandidatePairId": "CP1"
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CP1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "L1",
+            "remoteCandidateId": "R1",
+            "nominated": true,
+            "state": "succeeded"
+          },
+          {
+            "type": "local-candidate",
+            "id": "L1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "candidateType": "relay",
+            "protocol": "udp",
+            "relayProtocol": "udp"
+          }
+        ],
+        "subscriber": [],
+        "expected": {
+          "candidateType": "relay",
+          "protocol": "udp"
+        }
+      },
+      {
+        "name": "worst-per-dimension",
+        "publisher": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0,
+            "selectedCandidatePairId": "CP1"
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CP1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "L1",
+            "remoteCandidateId": "R1",
+            "nominated": true,
+            "state": "succeeded"
+          },
+          {
+            "type": "local-candidate",
+            "id": "L1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "candidateType": "relay",
+            "protocol": "udp",
+            "relayProtocol": "udp"
+          }
+        ],
+        "subscriber": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0,
+            "selectedCandidatePairId": "CP1"
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CP1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "L1",
+            "remoteCandidateId": "R1",
+            "nominated": true,
+            "state": "succeeded"
+          },
+          {
+            "type": "local-candidate",
+            "id": "L1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "candidateType": "host",
+            "protocol": "tcp"
+          }
+        ],
+        "expected": {
+          "candidateType": "relay",
+          "protocol": "tcp"
+        }
+      },
+      {
+        "name": "nominated-pair-fallback",
+        "publisher": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CPX",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "LX",
+            "remoteCandidateId": "R1",
+            "nominated": false,
+            "state": "failed"
+          },
+          {
+            "type": "local-candidate",
+            "id": "LX",
+            "timestamp": 0,
+            "transportId": "T01",
+            "candidateType": "relay",
+            "protocol": "tcp"
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CP2",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "L2",
+            "remoteCandidateId": "R1",
+            "nominated": true,
+            "state": "succeeded"
+          },
+          {
+            "type": "local-candidate",
+            "id": "L2",
+            "timestamp": 0,
+            "transportId": "T01",
+            "candidateType": "prflx",
+            "protocol": "udp"
+          }
+        ],
+        "subscriber": [],
+        "expected": {
+          "candidateType": "prflx",
+          "protocol": "udp"
+        }
+      },
+      {
+        "name": "unknown-never-overrides",
+        "publisher": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0,
+            "selectedCandidatePairId": "CP1"
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CP1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "L1",
+            "remoteCandidateId": "R1",
+            "nominated": true,
+            "state": "succeeded"
+          },
+          {
+            "type": "local-candidate",
+            "id": "L1",
+            "timestamp": 0,
+            "protocol": "udp"
+          }
+        ],
+        "subscriber": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0,
+            "selectedCandidatePairId": "CP1"
+          },
+          {
+            "type": "candidate-pair",
+            "id": "CP1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "localCandidateId": "L1",
+            "remoteCandidateId": "R1",
+            "nominated": true,
+            "state": "succeeded"
+          },
+          {
+            "type": "local-candidate",
+            "id": "L1",
+            "timestamp": 0,
+            "transportId": "T01",
+            "candidateType": "srflx",
+            "protocol": "udp"
+          }
+        ],
+        "expected": {
+          "candidateType": "srflx",
+          "protocol": "udp"
+        }
+      },
+      {
+        "name": "no-selected-pair",
+        "publisher": [
+          {
+            "type": "transport",
+            "id": "T01",
+            "timestamp": 0
+          }
+        ],
+        "subscriber": [],
+        "expected": null
+      }
     ]
   }
 }

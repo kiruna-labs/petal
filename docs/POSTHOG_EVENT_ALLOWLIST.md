@@ -87,7 +87,7 @@ deltas.
 
 | Event | Extra properties | Fires when |
 |---|---|---|
-| `meeting_joined` | — | Room connect succeeded |
+| `meeting_joined` | `lk_region` (token, #372): the SFU edge's region, `unknown` for a self-hosted SFU; omitted when the room reported no server info | Room connect succeeded |
 | `meeting_left` | `duration_bucket`, `reconnect_count_bucket` | Leave or disconnect |
 | `join_failed` | `reason`: `network` \| `no_backend` \| `token` \| `timeout` | Join did not connect. `no_backend` is native-only (a build with no baked `PETAL_BACKEND_URL`); the web classifier only yields `timeout` \| `token` \| `network`. |
 | `share_started` | `source`: `window` \| `display` \| `picker` | A share published |
@@ -118,7 +118,11 @@ fed by the web controller's receive path for the controlled window only
 (`web-harness/src/rcReceiverTiming.ts`): the stats-delta stages and counters,
 `sub_rtt_ms` / `pub_rtt_ms`, `receive_to_present_ms`, and the probe-offset
 `capture_to_receive_ms` / `capture_to_present_ms`; the event's common
-`client` property says which client sent it. The schema is
+`client` property says which client sent it. Both native roles get the edge dimensions from
+`sfu_edge.rs` (`lk_region`, `same_edge`, `self_hosted_sfu`,
+`ice_candidate_type`, `ice_protocol`, #372); the web controller gets
+`lk_region`, `same_edge` and `self_hosted_sfu` (`edgeDimensions` in
+`shared/logic/lkNodeHash.ts`), no ICE yet. The schema is
 pinned by `contracts/petal-contracts.json` -> `remoteControlLatencySummary`;
 tracking issue #369 says which phase feeds which stage. The same fields go
 to `petal.log` as one `remote-control-latency-summary:` line per interval.
@@ -134,10 +138,10 @@ to `petal.log` as one `remote-control-latency-summary:` line per interval.
 | `frames_dropped`, `freeze_count`, `nack_count`, `pli_count` | integer | Sum over the interval (#375): the controlled window's inbound-rtp counter deltas. Omitted when 0; a counter that went backwards (resubscribe) contributes nothing. |
 | `offset_err_ms` | integer ms | Max over the interval (#371): the clock-offset error bound (half the best probe round trip) of the offset-corrected samples (`input_leg_ms` / `input_leg_lossy_ms` on the host, `capture_to_receive_ms` / `capture_to_present_ms` on the web controller). Sent whenever such a sample was recorded, 0 included; never emits an interval on its own. |
 | `packets_lost_pct_x100` | integer | Max over the interval (#375): the worst 1 s packet loss on the controlled window, in hundredths of a percent. Never emits an interval on its own. |
-| `lk_region` | token | SFU edge region (coarse, not the user's location) |
-| `same_edge`, `self_hosted_sfu` | `true` \| `false` \| `unknown` | |
-| `ice_candidate_type` | `host` \| `srflx` \| `prflx` \| `relay` \| `unknown` | |
-| `ice_protocol` | `udp` \| `tcp` \| `unknown` | |
+| `lk_region` | token | SFU edge region (coarse, not the user's location); `unknown` for a self-hosted SFU; removed from the session if a reconnect's server sends no info (#372) |
+| `same_edge`, `self_hosted_sfu` | `true` \| `false` \| `unknown` | `same_edge` compares the two sides' salted node hashes (`lkNodeHash`, never the node id); `self_hosted_sfu` is `false` only for a `*.livekit.cloud` URL (#372) |
+| `ice_candidate_type` | `host` \| `srflx` \| `prflx` \| `relay` \| `unknown` | Local candidate of the selected pair, worst of the publisher and subscriber PCs, resampled every 10 s and right after a reconnect; `unknown` while no pair is selected or a reconnect awaits its first sample (#372) |
+| `ice_protocol` | `udp` \| `tcp` \| `unknown` | Same pair; a relay reports its client-to-TURN protocol (TLS counts as `tcp`) (#372) |
 | `window_codec` | `h264` \| `h265` \| `vp8` \| `vp9` \| `av1` \| `unknown` | |
 | `content_change` | `detected` \| `unknown` | |
 | `jb_min_ms` | `0` \| `1_19` \| `20_49` \| `50_99` \| `100_199` \| `200_plus` | Bucket of the latest 1 s average of the controlled window's `jitterBufferMinimumDelay` (#374/#375). A bucket, never raw ms. |
