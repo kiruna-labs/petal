@@ -1045,8 +1045,9 @@ mod tests {
             crate::rc_receiver_timing::controlled_frame_stamp(host, 42, crate::time_util::now_us(), Some(frame_id), epoch)
                 .expect("controlled")
         };
-        crate::rc_receiver_timing::record_present(stamp(10), host, 42, crate::time_util::now_us(), 8.0);
+        // Sent before the first controlled frame: that frame must not erase it.
         crate::rc_photon::controller_sent(&click);
+        crate::rc_receiver_timing::record_present(stamp(10), host, 42, crate::time_util::now_us(), 8.0);
         crate::rc_receiver_timing::record_present(stamp(11), host, 42, crate::time_util::now_us(), 8.0);
         assert_eq!(crate::rc_photon::controller_state_for_test(host, 42), Some((vec![10, 11], 1)));
         let mut frame = message(RemoteControlType::InputFrame, None);

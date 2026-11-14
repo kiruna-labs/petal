@@ -1573,9 +1573,9 @@ verdict parses the line, and the web client reproduces it
   display) and does not set `present_timing`.
 - Press-to-photon (#376): `photon_ms` = presentation of the first frame
   whose trailer id is `>=` the host's `inputFrame.frameId` − the controller's
-  own production instant for that input `seq` (`sentAtMs` moved onto the
-  monotonic clock, at most 2 s back). Both ends are the controller's clock,
-  so no offset. Web presentation is the rVFC `expectedDisplayTime` (the same
+  monotonic send instant for that input `seq` (`performance.now()` at the web
+  publish, `Instant` at the native `remote_control_send`; never the wall-clock
+  `sentAtMs`). Both ends are the controller's clock, so no offset. Web presentation is the rVFC `expectedDisplayTime` (the same
   loop as `capture_to_present_ms`); native is the compositor hand-off + one
   refresh (estimated). `photonCorrelator` pins the bounds (64 sent inputs, 2 s
   for an unannounced one, 2 s presented-frame ring for a frame that beat the
@@ -1583,7 +1583,8 @@ verdict parses the line, and the web client reproduces it
   `photonInputFilterVectors` are run by `shared/logic/photonCorrelator.ts` and
   `rc_photon.rs`. An announced input not presented within 1 s adds one
   `photon_timeout`, never a sample. A drop in the presented frame id, a new
-  subscription, a re-grant or a release clears the state. The controller sets
+  subscription, a re-grant or a release clears the state (the host also
+  clears a controller's markers when it revokes that controller). The controller sets
   `content_change` from the host's `contentChange`. Host: macOS only (the
   #373 match point in the ScreenCaptureKit callback; the frame id is the one
   that publish accepted). A Windows host sends no `inputFrame` yet.

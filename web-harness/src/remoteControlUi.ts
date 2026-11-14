@@ -37,7 +37,6 @@ import { RcLatencyAggregator, rcLatencySummaryLogLine } from '@petal/shared/logi
 import { remoteControlLatencySummary } from './analytics.ts';
 import { browserSupportsFrameMetadata, createRcReceiverTiming, type RcReceiverTarget } from './rcReceiverTiming.ts';
 import {
-  PHOTON_SENT_TTL_MS,
   PhotonCorrelator,
   PhotonInputFilter,
   type PhotonOutcome,
@@ -104,8 +103,20 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
   // discrete sends by seq, the host's inputFrame, and presented frames from
   // the receiver-timing rVFC loop below.
   const photon = new PhotonCorrelator();
-  const photonFilter = new PhotonInputFilter();
+  let photonFilter = new PhotonInputFilter();
   let photonContentChange: 'detected' | 'unknown' | null = null;
+  // The grant the photon state belongs to; any other one starts over (as native does).
+  let photonGrant: string | null = null;
+  function resetPhoton() {
+    photon.reset();
+    photonFilter = new PhotonInputFilter();
+    photonContentChange = null;
+  }
+  function adoptPhotonGrant(grant: string | null) {
+    if (grant === photonGrant) return;
+    resetPhoton();
+    photonGrant = grant;
+  }
   function recordPhoton(outcomes: PhotonOutcome[]) {
     for (const outcome of outcomes) {
       if (outcome.kind === 'timeout') {
@@ -119,21 +130,18 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
   function notePhotonSend(message: RemoteControlMessage) {
     const active = state.activeRemoteControl;
     if (!active?.grantToken || active.targetUserId !== message.targetUserId || active.windowId !== message.windowId) return;
+    adoptPhotonGrant(active.grantToken);
+    // performance.now() only: never mixed with the wall-clock sentAtMs.
     const nowPerf = performance.now();
     if (!photonFilter.admit(message as { kind: string; action?: string; repeat?: boolean }, nowPerf)) return;
-    // sentAtMs is the production stamp (before any queue); move it onto the monotonic clock.
-    const waitedMs = typeof message.sentAtMs === 'number' ? Math.min(Math.max(0, Date.now() - message.sentAtMs), PHOTON_SENT_TTL_MS) : 0;
-    recordPhoton(photon.noteSent(message.seq, nowPerf - waitedMs));
+    recordPhoton(photon.noteSent(message.seq, nowPerf));
   }
 
   const receiverTiming = createRcReceiverTiming({
     aggregator: rcLatency,
     photon: {
       presented: (frameId, presentMs) => recordPhoton(photon.notePresented(frameId, presentMs)),
-      reset: () => {
-        photon.reset();
-        photonContentChange = null;
-      },
+      reset: resetPhoton,
     },
     clock: (hostIdentity, nowMs) => ctx.cb.peerClockEstimate?.(hostIdentity, nowMs) ?? null,
     publisherStats: async () => (await state.room?.engine?.pcManager?.publisher?.getStats?.()) ?? null,
@@ -157,6 +165,7 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
     const active = Boolean(state.room && state.activeRemoteControl?.grantToken);
     // #376: before the sync, so a timeout lands in the interval it belongs to.
     recordPhoton(photon.expire(performance.now()));
+    adoptPhotonGrant(active ? (state.activeRemoteControl?.grantToken ?? null) : null);
     // Monotonic, like Rust's Instant: a wall-clock step must not skew the cadence.
     rcLatency.sync(active, performance.now());
     if (active) {
@@ -450,6 +459,7 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
       ) {
         return;
       }
+      adoptPhotonGrant(active.grantToken ?? null);
       photonContentChange = message.contentChange;
       recordPhoton(photon.noteInputFrame(message.seq, message.frameId, performance.now()));
       return;

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use crate::rc_latency_telemetry::{self, Counter, Dimension, RcRole, Stage};
 use crate::remote_control_core::{RemoteControlAction, RemoteControlMessage, RemoteControlType};
 use crate::remote_control::CapturedContentChange;
-use crate::time_util::{now_ms, now_us};
+use crate::time_util::now_us;
 
 pub(crate) const SENT_CAPACITY: usize = 64;
 pub(crate) const SENT_TTL_MS: f64 = 2000.0;
@@ -358,6 +358,15 @@ impl HostPhoton {
             .retain(|_, at| now.saturating_duration_since(*at) < HOST_TTL);
     }
 
+    pub(crate) fn clear_controller(&mut self, window_id: u32, controller_id: &str) {
+        let mine = |window: u32, controller: &str| window == window_id && controller == controller_id;
+        self.filters.retain(|(window, controller), _| !mine(*window, controller));
+        self.markers.retain(|(window, controller), _| !mine(*window, controller));
+        self.awaiting
+            .retain(|entry| !mine(entry.window_id, &entry.controller_id));
+        self.last_marked.remove(controller_id);
+    }
+
     pub(crate) fn clear_window(&mut self, window_id: u32) {
         self.filters.retain(|(window, _), _| *window != window_id);
         self.markers.retain(|(window, _), _| *window != window_id);
@@ -386,6 +395,10 @@ pub(crate) fn host_note_captured(window_id: u32, capture_seq: u64, change: Captu
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn host_take_published(window_id: u32, capture_seq: u64, frame_id: u32) -> Vec<Announcement> {
     lock(host()).take_published(window_id, capture_seq, frame_id, Instant::now())
+}
+
+pub(crate) fn host_clear_controller(window_id: u32, controller_id: &str) {
+    lock(host()).clear_controller(window_id, controller_id);
 }
 
 pub(crate) fn host_clear_window(window_id: u32) {
@@ -466,10 +479,12 @@ impl ControllerPhoton {
     ) -> Vec<PhotonOutcome> {
         let window = self.window(host, window_id, grant);
         // A new subscription (republish, resubscribe) restarts frame ids.
-        if window.track_epoch != Some(track_epoch) {
+        // The first epoch under a grant only binds: inputs sent before the
+        // first controlled frame must survive it (Codex r1).
+        if window.track_epoch.is_some_and(|epoch| epoch != track_epoch) {
             window.correlator.reset();
-            window.track_epoch = Some(track_epoch);
         }
+        window.track_epoch = Some(track_epoch);
         window.correlator.note_presented(u64::from(frame_id), present_ms)
     }
 
@@ -505,22 +520,13 @@ fn record(outcomes: Vec<PhotonOutcome>, content_change: Option<&str>) {
     }
 }
 
-/// The instant the input was produced: `sentAtMs` moved onto the monotonic
-/// clock (it is stamped before any send queue), capped so a wild wall clock
-/// cannot fake a long wait.
-fn production_instant(sent_at_ms: Option<u64>, now: Instant, wall_now_ms: u64) -> Instant {
-    let back_ms = sent_at_ms
-        .map(|sent| wall_now_ms.saturating_sub(sent).min(SENT_TTL_MS as u64))
-        .unwrap_or(0);
-    now.checked_sub(Duration::from_millis(back_ms)).unwrap_or(now)
-}
-
-/// Controller: an input left for a host window we control.
+/// Controller: an input left for a host window we control. Stamped with
+/// `Instant` here, never from wall-clock `sentAtMs` (no clock mixing).
 pub(crate) fn controller_sent(message: &RemoteControlMessage) {
     let Some(grant) = crate::rc_input_timing::window_grant(&message.target_user_id, message.window_id) else {
         return;
     };
-    let sent_ms = mono_ms(production_instant(message.sent_at_ms, Instant::now(), now_ms()));
+    let sent_ms = mono_ms(Instant::now());
     let outcomes = lock(controller()).sent(message, grant, sent_ms);
     record(outcomes, None);
 }
@@ -952,12 +958,36 @@ mod tests {
     }
 
     #[test]
-    fn production_instant_uses_sent_at_but_never_more_than_the_ttl() {
-        let now = Instant::now() + Duration::from_secs(10);
-        assert_eq!(production_instant(None, now, 5_000), now);
-        assert_eq!(production_instant(Some(4_990), now, 5_000), now - Duration::from_millis(10));
-        assert_eq!(production_instant(Some(9_000), now, 5_000), now, "a future stamp is now");
-        assert_eq!(production_instant(Some(0), now, 50_000), now - Duration::from_millis(2_000));
+    fn an_input_sent_before_the_first_controlled_frame_survives_it() {
+        let mut controller = ControllerPhoton::default();
+        let mut sent = click("me", 5, 41);
+        sent.target_user_id = "host-a".to_string();
+        controller.sent(&sent, 1, 0.0);
+        assert!(controller.presented("host-a", 5, 1, 9, 3, 20.0).is_empty());
+        let mut frame = sent.clone();
+        frame.message_type = RemoteControlType::InputFrame;
+        frame.controller_id = "host-a".to_string();
+        frame.frame_id = Some(3);
+        assert_eq!(controller.input_frame(&frame, 1, 30.0), vec![PhotonOutcome::Photon { seq: 41, ms: 20.0 }]);
+    }
+
+    #[test]
+    fn revoking_one_controller_clears_only_its_host_state() {
+        let t0 = Instant::now();
+        let mut host = HostPhoton::default();
+        host.note_injected(&click("a", 2, 1), t0);
+        host.note_injected(&click("b", 2, 2), t0);
+        host.clear_controller(2, "a");
+        // Re-granted at once: not rate-limited by the old session.
+        host.note_injected(&click("a", 2, 3), t0 + Duration::from_millis(10));
+        host.note_captured(2, 1, CapturedContentChange::Detected, t0 + Duration::from_millis(20));
+        let mut got: Vec<_> = host
+            .take_published(2, 1, 9, t0 + Duration::from_millis(20))
+            .into_iter()
+            .map(|a| (a.controller_id, a.seq))
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![("a".to_string(), 3), ("b".to_string(), 2)]);
     }
 
     /// The `inputFrame` fixture parses on this build, and an envelope that
@@ -1008,6 +1038,8 @@ mod tests {
         let rc = rc.split_once("\n#[cfg(test)]\nmod tests {").map_or(rc, |(head, _)| head);
         let replay = &rc[rc.find("ReplayRunOutcome::Completed(Ok(())) => {").unwrap()..];
         assert!(replay[..400].contains("rc_photon::host_note_injected(&task.message)"));
+        let revoke = &rc[rc.find("fn revoke(window_id: u32, controller_id: &str) {").unwrap()..];
+        assert!(revoke[..1200].contains("rc_photon::host_clear_controller(window_id, controller_id)"));
         let captured = &rc[rc.find("pub(crate) fn note_captured_frame(").unwrap()..];
         assert!(captured[..300].contains("rc_photon::host_note_captured("));
         let send = &rc[rc.find("pub async fn remote_control_send(").unwrap()..];

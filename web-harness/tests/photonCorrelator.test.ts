@@ -190,6 +190,15 @@ test('web controller: real send funnel + rVFC presents + inputFrame produce phot
     perfNow = 12_100;
     mock.timers.tick(RC_LATENCY_SYNC_MS);
 
+    // A re-grant on the same track starts over: a click from the old grant never scores.
+    perfNow = 12_200;
+    await ui.publishRemoteControl(click(4));
+    frames.set(901, { userTimestamp: 1n, frameId: 50 });
+    present(901, 12_250);
+    (ctx.state.activeRemoteControl as { grantToken: string }).grantToken = 'grant-2';
+    perfNow = 12_300;
+    ui.handleRemoteControlPayload(inputFrame(4, 50), 'native-host');
+
     ui.stopRemoteControl();
     mock.timers.tick(RC_LATENCY_SYNC_MS);
     const events = sink.filter((event) => event.name === 'remote_control_latency_summary');

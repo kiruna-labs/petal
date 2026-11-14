@@ -1928,6 +1928,8 @@ fn revoke(window_id: u32, controller_id: &str) {
     // Refs #288: same insert-only leak class #410 fixed for the other
     // per-(window, controller) maps -- see `clear_discrete_admissions`.
     clear_discrete_admissions(|w, c| !(w == window_id && c == controller_id));
+    // #376: a re-grant must not inherit this controller's markers or limits.
+    crate::rc_photon::host_clear_controller(window_id, controller_id);
     // #365: drain + grant removal under the fence -- see `input_authority_fence`.
     let fence = input_authority_fence().lock_unpoisoned();
     let releases = drain_pressed_for_controller(window_id, controller_id);
