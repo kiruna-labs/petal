@@ -24,8 +24,8 @@ import type { RemoteControlMessage } from '../src/trackNames.ts';
 
 type Step =
   | { op: 'sent'; seq: number; at: number }
-  | { op: 'presented'; frameId: number; at: number }
-  | { op: 'inputFrame'; seq: number; frameId: number; at: number }
+  | { op: 'presented'; track: string; frameId: number; at: number }
+  | { op: 'inputFrame'; seq: number; track: string; frameId: number; at: number }
   | { op: 'tick'; at: number }
   | { op: 'reset' };
 
@@ -54,8 +54,8 @@ test('correlator passes the shared contract vectors (before/after, skipped ids, 
     const got: PhotonOutcome[] = [];
     for (const step of vector.steps) {
       if (step.op === 'sent') got.push(...correlator.noteSent(step.seq, step.at));
-      else if (step.op === 'presented') got.push(...correlator.notePresented(step.frameId, step.at));
-      else if (step.op === 'inputFrame') got.push(...correlator.noteInputFrame(step.seq, step.frameId, step.at));
+      else if (step.op === 'presented') got.push(...correlator.notePresented(step.track, step.frameId, step.at));
+      else if (step.op === 'inputFrame') got.push(...correlator.noteInputFrame(step.seq, step.track, step.frameId, step.at));
       else if (step.op === 'tick') got.push(...correlator.expire(step.at));
       else correlator.reset();
     }
@@ -78,6 +78,9 @@ test('inputFrame parses; a malformed frame id is dropped; an unknown kind stays 
   assert.ok(parsed && parsed.kind === 'inputFrame');
   assert.equal(parsed.frameId, 1234);
   assert.equal(parsed.contentChange, 'detected');
+  assert.equal(parsed.trackSid, 'TR_window_example');
+  const noTrack = parseRemoteControlJson(JSON.stringify({ ...fixture, trackSid: 7 }));
+  assert.equal(noTrack?.kind === 'inputFrame' && noTrack.trackSid, undefined);
   assert.equal(parseRemoteControlJson(JSON.stringify({ ...fixture, frameId: -1 })), null);
   assert.equal(parseRemoteControlJson(JSON.stringify({ ...fixture, frameId: 2 ** 32 })), null);
   const newer = parseRemoteControlJson(JSON.stringify({ ...fixture, contentChange: 'region' }));
@@ -151,7 +154,7 @@ test('web controller: real send funnel + rVFC presents + inputFrame produce phot
   const encoder = new TextEncoder();
   const inputFrame = (seq: number, frameId: number) =>
     encoder.encode(
-      JSON.stringify({ v: 1, kind: 'inputFrame', targetUserId: 'web', controllerId: 'native-host', windowId: 7, seq, frameId, contentChange: 'detected' })
+      JSON.stringify({ v: 1, kind: 'inputFrame', targetUserId: 'web', controllerId: 'native-host', windowId: 7, seq, frameId, contentChange: 'detected', trackSid: 'TR_1' })
     );
   try {
     const ui = setupRemoteControlUi(ctx) as unknown as {

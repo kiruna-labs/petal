@@ -487,10 +487,10 @@ pub(crate) fn spawn_for_window_track(
 pub(crate) struct PresentStamp {
     decoded_at_us: u64,
     grant: u64,
-    /// #376: the trailer frame id and the subscription it came from, for
-    /// the press-to-photon correlator (`rc_photon`).
+    /// #376: the trailer frame id and its publication (`rc_photon::track_key`
+    /// of the track sid), for the press-to-photon correlator.
     frame_id: Option<u32>,
-    track_epoch: u64,
+    track: u64,
 }
 
 /// The decode-side stamp for a frame of a window we control; `None` (no
@@ -500,13 +500,13 @@ pub(crate) fn controlled_frame_stamp(
     window_id: u32,
     decoded_at_us: u64,
     frame_id: Option<u32>,
-    track_epoch: u64,
+    track: u64,
 ) -> Option<PresentStamp> {
     rc_input_timing::window_grant(host_identity, window_id).map(|grant| PresentStamp {
         decoded_at_us,
         grant,
         frame_id,
-        track_epoch,
+        track,
     })
 }
 
@@ -550,9 +550,8 @@ pub(crate) fn record_present(
             host_identity,
             window_id,
             stamp.grant,
-            stamp.track_epoch,
+            stamp.track,
             frame_id,
-            handed_off_us,
             refresh_ms,
         );
     }
@@ -769,7 +768,7 @@ mod tests {
             decoded_at_us: 1_000_000,
             grant: 5,
             frame_id: None,
-            track_epoch: 1,
+            track: 1,
         };
         record_present_checked(&aggregator, stamp, None, 1_004_000, 8.0);
         record_present_checked(&aggregator, stamp, Some(6), 1_004_000, 8.0);

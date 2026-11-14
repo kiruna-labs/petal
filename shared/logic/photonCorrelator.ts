@@ -58,12 +58,14 @@ export class PhotonInputFilter {
   }
 }
 
-type SentEntry = { sentMs: number; frameId: number | null };
+/** `track` is the publication (LiveKit track sid); `null` on an announcement matches any. */
+type SentEntry = { sentMs: number; frameId: number | null; track: string | null };
 
 export class PhotonCorrelator {
   // Insertion order is send order (a Map keeps it).
   private sent = new Map<number, SentEntry>();
-  private ring: Array<{ frameId: number; presentMs: number }> = [];
+  private ring: Array<{ track: string; frameId: number; presentMs: number }> = [];
+  private lastTrack: string | null = null;
   private lastFrameId: number | null = null;
 
   /** A discrete input left this controller at `sentMs` (monotonic). */
@@ -74,20 +76,28 @@ export class PhotonCorrelator {
       const oldest = this.sent.keys().next().value as number;
       this.sent.delete(oldest);
     }
-    this.sent.set(seq, { sentMs, frameId: null });
+    this.sent.set(seq, { sentMs, frameId: null, track: null });
     return out;
   }
 
-  /** A frame of the controlled window was presented at `presentMs`. */
-  notePresented(frameId: number, presentMs: number): PhotonOutcome[] {
+  /** A frame of publication `track` was presented at `presentMs`. */
+  notePresented(track: string, frameId: number, presentMs: number): PhotonOutcome[] {
     const out = this.expire(presentMs);
-    // Frame ids only grow within one publication; a drop means a new track.
-    if (this.lastFrameId !== null && frameId < this.lastFrameId) this.reset();
+    if (track !== this.lastTrack) {
+      // A new (or first) publication: old frames and other-publication
+      // announcements go; inputs not yet announced, or announced for this track, stay.
+      this.ring = [];
+      for (const [seq, entry] of this.sent) if (entry.track !== null && entry.track !== track) this.sent.delete(seq);
+    } else if (this.lastFrameId !== null && frameId < this.lastFrameId) {
+      // Ids only grow within one publication; a drop is a restart we cannot place.
+      this.reset();
+    }
+    this.lastTrack = track;
     this.lastFrameId = frameId;
-    this.ring.push({ frameId, presentMs });
+    this.ring.push({ track, frameId, presentMs });
     if (this.ring.length > PHOTON_RING_CAPACITY) this.ring.shift();
     for (const [seq, entry] of this.sent) {
-      if (entry.frameId === null || frameId < entry.frameId) continue;
+      if (entry.frameId === null || frameId < entry.frameId || !sameTrack(entry.track, track)) continue;
       this.sent.delete(seq);
       const outcome = resolve(seq, entry.sentMs, presentMs);
       if (outcome) out.push(outcome);
@@ -95,14 +105,18 @@ export class PhotonCorrelator {
     return out;
   }
 
-  /** The host said input `seq` first shows in frame `frameId`. */
-  noteInputFrame(seq: number, frameId: number, nowMs: number): PhotonOutcome[] {
+  /** The host said input `seq` first shows in frame `frameId` of publication `track`. */
+  noteInputFrame(seq: number, track: string | null, frameId: number, nowMs: number): PhotonOutcome[] {
     const out = this.expire(nowMs);
     const entry = this.sent.get(seq);
     // Unknown (never sent, expired, other track) or a duplicate announcement.
     if (!entry || entry.frameId !== null) return out;
     entry.frameId = frameId;
-    const hit = this.ring.find((frame) => frame.frameId >= frameId && frame.presentMs >= entry.sentMs);
+    entry.track = track;
+    // Another publication's frame never matches, whatever its id (a republish restarts ids).
+    const hit = this.ring.find(
+      (frame) => sameTrack(track, frame.track) && frame.frameId >= frameId && frame.presentMs >= entry.sentMs
+    );
     if (hit) {
       this.sent.delete(seq);
       const outcome = resolve(seq, entry.sentMs, hit.presentMs);
@@ -131,12 +145,17 @@ export class PhotonCorrelator {
   reset(): void {
     this.sent.clear();
     this.ring = [];
+    this.lastTrack = null;
     this.lastFrameId = null;
   }
 
   pendingCount(): number {
     return this.sent.size;
   }
+}
+
+function sameTrack(announced: string | null, presented: string): boolean {
+  return announced === null || announced === presented;
 }
 
 function resolve(seq: number, sentMs: number, presentMs: number): PhotonOutcome | null {

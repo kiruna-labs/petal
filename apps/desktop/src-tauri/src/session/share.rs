@@ -1893,10 +1893,12 @@ fn announce_input_frames(
     app: &tauri::AppHandle,
     window_id: u32,
     capture_seq: u64,
+    track_sid: &str,
     timing: Option<crate::transport::publisher::PublishedFrameTiming>,
 ) {
     if let Some(timing) = timing.filter(|t| t.source_accepted) {
-        crate::remote_control::announce_published_frame(app, window_id, capture_seq, timing.frame_id);
+        // The sid scopes the frame id to this publication (a republish restarts ids).
+        crate::remote_control::announce_published_frame(app, window_id, capture_seq, timing.frame_id, track_sid);
     }
 }
 
@@ -6095,7 +6097,7 @@ fn spawn_share_pump(
                         timing,
                     );
                     if let Some(capture_seq) = capture_seq {
-                        announce_input_frames(&pump_app, window_id, capture_seq, timing);
+                        announce_input_frames(&pump_app, window_id, capture_seq, &current.sid().to_string(), timing);
                     }
                     record_published_frame_timing(&pump_diagnostics, window_id, timing);
                     rejected_push_retry
@@ -6701,7 +6703,7 @@ fn spawn_share_pump(
                 "raw",
                 timing,
             );
-            announce_input_frames(&pump_app, window_id, capture_seq, timing);
+            announce_input_frames(&pump_app, window_id, capture_seq, &current.sid().to_string(), timing);
             rejected_push_retry.observe_push(timing.map(|t| t.source_accepted), Instant::now());
             record_published_frame_timing(&pump_diagnostics, window_id, timing);
             if !push_reached_source(timing) {

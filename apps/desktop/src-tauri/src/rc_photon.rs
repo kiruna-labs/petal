@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 use crate::rc_latency_telemetry::{self, Counter, Dimension, RcRole, Stage};
 use crate::remote_control_core::{RemoteControlAction, RemoteControlMessage, RemoteControlType};
 use crate::remote_control::CapturedContentChange;
-use crate::time_util::now_us;
 
 pub(crate) const SENT_CAPACITY: usize = 64;
 pub(crate) const SENT_TTL_MS: f64 = 2000.0;
@@ -77,15 +76,31 @@ struct SentEntry {
     seq: u64,
     sent_ms: f64,
     frame_id: Option<u64>,
+    /// The publication the announcement named; `None` matches any.
+    track: Option<u64>,
 }
 
 /// See `shared/logic/photonCorrelator.ts`; every method expires first.
+/// Tracks are publication keys ([`track_key`] of the LiveKit track sid).
 #[derive(Debug, Default)]
 pub(crate) struct PhotonCorrelator {
     /// Send order.
     sent: VecDeque<SentEntry>,
-    ring: VecDeque<(u64, f64)>,
+    /// (track, frame id, present ms), presentation order.
+    ring: VecDeque<(u64, u64, f64)>,
+    last_track: Option<u64>,
     last_frame_id: Option<u64>,
+}
+
+fn same_track(announced: Option<u64>, presented: u64) -> bool {
+    announced.is_none_or(|track| track == presented)
+}
+
+/// A process-local key for a LiveKit track sid (FNV-1a 64).
+pub(crate) fn track_key(sid: &str) -> u64 {
+    sid.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 impl PhotonCorrelator {
@@ -101,25 +116,32 @@ impl PhotonCorrelator {
             seq,
             sent_ms,
             frame_id: None,
+            track: None,
         });
         out
     }
 
-    pub(crate) fn note_presented(&mut self, frame_id: u64, present_ms: f64) -> Vec<PhotonOutcome> {
+    pub(crate) fn note_presented(&mut self, track: u64, frame_id: u64, present_ms: f64) -> Vec<PhotonOutcome> {
         let mut out = self.expire(present_ms);
-        // Frame ids only grow within one publication; a drop means a new track.
-        if self.last_frame_id.is_some_and(|last| frame_id < last) {
+        if self.last_track != Some(track) {
+            // A new (or first) publication: old frames and other-publication
+            // announcements go; unannounced or same-track inputs stay.
+            self.ring.clear();
+            self.sent.retain(|entry| same_track(entry.track, track));
+        } else if self.last_frame_id.is_some_and(|last| frame_id < last) {
+            // Ids only grow within one publication; a drop is a restart we cannot place.
             self.reset();
         }
+        self.last_track = Some(track);
         self.last_frame_id = Some(frame_id);
-        self.ring.push_back((frame_id, present_ms));
+        self.ring.push_back((track, frame_id, present_ms));
         if self.ring.len() > RING_CAPACITY {
             self.ring.pop_front();
         }
         let mut kept = VecDeque::with_capacity(self.sent.len());
         for entry in self.sent.drain(..) {
             match entry.frame_id {
-                Some(announced) if frame_id >= announced => {
+                Some(announced) if frame_id >= announced && same_track(entry.track, track) => {
                     out.extend(resolve(entry.seq, entry.sent_ms, present_ms));
                 }
                 _ => kept.push_back(entry),
@@ -129,7 +151,13 @@ impl PhotonCorrelator {
         out
     }
 
-    pub(crate) fn note_input_frame(&mut self, seq: u64, frame_id: u64, now_ms: f64) -> Vec<PhotonOutcome> {
+    pub(crate) fn note_input_frame(
+        &mut self,
+        seq: u64,
+        track: Option<u64>,
+        frame_id: u64,
+        now_ms: f64,
+    ) -> Vec<PhotonOutcome> {
         let mut out = self.expire(now_ms);
         let Some(index) = self.sent.iter().position(|entry| entry.seq == seq) else {
             return out;
@@ -138,11 +166,15 @@ impl PhotonCorrelator {
             return out;
         }
         self.sent[index].frame_id = Some(frame_id);
+        self.sent[index].track = track;
         let sent_ms = self.sent[index].sent_ms;
-        if let Some((_, present_ms)) = self
+        // Another publication's frame never matches, whatever its id.
+        if let Some((_, _, present_ms)) = self
             .ring
             .iter()
-            .find(|(id, present_ms)| *id >= frame_id && *present_ms >= sent_ms)
+            .find(|(frame_track, id, present_ms)| {
+                same_track(track, *frame_track) && *id >= frame_id && *present_ms >= sent_ms
+            })
             .copied()
         {
             self.sent.remove(index);
@@ -167,7 +199,7 @@ impl PhotonCorrelator {
         while self
             .ring
             .front()
-            .is_some_and(|(_, present_ms)| *present_ms < now_ms - RING_MS)
+            .is_some_and(|(_, _, present_ms)| *present_ms < now_ms - RING_MS)
         {
             self.ring.pop_front();
         }
@@ -177,6 +209,7 @@ impl PhotonCorrelator {
     pub(crate) fn reset(&mut self) {
         self.sent.clear();
         self.ring.clear();
+        self.last_track = None;
         self.last_frame_id = None;
     }
 
@@ -416,7 +449,6 @@ struct ControlledWindow {
     filter: PhotonInputFilter,
     correlator: PhotonCorrelator,
     grant: Option<u64>,
-    track_epoch: Option<u64>,
 }
 
 /// Per (host identity, window). Only windows we hold a grant on.
@@ -465,7 +497,7 @@ impl ControllerPhoton {
         };
         self.window(&message.controller_id, message.window_id, grant)
             .correlator
-            .note_input_frame(message.seq, u64::from(frame_id), now_ms)
+            .note_input_frame(message.seq, message.track_sid.as_deref().map(track_key), u64::from(frame_id), now_ms)
     }
 
     pub(crate) fn presented(
@@ -473,19 +505,13 @@ impl ControllerPhoton {
         host: &str,
         window_id: u32,
         grant: u64,
-        track_epoch: u64,
+        track: u64,
         frame_id: u32,
         present_ms: f64,
     ) -> Vec<PhotonOutcome> {
-        let window = self.window(host, window_id, grant);
-        // A new subscription (republish, resubscribe) restarts frame ids.
-        // The first epoch under a grant only binds: inputs sent before the
-        // first controlled frame must survive it (Codex r1).
-        if window.track_epoch.is_some_and(|epoch| epoch != track_epoch) {
-            window.correlator.reset();
-        }
-        window.track_epoch = Some(track_epoch);
-        window.correlator.note_presented(u64::from(frame_id), present_ms)
+        self.window(host, window_id, grant)
+            .correlator
+            .note_presented(track, u64::from(frame_id), present_ms)
     }
 
     /// Sweeper tick: drop windows we no longer control, time out the rest.
@@ -559,22 +585,11 @@ fn content_change_dimension(value: Option<&str>) -> Option<&'static str> {
     }
 }
 
-/// Controller: the compositor handed a frame of a controlled window to the
-/// display at wall `handed_off_us`; it lights about one refresh later.
-pub(crate) fn controller_presented(
-    host: &str,
-    window_id: u32,
-    grant: u64,
-    track_epoch: u64,
-    frame_id: u32,
-    handed_off_us: u64,
-    refresh_ms: f64,
-) {
-    let now = Instant::now();
-    let since_handoff = Duration::from_micros(now_us().saturating_sub(handed_off_us));
-    let handed_off = now.checked_sub(since_handoff).unwrap_or(now);
-    let present_ms = mono_ms(handed_off) + refresh_ms;
-    let outcomes = lock(controller()).presented(host, window_id, grant, track_epoch, frame_id, present_ms);
+/// Controller: the compositor just handed a frame of a controlled window to
+/// the display; it lights about one refresh later. `Instant` only.
+pub(crate) fn controller_presented(host: &str, window_id: u32, grant: u64, track: u64, frame_id: u32, refresh_ms: f64) {
+    let present_ms = mono_ms(Instant::now()) + refresh_ms;
+    let outcomes = lock(controller()).presented(host, window_id, grant, track, frame_id, present_ms);
     if outcomes.is_empty() {
         return;
     }
@@ -594,17 +609,12 @@ pub(crate) fn controller_tick() {
 pub(crate) fn controller_state_for_test(host: &str, window_id: u32) -> Option<(Vec<u64>, usize)> {
     lock(controller()).windows.get(&(host.to_string(), window_id)).map(|window| {
         (
-            window.correlator.ring.iter().map(|(id, _)| *id).collect(),
+            window.correlator.ring.iter().map(|(_, id, _)| *id).collect(),
             window.correlator.sent.len(),
         )
     })
 }
 
-/// A unique id per window-track subscription loop (#376: frame ids restart).
-pub(crate) fn next_track_epoch() -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
 
 #[cfg(test)]
 mod tests {
@@ -650,12 +660,14 @@ mod tests {
     enum Step {
         Sent { seq: u64, at: f64 },
         Presented {
+            track: String,
             #[serde(rename = "frameId")]
             frame_id: u64,
             at: f64,
         },
         InputFrame {
             seq: u64,
+            track: String,
             #[serde(rename = "frameId")]
             frame_id: u64,
             at: f64,
@@ -733,11 +745,15 @@ mod tests {
             let mut correlator = PhotonCorrelator::default();
             let mut got = Vec::new();
             for step in &vector.steps {
-                got.extend(match *step {
-                    Step::Sent { seq, at } => correlator.note_sent(seq, at),
-                    Step::Presented { frame_id, at } => correlator.note_presented(frame_id, at),
-                    Step::InputFrame { seq, frame_id, at } => correlator.note_input_frame(seq, frame_id, at),
-                    Step::Tick { at } => correlator.expire(at),
+                got.extend(match step {
+                    Step::Sent { seq, at } => correlator.note_sent(*seq, *at),
+                    Step::Presented { track, frame_id, at } => {
+                        correlator.note_presented(track_key(track), *frame_id, *at)
+                    }
+                    Step::InputFrame { seq, track, frame_id, at } => {
+                        correlator.note_input_frame(*seq, Some(track_key(track)), *frame_id, *at)
+                    }
+                    Step::Tick { at } => correlator.expire(*at),
                     Step::Reset => {
                         correlator.reset();
                         Vec::new()
@@ -771,7 +787,7 @@ mod tests {
         let mut correlator = PhotonCorrelator::default();
         for seq in 0..1_000 {
             correlator.note_sent(seq, 0.0);
-            correlator.note_presented(seq, 1.0);
+            correlator.note_presented(1, seq, 1.0);
         }
         assert!(correlator.pending() <= SENT_CAPACITY);
         assert!(correlator.ring.len() <= RING_CAPACITY);
@@ -896,8 +912,9 @@ mod tests {
     #[test]
     fn controller_correlates_per_window_and_restarts_on_grant_or_track_change() {
         let mut controller = ControllerPhoton::default();
+        let (t9, t10) = (track_key("TR_9"), track_key("TR_10"));
         // Frames flow before any input; the first one binds the track epoch.
-        assert!(controller.presented("host-a", 5, 1, 9, 70, 0.0).is_empty());
+        assert!(controller.presented("host-a", 5, 1, t9, 70, 0.0).is_empty());
         let mut sent = click("me", 5, 21);
         sent.target_user_id = "host-a".to_string();
         assert!(controller.sent(&sent, 1, 0.0).is_empty());
@@ -905,8 +922,9 @@ mod tests {
         frame.message_type = RemoteControlType::InputFrame;
         frame.controller_id = "host-a".to_string();
         frame.frame_id = Some(77);
+        frame.track_sid = Some("TR_9".to_string());
         // Presented before the announcement: resolved retroactively.
-        assert!(controller.presented("host-a", 5, 1, 9, 77, 40.0).is_empty());
+        assert!(controller.presented("host-a", 5, 1, t9, 77, 40.0).is_empty());
         assert_eq!(controller.input_frame(&frame, 1, 50.0), vec![PhotonOutcome::Photon { seq: 21, ms: 40.0 }]);
 
         // A pointer move is never remembered.
@@ -915,16 +933,16 @@ mod tests {
         controller.sent(&moved, 1, 60.0);
         frame.seq = 22;
         frame.frame_id = Some(78);
-        controller.presented("host-a", 5, 1, 9, 78, 70.0);
+        controller.presented("host-a", 5, 1, t9, 78, 70.0);
         assert!(controller.input_frame(&frame, 1, 80.0).is_empty());
 
-        // A new subscription (track epoch) drops what the old one had.
+        // A republish (new sid) drops what was announced for the old one.
         sent.seq = 23;
         controller.sent(&sent, 1, 100.0);
         frame.seq = 23;
         frame.frame_id = Some(90);
         assert!(controller.input_frame(&frame, 1, 110.0).is_empty());
-        assert!(controller.presented("host-a", 5, 1, 10, 90, 120.0).is_empty());
+        assert!(controller.presented("host-a", 5, 1, t10, 90, 120.0).is_empty());
         assert!(controller.tick(|_, _| Some(1), 2_000.0).is_empty(), "no false timeout");
 
         // A re-grant starts over too.
@@ -1048,14 +1066,19 @@ mod tests {
         assert!(rc.contains("RemoteControlType::InputFrame => {\n            if remote_window_exists(&message.controller_id, message.window_id) {\n                crate::rc_photon::controller_input_frame(&message);"));
 
         let share = include_str!("session/share.rs");
-        assert!(share.contains("announce_input_frames(&pump_app, window_id, capture_seq, timing);"));
-        assert!(share.contains("crate::remote_control::announce_published_frame(app, window_id, capture_seq, timing.frame_id)"));
+        assert_eq!(
+            share.matches("announce_input_frames(&pump_app, window_id, capture_seq, &current.sid().to_string(), timing);").count(),
+            2,
+            "raw and retry pushes"
+        );
+        assert!(share.contains("crate::remote_control::announce_published_frame(app, window_id, capture_seq, timing.frame_id, track_sid)"));
         assert!(share.contains(".filter(|t| t.source_accepted)"));
 
         let subscriber = include_str!("transport/subscriber.rs");
-        assert_eq!(subscriber.matches("photon_track_epoch,\n").count(), 2, "both receive loops stamp the epoch");
+        assert_eq!(subscriber.matches("photon_track,\n").count(), 2, "both receive loops stamp the track");
         let timing = include_str!("rc_receiver_timing.rs");
         assert!(timing.contains("crate::rc_photon::controller_presented("));
+        assert!(rc.contains("message.track_sid = Some(track_sid.to_string());"), "inputFrame names its publication");
         let input_timing = include_str!("rc_input_timing.rs");
         assert!(input_timing.contains("crate::rc_photon::controller_tick();"));
     }

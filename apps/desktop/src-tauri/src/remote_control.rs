@@ -488,6 +488,7 @@ fn message_from_binary(
         lk_node_hash: None,
         frame_id: None,
         content_change: None,
+        track_sid: None,
         modifiers: RemoteControlModifiers {
             alt: modifiers & 1 != 0,
             ctrl: modifiers & 2 != 0,
@@ -1539,7 +1540,13 @@ fn take_input_latency_markers(
 /// #376: a capture of `window_id` was published as trailer `frame_id`. Tell
 /// each controller whose discrete input that capture (or an earlier one)
 /// first showed. Reliable and targeted, like `result`; never on pointer moves.
-pub(crate) fn announce_published_frame(app: &AppHandle, window_id: u32, capture_seq: u64, frame_id: u32) {
+pub(crate) fn announce_published_frame(
+    app: &AppHandle,
+    window_id: u32,
+    capture_seq: u64,
+    frame_id: u32,
+    track_sid: &str,
+) {
     let announcements = crate::rc_photon::host_take_published(window_id, capture_seq, frame_id);
     if announcements.is_empty() {
         return;
@@ -1551,7 +1558,10 @@ pub(crate) fn announce_published_frame(app: &AppHandle, window_id: u32, capture_
         return;
     };
     for announcement in announcements {
-        let message = input_frame_packet(&local_identity, &announcement);
+        let mut message = input_frame_packet(&local_identity, &announcement);
+        if !track_sid.is_empty() {
+            message.track_sid = Some(track_sid.to_string());
+        }
         let publisher = publisher.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(error) = publish_message(publisher, message).await {
@@ -1608,6 +1618,7 @@ fn input_frame_packet(local_identity: &str, announcement: &crate::rc_photon::Ann
         lk_node_hash: None,
         frame_id: Some(announcement.frame_id),
         content_change: Some(announcement.content_change.to_string()),
+        track_sid: None,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -4288,6 +4299,7 @@ fn status_packet_for(status: &RemoteControlStatus, local_identity: &str) -> Remo
             .flatten(),
         frame_id: None,
         content_change: None,
+        track_sid: None,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -4343,6 +4355,7 @@ fn discrete_result_packet(
         lk_node_hash: None,
         frame_id: None,
         content_change: None,
+        track_sid: None,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -6591,6 +6604,7 @@ fn clipboard_key_message(
         lk_node_hash: None,
         frame_id: None,
         content_change: None,
+        track_sid: None,
         modifiers,
     }
 }
@@ -6953,6 +6967,7 @@ pub async fn remote_control_set_active(
         lk_node_hash: if active { crate::sfu_edge::local_node_hash() } else { None },
         frame_id: None,
         content_change: None,
+        track_sid: None,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -7102,6 +7117,7 @@ pub async fn remote_control_request_escalation(
         lk_node_hash: crate::sfu_edge::local_node_hash(),
         frame_id: None,
         content_change: None,
+        track_sid: None,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -16098,6 +16114,7 @@ pub(crate) mod input {
                 lk_node_hash: None,
                 frame_id: None,
                 content_change: None,
+                track_sid: None,
                 modifiers: RemoteControlModifiers::default(),
             }
         }
@@ -23185,6 +23202,7 @@ mod tests {
             lk_node_hash: None,
             frame_id: None,
             content_change: None,
+            track_sid: None,
             modifiers: RemoteControlModifiers::default(),
         }
     }
@@ -24113,6 +24131,7 @@ mod tests {
             lk_node_hash: None,
             frame_id: None,
             content_change: None,
+            track_sid: None,
             modifiers: RemoteControlModifiers::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -24347,6 +24366,7 @@ mod tests {
             lk_node_hash: None,
             frame_id: None,
             content_change: None,
+            track_sid: None,
             modifiers: RemoteControlModifiers {
                 alt: false,
                 ctrl: false,
@@ -24428,6 +24448,7 @@ mod tests {
             lk_node_hash: None,
             frame_id: None,
             content_change: None,
+            track_sid: None,
             modifiers: RemoteControlModifiers::default(),
         };
         let value = serde_json::to_value(msg).unwrap();
@@ -27109,7 +27130,9 @@ mod tests {
         note_captured_frame(ids.window_id, 901, CapturedContentChange::Detected);
         let announcements = crate::rc_photon::host_take_published(ids.window_id, 901, 6);
         assert_eq!(announcements.len(), 1);
-        let packet_message = input_frame_packet("host-identity", &announcements[0]);
+        let mut packet_message = input_frame_packet("host-identity", &announcements[0]);
+        // `announce_published_frame` adds the publication's sid.
+        packet_message.track_sid = Some("TR_window".to_string());
         let packet = remote_control_engine().data_packet_for(&packet_message);
         assert!(packet.reliable);
         assert_eq!(

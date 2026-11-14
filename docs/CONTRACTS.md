@@ -871,7 +871,9 @@ Kinds and additive capability envelope:
   `result`). `seq` is the controller's input `seq`; `frameId` the trailer
   `frame_id` of the first published frame that shows that input;
   `contentChange` is `detected` (the capture had dirty rects) or `unknown`
-  ("the next frame"; a newer or missing value reads as `unknown`). Sent only
+  ("the next frame"; a newer or missing value reads as `unknown`); `trackSid`
+  the LiveKit sid of the publication that frame id belongs to (a republish
+  restarts ids, so a frame of another publication never matches). Sent only
   for discrete ops (pointer down/click, a non-repeat key down, text, and the
   first wheel of a burst: 500 ms of wheel silence), at most 4/s per
   controller, never for a pointer move. A missing or non-u32 `frameId` drops
@@ -1576,14 +1578,17 @@ verdict parses the line, and the web client reproduces it
   monotonic send instant for that input `seq` (`performance.now()` at the web
   publish, `Instant` at the native `remote_control_send`; never the wall-clock
   `sentAtMs`). Both ends are the controller's clock, so no offset. Web presentation is the rVFC `expectedDisplayTime` (the same
-  loop as `capture_to_present_ms`); native is the compositor hand-off + one
-  refresh (estimated). `photonCorrelator` pins the bounds (64 sent inputs, 2 s
+  loop as `capture_to_present_ms`); native is the compositor hand-off
+  (`Instant`) + one refresh (estimated). `photonCorrelator` pins the bounds (64 sent inputs, 2 s
   for an unannounced one, 2 s presented-frame ring for a frame that beat the
   `inputFrame`, 1 s timeout); `photonCorrelatorVectors` and
   `photonInputFilterVectors` are run by `shared/logic/photonCorrelator.ts` and
   `rc_photon.rs`. An announced input not presented within 1 s adds one
-  `photon_timeout`, never a sample. A drop in the presented frame id, a new
-  subscription, a re-grant or a release clears the state (the host also
+  `photon_timeout`, never a sample. Presented frames are keyed by
+  track sid: a switch drops older frames and other-publication announcements.
+  A frame-id drop within one track, a re-grant or a release clears the state
+  (native: every host `active` status is a new grant, so a reconnect resync
+  can drop an in-flight sample; it never scores a wrong one) (the host also
   clears a controller's markers when it revokes that controller). The controller sets
   `content_change` from the host's `contentChange`. Host: macOS only (the
   #373 match point in the ScreenCaptureKit callback; the frame id is the one

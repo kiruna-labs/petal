@@ -1473,8 +1473,9 @@ pub(crate) fn start_compositor_feed(
                         // trigger (see `starvation_action_for_macos`).
                         // `RemoteVideoTrack` is `Clone` (an `Arc` inside).
                         let video_track_for_stats = video_track.clone();
-                        // #376: frame ids restart per publication.
-                        let photon_track_epoch = crate::rc_photon::next_track_epoch();
+                        // #376: frame ids restart per publication; key frames by its sid.
+                        let photon_track =
+                            crate::rc_photon::track_key(&video_track_for_stats.sid().to_string());
                         // #374: must precede `NativeVideoStream::new` below, or
                         // decoder-output timing is never wired into the stream.
                         crate::rc_receiver_timing::spawn_for_window_track(
@@ -1955,7 +1956,7 @@ pub(crate) fn start_compositor_feed(
                                 window_id,
                                 receive_timestamp_us,
                                 frame_id,
-                                photon_track_epoch,
+                                photon_track,
                             );
                             crate::diagnostics::record_native_receiver_frame(
                                 &app_for_frames,
@@ -3377,10 +3378,10 @@ fn spawn_windows_decode_loop(
             key.1,
             cancel_token.clone(),
         );
+        // #376: frame ids restart per publication; key frames by its sid.
+        let photon_track = crate::rc_photon::track_key(&video_track.sid().to_string());
         let rtc_track = video_track.rtc_track();
         let mut stream = NativeVideoStream::new(rtc_track.clone());
-        // #376: frame ids restart per publication.
-        let photon_track_epoch = crate::rc_photon::next_track_epoch();
         let mut first_frame_logged = false;
         let mut invalid_dimension_frames = 0u64;
         let mut enabled = true;
@@ -3710,7 +3711,7 @@ fn spawn_windows_decode_loop(
                 key.1,
                 now_us(),
                 frame.frame_metadata.as_ref().and_then(|m| m.frame_id),
-                photon_track_epoch,
+                photon_track,
             );
             let i420 = frame.buffer.to_i420();
             let (y, u, v) = i420.data();

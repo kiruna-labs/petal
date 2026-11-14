@@ -140,7 +140,7 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
   const receiverTiming = createRcReceiverTiming({
     aggregator: rcLatency,
     photon: {
-      presented: (frameId, presentMs) => recordPhoton(photon.notePresented(frameId, presentMs)),
+      presented: (trackSid, frameId, presentMs) => recordPhoton(photon.notePresented(trackSid, frameId, presentMs)),
       reset: resetPhoton,
     },
     clock: (hostIdentity, nowMs) => ctx.cb.peerClockEstimate?.(hostIdentity, nowMs) ?? null,
@@ -158,7 +158,7 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
     if (!video || !trackSid || tile?.dataset.owner !== active.targetUserId) return null;
     const track = room.remoteParticipants.get(active.targetUserId)?.trackPublications?.get(trackSid)?.track;
     if (!track || track.kind !== 'video') return null;
-    return { hostIdentity: active.targetUserId, track, video };
+    return { hostIdentity: active.targetUserId, trackSid, track, video };
   }
 
   function syncRcLatency() {
@@ -461,7 +461,7 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
       }
       adoptPhotonGrant(active.grantToken ?? null);
       photonContentChange = message.contentChange;
-      recordPhoton(photon.noteInputFrame(message.seq, message.frameId, performance.now()));
+      recordPhoton(photon.noteInputFrame(message.seq, message.trackSid ?? null, message.frameId, performance.now()));
       return;
     }
     if (message.kind !== 'status') return;

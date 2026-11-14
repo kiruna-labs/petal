@@ -260,6 +260,7 @@ export function parseRemoteControlJson(payload: string): RemoteControlMessage | 
     const frameId = wireMs(value.frameId);
     if (frameId === undefined || frameId > 0xffff_ffff) return null;
     if (value.contentChange !== 'detected') value.contentChange = 'unknown';
+    if (value.trackSid !== undefined && (typeof value.trackSid !== 'string' || value.trackSid === '')) delete value.trackSid;
   }
   // #371: additive timing fields; a malformed value is dropped, never fatal.
   if (value.sentAtMs !== undefined && wireMs(value.sentAtMs) === undefined) delete value.sentAtMs;

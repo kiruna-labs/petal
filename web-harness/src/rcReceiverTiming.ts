@@ -39,6 +39,8 @@ export interface RcTimingVideo {
 export interface RcReceiverTarget {
   /** LiveKit-verified identity of the host whose clock stamped the frames. */
   hostIdentity: string;
+  /** #376: the publication's track sid, so photon never matches across a republish. */
+  trackSid?: string;
   track: RcTimingTrack;
   video: RcTimingVideo;
 }
@@ -55,7 +57,7 @@ export interface RcReceiverTimingDeps {
   /** Wall-clock ms at performance.now() = 0, read now (not timeOrigin) so it tracks clock steps. */
   wallClockAnchor?: () => number;
   /** #376: presented frames (trailer id, expectedDisplayTime) for press-to-photon, from this same rVFC loop. */
-  photon?: { presented(frameId: number, presentMs: number): void; reset(): void };
+  photon?: { presented(trackSid: string, frameId: number, presentMs: number): void; reset(): void };
 }
 
 const DELTA_COUNTERS: ReadonlyArray<[keyof ReturnType<typeof inboundRtpDeltas>, RcLatencyCounter]> = [
@@ -130,7 +132,9 @@ export function createRcReceiverTiming(deps: RcReceiverTimingDeps) {
     metadataHit = true;
     setFrameMetadata('available');
     // #376: same monotonic timebase as the controller's send stamp; no clock offset.
-    if (typeof frame.frameId === 'number') deps.photon?.presented(frame.frameId, metadata.expectedDisplayTime);
+    if (typeof frame.frameId === 'number' && target.trackSid) {
+      deps.photon?.presented(target.trackSid, frame.frameId, metadata.expectedDisplayTime);
+    }
     const clock = deps.clock(target.hostIdentity, nowMs());
     if (!clock) return;
     const captureHostMs = Number(frame.userTimestamp) / 1000;
@@ -192,7 +196,13 @@ export function createRcReceiverTiming(deps: RcReceiverTimingDeps) {
       stop();
       return Promise.resolve();
     }
-    if (!current || current.track !== target.track || current.video !== target.video || current.hostIdentity !== target.hostIdentity) {
+    if (
+      !current ||
+      current.track !== target.track ||
+      current.video !== target.video ||
+      current.hostIdentity !== target.hostIdentity ||
+      current.trackSid !== target.trackSid
+    ) {
       stop();
       current = target;
       startFrames(target, generation);

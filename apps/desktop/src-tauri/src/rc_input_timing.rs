@@ -1040,9 +1040,9 @@ mod tests {
         let mut click = message(RemoteControlType::Pointer, Some(RemoteControlAction::Click));
         click.target_user_id = host.to_string();
         click.seq = 77;
-        let epoch = crate::rc_photon::next_track_epoch();
+        let track = crate::rc_photon::track_key("TR_photon");
         let stamp = |frame_id| {
-            crate::rc_receiver_timing::controlled_frame_stamp(host, 42, crate::time_util::now_us(), Some(frame_id), epoch)
+            crate::rc_receiver_timing::controlled_frame_stamp(host, 42, crate::time_util::now_us(), Some(frame_id), track)
                 .expect("controlled")
         };
         // Sent before the first controlled frame: that frame must not erase it.
@@ -1054,10 +1054,11 @@ mod tests {
         frame.controller_id = host.to_string();
         frame.seq = 77;
         frame.frame_id = Some(11);
+        frame.track_sid = Some("TR_photon".to_string());
         crate::rc_photon::controller_input_frame(&frame);
         assert_eq!(crate::rc_photon::controller_state_for_test(host, 42), Some((vec![10, 11], 0)), "resolved");
         // An uncontrolled window is never stamped, so it never feeds photon.
-        assert!(crate::rc_receiver_timing::controlled_frame_stamp(host, 7, 0, Some(1), epoch).is_none());
+        assert!(crate::rc_receiver_timing::controlled_frame_stamp(host, 7, 0, Some(1), track).is_none());
         controller_status(&active, ControllerStatusEffect::Terminate);
         sync_controller_at(|_, _| true, Instant::now());
         assert_eq!(crate::rc_photon::controller_state_for_test(host, 42), None, "dropped with control");

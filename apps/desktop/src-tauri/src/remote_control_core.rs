@@ -1636,6 +1636,9 @@ pub struct RemoteControlMessage {
     pub frame_id: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_change: Option<String>,
+    /// The publication `frame_id` belongs to (a republish restarts ids).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_sid: Option<String>,
     #[serde(default)]
     pub modifiers: RemoteControlModifiers,
 }
@@ -1704,6 +1707,7 @@ impl RemoteControlDraft {
             lk_node_hash: None,
             frame_id: None,
             content_change: None,
+            track_sid: None,
             modifiers: self.modifiers,
         }
     }

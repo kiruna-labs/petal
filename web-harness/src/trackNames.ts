@@ -889,6 +889,8 @@ export type RemoteControlMessage =
       frameId: number;
       /** `unknown`: the host had no dirty rects, so "the next frame". */
       contentChange: 'detected' | 'unknown';
+      /** The publication `frameId` belongs to (a republish restarts ids). */
+      trackSid?: string;
     });
 
 /**

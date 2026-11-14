@@ -1797,9 +1797,10 @@
         "seq": 15,
         "kind": "inputFrame",
         "frameId": 1234,
-        "contentChange": "detected"
+        "contentChange": "detected",
+        "trackSid": "TR_window_example"
       },
-      "fields": ["contentChange", "controllerId", "frameId", "kind", "seq", "targetUserId", "v", "windowId"]
+      "fields": ["contentChange", "controllerId", "frameId", "kind", "seq", "targetUserId", "trackSid", "v", "windowId"]
     }
   ],
   "remoteClipboardMessages": [
@@ -4561,9 +4562,9 @@
       "name": "presented-after-input-frame",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 40},
-        {"op": "presented", "frameId": 9, "at": 45},
-        {"op": "presented", "frameId": 10, "at": 70}
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 40},
+        {"op": "presented", "track": "T1", "frameId": 9, "at": 45},
+        {"op": "presented", "track": "T1", "frameId": 10, "at": 70}
       ],
       "expected": [
         {"kind": "photon", "seq": 1, "ms": 70}
@@ -4573,9 +4574,9 @@
       "name": "presented-before-input-frame",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "presented", "frameId": 10, "at": 50},
-        {"op": "presented", "frameId": 11, "at": 66},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 80}
+        {"op": "presented", "track": "T1", "frameId": 10, "at": 50},
+        {"op": "presented", "track": "T1", "frameId": 11, "at": 66},
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 80}
       ],
       "expected": [
         {"kind": "photon", "seq": 1, "ms": 50}
@@ -4585,9 +4586,9 @@
       "name": "skipped-frame-ids-match-greater",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 30},
-        {"op": "presented", "frameId": 9, "at": 40},
-        {"op": "presented", "frameId": 12, "at": 60}
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 30},
+        {"op": "presented", "track": "T1", "frameId": 9, "at": 40},
+        {"op": "presented", "track": "T1", "frameId": 12, "at": 60}
       ],
       "expected": [
         {"kind": "photon", "seq": 1, "ms": 60}
@@ -4597,9 +4598,9 @@
       "name": "retroactive-skipped-frame-ids",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "presented", "frameId": 8, "at": 20},
-        {"op": "presented", "frameId": 12, "at": 55},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 70}
+        {"op": "presented", "track": "T1", "frameId": 8, "at": 20},
+        {"op": "presented", "track": "T1", "frameId": 12, "at": 55},
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 70}
       ],
       "expected": [
         {"kind": "photon", "seq": 1, "ms": 55}
@@ -4609,10 +4610,10 @@
       "name": "duplicate-input-frame-after-resolve",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 30},
-        {"op": "presented", "frameId": 10, "at": 50},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 60},
-        {"op": "presented", "frameId": 11, "at": 70}
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 30},
+        {"op": "presented", "track": "T1", "frameId": 10, "at": 50},
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 60},
+        {"op": "presented", "track": "T1", "frameId": 11, "at": 70}
       ],
       "expected": [
         {"kind": "photon", "seq": 1, "ms": 50}
@@ -4622,9 +4623,9 @@
       "name": "duplicate-input-frame-keeps-first",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 30},
-        {"op": "inputFrame", "seq": 1, "frameId": 12, "at": 35},
-        {"op": "presented", "frameId": 10, "at": 50}
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 30},
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 12, "at": 35},
+        {"op": "presented", "track": "T1", "frameId": 10, "at": 50}
       ],
       "expected": [
         {"kind": "photon", "seq": 1, "ms": 50}
@@ -4634,7 +4635,7 @@
       "name": "announced-never-presented-times-out",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 100},
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 100},
         {"op": "tick", "at": 1000},
         {"op": "tick", "at": 1001}
       ],
@@ -4646,8 +4647,8 @@
       "name": "late-present-is-timeout-not-a-sample",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 900},
-        {"op": "presented", "frameId": 10, "at": 1100}
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 900},
+        {"op": "presented", "track": "T1", "frameId": 10, "at": 1100}
       ],
       "expected": [
         {"kind": "timeout", "seq": 1}
@@ -4657,8 +4658,8 @@
       "name": "retroactive-late-is-timeout",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "presented", "frameId": 10, "at": 1500},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 1600}
+        {"op": "presented", "track": "T1", "frameId": 10, "at": 1500},
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 1600}
       ],
       "expected": [
         {"kind": "timeout", "seq": 1}
@@ -4669,18 +4670,18 @@
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
         {"op": "tick", "at": 2001},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 2002},
-        {"op": "presented", "frameId": 10, "at": 2003}
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 2002},
+        {"op": "presented", "track": "T1", "frameId": 10, "at": 2003}
       ],
       "expected": []
     },
     {
       "name": "frame-before-send-never-matches",
       "steps": [
-        {"op": "presented", "frameId": 10, "at": 0},
+        {"op": "presented", "track": "T1", "frameId": 10, "at": 0},
         {"op": "sent", "seq": 1, "at": 5},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 30},
-        {"op": "presented", "frameId": 11, "at": 40}
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 30},
+        {"op": "presented", "track": "T1", "frameId": 11, "at": 40}
       ],
       "expected": [
         {"kind": "photon", "seq": 1, "ms": 35}
@@ -4690,10 +4691,10 @@
       "name": "frame-id-drop-resets-without-timeout",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "presented", "frameId": 500, "at": 10},
-        {"op": "inputFrame", "seq": 1, "frameId": 501, "at": 20},
-        {"op": "presented", "frameId": 3, "at": 30},
-        {"op": "presented", "frameId": 4, "at": 40},
+        {"op": "presented", "track": "T1", "frameId": 500, "at": 10},
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 501, "at": 20},
+        {"op": "presented", "track": "T1", "frameId": 3, "at": 30},
+        {"op": "presented", "track": "T1", "frameId": 4, "at": 40},
         {"op": "tick", "at": 2000}
       ],
       "expected": []
@@ -4702,10 +4703,10 @@
       "name": "explicit-reset-drops-pending",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "inputFrame", "seq": 1, "frameId": 10, "at": 20},
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 10, "at": 20},
         {"op": "reset"},
         {"op": "tick", "at": 1500},
-        {"op": "presented", "frameId": 10, "at": 1600}
+        {"op": "presented", "track": "T1", "frameId": 10, "at": 1600}
       ],
       "expected": []
     },
@@ -4713,8 +4714,8 @@
       "name": "unknown-seq-ignored",
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
-        {"op": "inputFrame", "seq": 99, "frameId": 10, "at": 20},
-        {"op": "presented", "frameId": 10, "at": 30},
+        {"op": "inputFrame", "seq": 99, "track": "T1", "frameId": 10, "at": 20},
+        {"op": "presented", "track": "T1", "frameId": 10, "at": 30},
         {"op": "tick", "at": 1500}
       ],
       "expected": []
@@ -4724,13 +4725,48 @@
       "steps": [
         {"op": "sent", "seq": 1, "at": 0},
         {"op": "sent", "seq": 2, "at": 10},
-        {"op": "inputFrame", "seq": 1, "frameId": 7, "at": 40},
-        {"op": "inputFrame", "seq": 2, "frameId": 7, "at": 41},
-        {"op": "presented", "frameId": 7, "at": 60}
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 7, "at": 40},
+        {"op": "inputFrame", "seq": 2, "track": "T1", "frameId": 7, "at": 41},
+        {"op": "presented", "track": "T1", "frameId": 7, "at": 60}
       ],
       "expected": [
         {"kind": "photon", "seq": 1, "ms": 60},
         {"kind": "photon", "seq": 2, "ms": 50}
+      ]
+    },
+    {
+      "name": "other-publication-frame-never-matches",
+      "steps": [
+        {"op": "sent", "seq": 1, "at": 0},
+        {"op": "presented", "track": "T1", "frameId": 101, "at": 10},
+        {"op": "inputFrame", "seq": 1, "track": "T2", "frameId": 2, "at": 20},
+        {"op": "presented", "track": "T2", "frameId": 2, "at": 30}
+      ],
+      "expected": [
+        {"kind": "photon", "seq": 1, "ms": 30}
+      ]
+    },
+    {
+      "name": "old-publication-announcement-dropped-on-switch",
+      "steps": [
+        {"op": "sent", "seq": 1, "at": 0},
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 500, "at": 10},
+        {"op": "presented", "track": "T2", "frameId": 0, "at": 20},
+        {"op": "tick", "at": 1500}
+      ],
+      "expected": []
+    },
+    {
+      "name": "unannounced-input-survives-switch",
+      "steps": [
+        {"op": "sent", "seq": 1, "at": 0},
+        {"op": "presented", "track": "T1", "frameId": 9, "at": 5},
+        {"op": "presented", "track": "T2", "frameId": 0, "at": 20},
+        {"op": "inputFrame", "seq": 1, "track": "T2", "frameId": 1, "at": 30},
+        {"op": "presented", "track": "T2", "frameId": 1, "at": 40}
+      ],
+      "expected": [
+        {"kind": "photon", "seq": 1, "ms": 40}
       ]
     },
     {
@@ -4801,9 +4837,9 @@
         {"op": "sent", "seq": 63, "at": 0},
         {"op": "sent", "seq": 64, "at": 0},
         {"op": "sent", "seq": 65, "at": 0},
-        {"op": "inputFrame", "seq": 1, "frameId": 3, "at": 10},
-        {"op": "inputFrame", "seq": 65, "frameId": 3, "at": 10},
-        {"op": "presented", "frameId": 3, "at": 20}
+        {"op": "inputFrame", "seq": 1, "track": "T1", "frameId": 3, "at": 10},
+        {"op": "inputFrame", "seq": 65, "track": "T1", "frameId": 3, "at": 10},
+        {"op": "presented", "track": "T1", "frameId": 3, "at": 20}
       ],
       "expected": [
         {"kind": "photon", "seq": 65, "ms": 20}
