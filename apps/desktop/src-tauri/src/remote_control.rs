@@ -6865,7 +6865,8 @@ pub async fn remote_control_send(app: AppHandle, draft: RemoteControlDraft) -> R
                 }
                 let summary = message_summary(&chunk_message);
                 rc_input_timing::controller_sent(&chunk_message);
-                crate::rc_photon::controller_sent(&chunk_message);
+                // #376: no photon for chunks: their fabricated seqs (seq+index)
+                // are not reserved, so a later input can reuse one.
                 if let Err(e) = publish_controller_input(publisher.clone(), chunk_message).await {
                     log::warn!("remote-control: chunked text publish failed for {summary}: {e}");
                     return Err(e);

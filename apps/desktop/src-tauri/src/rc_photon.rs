@@ -1062,7 +1062,9 @@ mod tests {
         assert!(captured[..300].contains("rc_photon::host_note_captured("));
         let send = &rc[rc.find("pub async fn remote_control_send(").unwrap()..];
         let send = &send[..send.find("\n}\n").unwrap()];
-        assert_eq!(send.matches("rc_photon::controller_sent(").count(), 2, "plain and chunked text");
+        assert_eq!(send.matches("rc_photon::controller_sent(").count(), 1, "never for fabricated chunk seqs");
+        let chunked = &send[send.find("for (index, chunk) in chunks").unwrap()..send.find("return Ok(());").unwrap()];
+        assert!(!chunked.contains("rc_photon::controller_sent("));
         assert!(rc.contains("RemoteControlType::InputFrame => {\n            if remote_window_exists(&message.controller_id, message.window_id) {\n                crate::rc_photon::controller_input_frame(&message);"));
 
         let share = include_str!("session/share.rs");
