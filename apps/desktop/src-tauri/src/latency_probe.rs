@@ -395,6 +395,27 @@ mod tests {
         serde_json::from_str(include_str!("../../../../contracts/petal-contracts.json")).unwrap()
     }
 
+    /// #371 wiring guard: both platform joins start the probe, or that
+    /// platform's host never gets a controller clock offset and records no
+    /// `input_leg_ms`. Starting it needs a live LiveKit `Room` and there is
+    /// no `tauri::test` harness for `join_room`, so this checks the source.
+    #[test]
+    fn both_platform_session_joins_start_the_probe() {
+        let call = "crate::latency_probe::start_receiver_for_room(";
+        for (platform, source, join) in [
+            ("macOS", include_str!("session/room.rs"), "pub async fn join_room("),
+            ("Windows", include_str!("session_stub.rs"), "pub async fn join_room_command("),
+        ] {
+            let prod = source
+                .split_once("\n#[cfg(test)]\nmod tests {")
+                .map_or(source, |(prod, _)| prod);
+            let join_at = prod.find(join).unwrap_or_else(|| panic!("{platform}: {join}"));
+            let body = &prod[join_at..];
+            let body = &body[..body.find("\n}\n").expect("join fn closes at column 0")];
+            assert_eq!(body.matches(call).count(), 1, "{platform} join must start the probe once");
+        }
+    }
+
     #[test]
     fn topic_matches_shared_contract() {
         assert_eq!(TOPIC, contract_fixture().topics.latency_probe);
