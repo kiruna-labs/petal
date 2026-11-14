@@ -59,6 +59,7 @@ export interface RcReceiverTimingDeps {
 const DELTA_COUNTERS: ReadonlyArray<[keyof ReturnType<typeof inboundRtpDeltas>, RcLatencyCounter]> = [
   ['frames_dropped', 'frames_dropped'],
   ['freeze_count', 'freeze_count'],
+  ['freeze_duration_ms', 'freeze_duration_ms'],
   ['nack_count', 'nack_count'],
   ['pli_count', 'pli_count'],
 ];

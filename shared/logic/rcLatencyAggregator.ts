@@ -44,6 +44,7 @@ export const RC_LATENCY_COUNTERS = [
   'freeze_count',
   'nack_count',
   'pli_count',
+  'freeze_duration_ms',
 ] as const;
 export type RcLatencyCounter = (typeof RC_LATENCY_COUNTERS)[number];
 
@@ -62,6 +63,7 @@ export const RC_LATENCY_DIMENSIONS = {
   content_change: ['detected', 'unknown'],
   jb_min_ms: ['0', '1_19', '20_49', '50_99', '100_199', '200_plus'],
   frame_metadata: ['available', 'unavailable'],
+  present_timing: ['estimated'],
 } as const satisfies Record<string, readonly string[] | null>;
 export type RcLatencyDimension = keyof typeof RC_LATENCY_DIMENSIONS;
 export const RC_LATENCY_DIMENSION_KEYS = Object.keys(RC_LATENCY_DIMENSIONS) as RcLatencyDimension[];

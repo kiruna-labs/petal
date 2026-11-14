@@ -124,7 +124,13 @@ impl ClockWindows {
 /// `receive - (sentAtMs + offset)` on the host clock. A negative leg inside
 /// the offset error is 0; beyond it (a clock step) there is no sample.
 pub(crate) fn input_leg_ms(sent_at_ms: u64, received_wall_ms: u64, clock: ClockEstimate) -> Option<f64> {
-    let leg = received_wall_ms as f64 - (sent_at_ms as f64 + clock.offset_ms);
+    offset_corrected_ms(received_wall_ms as f64, sent_at_ms as f64, clock)
+}
+
+/// `local - (remote + offset)`, the same rule for any one-way leg measured
+/// across the two clocks (#374 reuses it for the host's capture stamp).
+pub(crate) fn offset_corrected_ms(local_ms: f64, remote_ms: f64, clock: ClockEstimate) -> Option<f64> {
+    let leg = local_ms - (remote_ms + clock.offset_ms);
     if !leg.is_finite() || leg < -clock.err_ms {
         return None;
     }
@@ -151,8 +157,21 @@ pub(crate) const VANISHED_HOST_GRACE: Duration = Duration::from_secs(10);
 /// host that vanishes without a `stopped` cannot leave the session open.
 #[derive(Debug, Default)]
 pub(crate) struct ControllerTargets {
-    /// Value: when the target's window was first seen missing.
-    targets: HashMap<ControlTargetKey, Option<Instant>>,
+    targets: HashMap<ControlTargetKey, Target>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Target {
+    /// When the target's window was first seen missing.
+    missing_since: Option<Instant>,
+    /// #374: unique per activation, so a release + re-grant of the same
+    /// window inside one await is still seen as a new control session.
+    grant: u64,
+}
+
+fn next_grant() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ControllerTargets {
@@ -162,7 +181,13 @@ impl ControllerTargets {
                 // A re-grant (possibly on a new share instance) replaces
                 // whatever this host's window had.
                 self.targets.retain(|target, _| !same_window(target, &key));
-                self.targets.insert(key, None);
+                self.targets.insert(
+                    key,
+                    Target {
+                        missing_since: None,
+                        grant: next_grant(),
+                    },
+                );
             }
             // When both sides name a share instance it must match, so a late
             // `stopped` for an old instance spares the new one.
@@ -184,7 +209,7 @@ impl ControllerTargets {
     /// One presence observation per target; ends a target whose window has
     /// been missing for [`VANISHED_HOST_GRACE`].
     pub(crate) fn observe_presence(&mut self, key: &ControlTargetKey, present: bool, now: Instant) {
-        let Some(missing_since) = self.targets.get_mut(key) else {
+        let Some(Target { missing_since, .. }) = self.targets.get_mut(key) else {
             return;
         };
         if present {
@@ -199,6 +224,14 @@ impl ControllerTargets {
 
     pub(crate) fn is_active(&self) -> bool {
         !self.targets.is_empty()
+    }
+
+    /// #374: the live grant on exactly this host window, if we hold one.
+    pub(crate) fn window_grant(&self, host_identity: &str, window_id: u32) -> Option<u64> {
+        self.targets
+            .iter()
+            .find(|(key, _)| key.window_id == window_id && key.host_identity == host_identity)
+            .map(|(_, target)| target.grant)
     }
 
     #[cfg(test)]
@@ -391,6 +424,13 @@ fn clock_windows() -> &'static Mutex<ClockWindows> {
     WINDOWS.get_or_init(Default::default)
 }
 
+/// #374: the controller's own window of host clock offsets (local minus
+/// host), fed by the controller pinging the hosts it controls.
+fn host_clock_windows() -> &'static Mutex<ClockWindows> {
+    static WINDOWS: OnceLock<Mutex<ClockWindows>> = OnceLock::new();
+    WINDOWS.get_or_init(Default::default)
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -447,6 +487,7 @@ fn sync_controller_at(window_exists: impl Fn(&str, u32) -> bool, now: Instant) {
     };
     if !active {
         lock(pending_rtt()).clear();
+        lock(host_clock_windows()).clear();
     }
     rc_latency_telemetry::sync(RcRole::Controller, active);
 }
@@ -463,6 +504,30 @@ pub(crate) fn controller_result(message: &RemoteControlMessage, result_recv_ms: 
     if let Some(rtt_ms) = lock(pending_rtt()).take_rtt_ms(message, result_recv_ms) {
         rc_latency_telemetry::record_stage(RcRole::Controller, Stage::InputRttMs, rtt_ms);
     }
+}
+
+/// Controller (#374): the grant we hold on this host window right now.
+pub(crate) fn window_grant(host_identity: &str, window_id: u32) -> Option<u64> {
+    lock(controller_targets()).window_grant(host_identity, window_id)
+}
+
+/// Controller (#374): the hosts we hold a grant on, for the latency probe.
+pub(crate) fn controlled_hosts() -> std::collections::HashSet<String> {
+    lock(controller_targets())
+        .keys()
+        .into_iter()
+        .map(|key| key.host_identity)
+        .collect()
+}
+
+/// Controller (#374): a latency-probe answer from a host we control.
+pub(crate) fn record_host_clock(host_identity: &str, offset_us: i64, rtt_ms: f64) {
+    lock(host_clock_windows()).record(host_identity, offset_us, rtt_ms, now_ms());
+}
+
+/// Controller (#374): the fresh host clock estimate, or `None` when stale.
+pub(crate) fn host_clock(host_identity: &str, now_ms: u64) -> Option<ClockEstimate> {
+    lock(host_clock_windows()).estimate(host_identity, now_ms)
 }
 
 /// Host: a latency-probe answer from a controller that holds a grant.
@@ -929,6 +994,34 @@ mod tests {
             },
             ControllerStatusEffect::Terminate,
         );
+    }
+
+    /// #374: the receive path is gated per host window through the real
+    /// status path, the probe targets that host, and its clock is dropped
+    /// when control ends.
+    #[test]
+    fn a_grant_gates_receive_timing_to_its_host_window_and_probe() {
+        let _targets = controller_targets_test_lock();
+        clear_all();
+        let mut active = message(RemoteControlType::Status, None);
+        active.controller_id = "host-receive".to_string();
+        controller_status(&active, ControllerStatusEffect::Activate);
+        let first = window_grant("host-receive", 42).expect("granted");
+        assert_eq!(window_grant("host-receive", 7), None, "another window of the same host");
+        assert_eq!(window_grant("host-other", 42), None, "the same window id on another host");
+        controller_status(&active, ControllerStatusEffect::Terminate);
+        controller_status(&active, ControllerStatusEffect::Activate);
+        assert_ne!(window_grant("host-receive", 42), Some(first), "a re-grant is a new session");
+        assert!(controlled_hosts().contains("host-receive"));
+        record_host_clock("host-receive", 25_000, 4.0);
+        let estimate = host_clock("host-receive", now_ms()).expect("fresh host clock");
+        assert_eq!((estimate.offset_ms, estimate.err_ms), (25.0, 2.0));
+        assert_eq!(host_clock("host-receive", now_ms() + CLOCK_OFFSET_STALE_MS + 1), None);
+        controller_status(&active, ControllerStatusEffect::Terminate);
+        assert_eq!(window_grant("host-receive", 42), None);
+        sync_controller_at(|_, _| true, Instant::now());
+        assert_eq!(host_clock("host-receive", now_ms()), None, "cleared with control");
+        clear_all();
     }
 
     #[test]

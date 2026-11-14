@@ -1463,6 +1463,9 @@ pub(crate) fn start_compositor_feed(
                         crate::transport::publisher::shared_window_sharer_client_from_metadata(
                             &participant.metadata(),
                         );
+                    let has_frame_metadata = crate::rc_receiver_timing::has_frame_metadata(
+                        &publication.frame_metadata_features(),
+                    );
                     tokio::spawn(async move {
                         // #907: cloned before `.rtc_track()` below consumes
                         // `video_track` -- this handle drives the periodic
@@ -1470,6 +1473,15 @@ pub(crate) fn start_compositor_feed(
                         // trigger (see `starvation_action_for_macos`).
                         // `RemoteVideoTrack` is `Clone` (an `Arc` inside).
                         let video_track_for_stats = video_track.clone();
+                        // #374: must precede `NativeVideoStream::new` below, or
+                        // decoder-output timing is never wired into the stream.
+                        crate::rc_receiver_timing::spawn_for_window_track(
+                            &video_track_for_stats,
+                            has_frame_metadata,
+                            owner_identity_for_frames.clone(),
+                            window_id,
+                            cancel_token.clone(),
+                        );
                         let rtc_track = video_track.rtc_track();
                         // Keep a handle after building the stream (which
                         // takes it by value) so `set_enabled(false)` can be
@@ -1935,6 +1947,11 @@ pub(crate) fn start_compositor_feed(
                                 continue;
                             };
                             let receive_timestamp_us = now_us();
+                            let present_stamp = crate::rc_receiver_timing::controlled_frame_stamp(
+                                &owner_identity_for_frames,
+                                window_id,
+                                receive_timestamp_us,
+                            );
                             let frame_id = frame.frame_metadata.as_ref().and_then(|m| m.frame_id);
                             crate::diagnostics::record_native_receiver_frame(
                                 &app_for_frames,
@@ -1999,6 +2016,7 @@ pub(crate) fn start_compositor_feed(
                                             cv_pixel_buffer,
                                             frame.buffer.width(),
                                             frame.buffer.height(),
+                                            present_stamp,
                                         );
                                         continue;
                                     }
@@ -2041,6 +2059,7 @@ pub(crate) fn start_compositor_feed(
                                         pixel_buffer.as_ptr(),
                                         i420.width(),
                                         i420.height(),
+                                        present_stamp,
                                     );
                                 }
                                 Err(e) => {
@@ -2804,6 +2823,9 @@ pub(crate) fn start_compositor_feed(
                         video_track,
                         key,
                         source_kind == crate::transport::publisher::SharedSourceKind::DisplayRegion,
+                        crate::rc_receiver_timing::has_frame_metadata(
+                            &publication.frame_metadata_features(),
+                        ),
                         generation.clone(),
                         frames_this_interval.clone(),
                         cancel_token,
@@ -3335,12 +3357,22 @@ fn spawn_windows_decode_loop(
     video_track: RemoteVideoTrack,
     key: crate::windows_compositor::WindowKey,
     is_display_region: bool,
+    has_frame_metadata: bool,
     generation: RoomGeneration,
     frames_this_interval: Arc<std::sync::atomic::AtomicU64>,
     cancel_token: CancellationToken,
 ) {
     use std::sync::atomic::Ordering;
     tauri::async_runtime::spawn(async move {
+        // #374: must precede `NativeVideoStream::new` below, or decoder-output
+        // timing is never wired into the stream.
+        crate::rc_receiver_timing::spawn_for_window_track(
+            &video_track,
+            has_frame_metadata,
+            key.0.clone(),
+            key.1,
+            cancel_token.clone(),
+        );
         let rtc_track = video_track.rtc_track();
         let mut stream = NativeVideoStream::new(rtc_track.clone());
         let mut first_frame_logged = false;
@@ -3667,6 +3699,8 @@ fn spawn_windows_decode_loop(
                 // Do not fight that source change with repeated HIGH requests.
                 reassert_high_after_low_layer(&key, frame_width, frame_height);
             }
+            let present_stamp =
+                crate::rc_receiver_timing::controlled_frame_stamp(&key.0, key.1, now_us());
             let i420 = frame.buffer.to_i420();
             let (y, u, v) = i420.data();
             let (y_stride, u_stride, v_stride) = i420.strides();
@@ -3680,6 +3714,7 @@ fn spawn_windows_decode_loop(
                 v_stride as usize,
                 i420.width(),
                 i420.height(),
+                present_stamp,
             )
             .await;
             frames_this_interval.fetch_add(1, Ordering::Relaxed);
