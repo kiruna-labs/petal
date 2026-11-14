@@ -601,6 +601,8 @@ export interface HarnessCallbacks {
   handleLatencyProbePayload: (payload: Uint8Array, senderIdentity?: string) => void;
   handlePipelineStatsPayload: (payload: Uint8Array, senderIdentity?: string) => void;
   startLatencyProbe: () => void;
+  /** #375: local-minus-peer clock offset from the latency probe; null when stale. */
+  peerClockEstimate?: (peerIdentity: string, nowMs?: number) => import('./latencyProbeClock.ts').ClockEstimate | null;
   stopLatencyProbe: () => void;
   resetRemoteControlHarnessSession?: () => void;
   /** RC-N2W (#819): make this peer answer a native controller's request and

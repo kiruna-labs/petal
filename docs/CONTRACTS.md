@@ -31,7 +31,9 @@ Each has a section below except the two diagnostics topics, documented here:
   Reliable delivery. Native pings every 2 s: every peer while the cockpit is
   open, and otherwise each controller holding a remote-control grant on this
   host (#371), stopping when the grant ends. The message is unchanged. Native: `apps/desktop/src-tauri/src/latency_probe.rs`;
-  web: `web-harness/src/trackNames.ts` (`LatencyProbeMessage`).
+  web: `web-harness/src/trackNames.ts` (`LatencyProbeMessage`); the web
+  client keeps the same per-peer offset window for the controller's
+  capture-to-present stage (`web-harness/src/latencyProbeClock.ts`, #375).
 - **`petal.pipeline-stats`** — cross-peer pipeline stage snapshots for the
   Network Cockpit (`apps/desktop/src-tauri/src/pipeline_stats.rs`).
 
@@ -1488,8 +1490,8 @@ Files to change together:
 
 Not a wire format: no client sends it to another. It is pinned here because
 the PostHog event and the log line follow one schema, the release-gate
-verdict parses the line, and the web client must reproduce it when it gains
-a producer (#375).
+verdict parses the line, and the web client reproduces it
+(`shared/logic/latencyHistogram.ts` + `rcLatencyAggregator.ts`, #375).
 
 - `latencyHistogramVectors`: inputs and expected `n`/`rejected`/`p50`/`p95`/
   `max` for the histogram in `rc_latency_telemetry.rs`. Buckets are `[0, 1)`
@@ -1497,7 +1499,7 @@ a producer (#375).
   above 5000 clamp, negatives and non-finite values are rejected and
   counted. Percentiles are nearest-rank `ceil(n*p) - 1`, reported as the
   bucket's geometric midpoint clamped to the observed min/max and rounded.
-  A `null` sample means NaN. The TS mirror (#375) must pass the same vectors.
+  A `null` sample means NaN. The TS mirror (#375) passes the same vectors.
 - `remoteControlLatencySummary`: the closed stage and dimension keys (in
   emission order), the roles measured today, the cadence (60 s interval,
   final partial at n >= 5, 120 events per session cap, empty intervals never
@@ -1508,9 +1510,28 @@ a producer (#375).
   with only counters still emits. `maxCounters` (#371, `offset_err_ms`) keep
   the interval max, are emitted after the counters whenever set (0
   included), and never make an interval emit on their own. The degraded thresholds (#371/#376) are
-  added here with their producers.
+  added here with their producers. `controllerExample` (#375) pins the
+  receive-path keys (`capture_to_present_ms`, the inbound-rtp counters,
+  `packets_lost_pct_x100`, `jb_min_ms`, `frame_metadata`) rendered by both
+  the Rust and TS summaries.
+- `inboundRtpDeltaVectors` (#375, shared with the native receiver #374): two
+  cumulative inbound-rtp snapshots (W3C stats names) and the expected
+  interval values. `jb_delay_ms` / `jb_target_ms` / `jb_min_ms` are
+  Δ`jitterBuffer*Delay` / Δ`jitterBufferEmittedCount` × 1000; `decode_ms` /
+  `processing_ms` are Δ`totalDecodeTime` / Δ`totalProcessingDelay` /
+  Δ`framesDecoded` × 1000; `frames_dropped`, `freeze_count`, `nack_count`,
+  `pli_count` are plain deltas; `packets_lost_pct_x100` is
+  round(Δlost / (Δlost + Δreceived) × 10000), with a falling `packetsLost`
+  counted as 0 lost. A missing or `null` (non-finite) input, a counter that
+  went backwards, or a zero denominator gives `null`, never 0. Compare floats
+  within 1e-6. TS: `shared/logic/inboundRtpDeltas.ts`.
+- `jbMinMsBucketVectors` (#375/#374): the `jb_min_ms` dimension is the
+  bucket of that interval average (`0` below 0.5 ms, then `1_19`, `20_49`,
+  `50_99`, `100_199`, `200_plus`), never raw ms.
 
-No wire field changed in #370, so there is no old-peer fixture. The #371
+No wire field changed in #370 or #375, so there is no old-peer fixture
+(#375 reads the existing `petal.latency-probe` pong timestamps and the
+existing frame-metadata trailer). The #371
 timing fields are wire fields; see "Timing fields" under Remote Control. The
 `telemetrySessionId` status field from #369's design is not added yet; the
 host mints its own `rc_session_id`.

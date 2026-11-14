@@ -586,6 +586,7 @@ Object.assign(ctx.cb, {
   handleLatencyProbePayload: harnessApi.handleLatencyProbePayload,
   startLatencyProbe: harnessApi.startLatencyProbe,
   stopLatencyProbe: harnessApi.stopLatencyProbe,
+  peerClockEstimate: harnessApi.peerClockEstimate,
   resetRemoteControlHarnessSession: harnessApi.resetRemoteControlSession,
   enableRemoteControlHostEmulation: harnessApi.enableRemoteControlHostEmulation,
   remoteControlHostLedger: harnessApi.remoteControlHostLedger,

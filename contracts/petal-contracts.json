@@ -2846,11 +2846,13 @@
       "pub_rtt_ms",
       "sub_rtt_ms",
       "video_net_ms",
+      "capture_to_receive_ms",
       "jb_delay_ms",
       "jb_target_ms",
       "decode_ms",
       "processing_ms",
       "receive_to_present_ms",
+      "capture_to_present_ms",
       "photon_ms"
     ],
     "dimensions": {
@@ -2888,13 +2890,30 @@
       "content_change": [
         "detected",
         "unknown"
+      ],
+      "jb_min_ms": [
+        "0",
+        "1_19",
+        "20_49",
+        "50_99",
+        "100_199",
+        "200_plus"
+      ],
+      "frame_metadata": [
+        "available",
+        "unavailable"
       ]
     },
     "counters": [
-      "input_stall_count"
+      "input_stall_count",
+      "frames_dropped",
+      "freeze_count",
+      "nack_count",
+      "pli_count"
     ],
     "maxCounters": [
-      "offset_err_ms"
+      "offset_err_ms",
+      "packets_lost_pct_x100"
     ],
     "alwaysPresent": [
       "role",
@@ -2960,8 +2979,373 @@
         "window_codec": "h264"
       },
       "logLine": "remote-control-latency-summary: role=host rc_session_id=0123456789abcdef0123456789abcdef interval_s=60 final=false replay_inject_ms_p50=3 replay_inject_ms_p95=9 replay_inject_ms_max=20 replay_inject_ms_n=400 replay_complete_ms_p50=5 replay_complete_ms_p95=108 replay_complete_ms_max=240 replay_complete_ms_n=398 input_stall_count=2 window_codec=h264"
+    },
+    "controllerExample": {
+      "summary": {
+        "role": "controller",
+        "rcSessionId": "fedcba9876543210fedcba9876543210",
+        "intervalS": 60,
+        "final": false,
+        "stages": {
+          "sub_rtt_ms": {
+            "p50": 2,
+            "p95": 4,
+            "max": 9,
+            "n": 60
+          },
+          "jb_delay_ms": {
+            "p50": 18,
+            "p95": 31,
+            "max": 45,
+            "n": 58
+          },
+          "decode_ms": {
+            "p50": 3,
+            "p95": 6,
+            "max": 11,
+            "n": 58
+          },
+          "receive_to_present_ms": {
+            "p50": 22,
+            "p95": 35,
+            "max": 61,
+            "n": 1790
+          },
+          "capture_to_present_ms": {
+            "p50": 48,
+            "p95": 70,
+            "max": 120,
+            "n": 1790
+          }
+        },
+        "counters": {
+          "frames_dropped": 3,
+          "nack_count": 0
+        },
+        "maxCounters": {
+          "offset_err_ms": 1,
+          "packets_lost_pct_x100": 25
+        },
+        "dimensions": {
+          "jb_min_ms": "0",
+          "frame_metadata": "available"
+        }
+      },
+      "properties": {
+        "role": "controller",
+        "rc_session_id": "fedcba9876543210fedcba9876543210",
+        "interval_s": 60,
+        "final": false,
+        "sub_rtt_ms_p50": 2,
+        "sub_rtt_ms_p95": 4,
+        "sub_rtt_ms_max": 9,
+        "sub_rtt_ms_n": 60,
+        "jb_delay_ms_p50": 18,
+        "jb_delay_ms_p95": 31,
+        "jb_delay_ms_max": 45,
+        "jb_delay_ms_n": 58,
+        "decode_ms_p50": 3,
+        "decode_ms_p95": 6,
+        "decode_ms_max": 11,
+        "decode_ms_n": 58,
+        "receive_to_present_ms_p50": 22,
+        "receive_to_present_ms_p95": 35,
+        "receive_to_present_ms_max": 61,
+        "receive_to_present_ms_n": 1790,
+        "capture_to_present_ms_p50": 48,
+        "capture_to_present_ms_p95": 70,
+        "capture_to_present_ms_max": 120,
+        "capture_to_present_ms_n": 1790,
+        "frames_dropped": 3,
+        "offset_err_ms": 1,
+        "packets_lost_pct_x100": 25,
+        "jb_min_ms": "0",
+        "frame_metadata": "available"
+      },
+      "logLine": "remote-control-latency-summary: role=controller rc_session_id=fedcba9876543210fedcba9876543210 interval_s=60 final=false sub_rtt_ms_p50=2 sub_rtt_ms_p95=4 sub_rtt_ms_max=9 sub_rtt_ms_n=60 jb_delay_ms_p50=18 jb_delay_ms_p95=31 jb_delay_ms_max=45 jb_delay_ms_n=58 decode_ms_p50=3 decode_ms_p95=6 decode_ms_max=11 decode_ms_n=58 receive_to_present_ms_p50=22 receive_to_present_ms_p95=35 receive_to_present_ms_max=61 receive_to_present_ms_n=1790 capture_to_present_ms_p50=48 capture_to_present_ms_p95=70 capture_to_present_ms_max=120 capture_to_present_ms_n=1790 frames_dropped=3 offset_err_ms=1 packets_lost_pct_x100=25 jb_min_ms=0 frame_metadata=available"
     }
   },
+  "inboundRtpDeltaVectors": [
+    {
+      "name": "steady-interval",
+      "previous": {
+        "jitterBufferDelay": 1.0,
+        "jitterBufferTargetDelay": 0.8,
+        "jitterBufferMinimumDelay": 0.0,
+        "jitterBufferEmittedCount": 100,
+        "totalDecodeTime": 0.2,
+        "totalProcessingDelay": 3.0,
+        "framesDecoded": 100,
+        "framesDropped": 2,
+        "freezeCount": 0,
+        "nackCount": 5,
+        "pliCount": 1,
+        "packetsLost": 10,
+        "packetsReceived": 1000
+      },
+      "current": {
+        "jitterBufferDelay": 1.6,
+        "jitterBufferTargetDelay": 1.25,
+        "jitterBufferMinimumDelay": 0.0,
+        "jitterBufferEmittedCount": 130,
+        "totalDecodeTime": 0.29,
+        "totalProcessingDelay": 4.2,
+        "framesDecoded": 130,
+        "framesDropped": 3,
+        "freezeCount": 1,
+        "nackCount": 9,
+        "pliCount": 1,
+        "packetsLost": 12,
+        "packetsReceived": 1198
+      },
+      "expected": {
+        "jb_delay_ms": 20,
+        "jb_target_ms": 15,
+        "jb_min_ms": 0,
+        "decode_ms": 3,
+        "processing_ms": 40,
+        "frames_dropped": 1,
+        "freeze_count": 1,
+        "nack_count": 4,
+        "pli_count": 0,
+        "packets_lost_pct_x100": 100
+      }
+    },
+    {
+      "name": "zero-emitted",
+      "previous": {
+        "jitterBufferDelay": 1.0,
+        "jitterBufferTargetDelay": 0.8,
+        "jitterBufferMinimumDelay": 0.1,
+        "jitterBufferEmittedCount": 100,
+        "totalDecodeTime": 0.2,
+        "totalProcessingDelay": 3.0,
+        "framesDecoded": 100,
+        "framesDropped": 2,
+        "freezeCount": 0,
+        "nackCount": 5,
+        "pliCount": 1,
+        "packetsLost": 10,
+        "packetsReceived": 1000
+      },
+      "current": {
+        "jitterBufferDelay": 1.0,
+        "jitterBufferTargetDelay": 0.8,
+        "jitterBufferMinimumDelay": 0.1,
+        "jitterBufferEmittedCount": 100,
+        "totalDecodeTime": 0.2,
+        "totalProcessingDelay": 3.0,
+        "framesDecoded": 100,
+        "framesDropped": 2,
+        "freezeCount": 0,
+        "nackCount": 5,
+        "pliCount": 1,
+        "packetsLost": 10,
+        "packetsReceived": 1000
+      },
+      "expected": {
+        "jb_delay_ms": null,
+        "jb_target_ms": null,
+        "jb_min_ms": null,
+        "decode_ms": null,
+        "processing_ms": null,
+        "frames_dropped": 0,
+        "freeze_count": 0,
+        "nack_count": 0,
+        "pli_count": 0,
+        "packets_lost_pct_x100": null
+      }
+    },
+    {
+      "name": "counter-reset",
+      "previous": {
+        "jitterBufferDelay": 9.0,
+        "jitterBufferTargetDelay": 7.0,
+        "jitterBufferMinimumDelay": 1.0,
+        "jitterBufferEmittedCount": 900,
+        "totalDecodeTime": 1.8,
+        "totalProcessingDelay": 27.0,
+        "framesDecoded": 900,
+        "framesDropped": 20,
+        "freezeCount": 3,
+        "nackCount": 40,
+        "pliCount": 4,
+        "packetsLost": 50,
+        "packetsReceived": 9000
+      },
+      "current": {
+        "jitterBufferDelay": 0.3,
+        "jitterBufferTargetDelay": 0.25,
+        "jitterBufferMinimumDelay": 0.0,
+        "jitterBufferEmittedCount": 15,
+        "totalDecodeTime": 0.05,
+        "totalProcessingDelay": 0.6,
+        "framesDecoded": 15,
+        "framesDropped": 0,
+        "freezeCount": 0,
+        "nackCount": 1,
+        "pliCount": 1,
+        "packetsLost": 0,
+        "packetsReceived": 150
+      },
+      "expected": {
+        "jb_delay_ms": null,
+        "jb_target_ms": null,
+        "jb_min_ms": null,
+        "decode_ms": null,
+        "processing_ms": null,
+        "frames_dropped": null,
+        "freeze_count": null,
+        "nack_count": null,
+        "pli_count": null,
+        "packets_lost_pct_x100": null
+      }
+    },
+    {
+      "name": "missing-and-non-finite",
+      "previous": {
+        "jitterBufferDelay": 1.0,
+        "jitterBufferMinimumDelay": 0.0,
+        "jitterBufferEmittedCount": 100,
+        "totalDecodeTime": 0.2,
+        "totalProcessingDelay": 3.0,
+        "framesDecoded": 100,
+        "framesDropped": 2,
+        "freezeCount": 0,
+        "nackCount": 5,
+        "pliCount": 1,
+        "packetsLost": 10,
+        "packetsReceived": 1000
+      },
+      "current": {
+        "jitterBufferDelay": 1.6,
+        "jitterBufferTargetDelay": 1.25,
+        "jitterBufferMinimumDelay": null,
+        "jitterBufferEmittedCount": 130,
+        "totalDecodeTime": 0.29,
+        "framesDecoded": 130,
+        "framesDropped": 3,
+        "freezeCount": 1,
+        "nackCount": 9,
+        "pliCount": 1,
+        "packetsLost": 12,
+        "packetsReceived": 1198
+      },
+      "expected": {
+        "jb_delay_ms": 20,
+        "jb_target_ms": null,
+        "jb_min_ms": null,
+        "decode_ms": 3,
+        "processing_ms": null,
+        "frames_dropped": 1,
+        "freeze_count": 1,
+        "nack_count": 4,
+        "pli_count": 0,
+        "packets_lost_pct_x100": 100
+      }
+    },
+    {
+      "name": "late-recovered-loss",
+      "previous": {
+        "jitterBufferDelay": 1.0,
+        "jitterBufferTargetDelay": 0.8,
+        "jitterBufferMinimumDelay": 0.0,
+        "jitterBufferEmittedCount": 100,
+        "totalDecodeTime": 0.2,
+        "totalProcessingDelay": 3.0,
+        "framesDecoded": 100,
+        "framesDropped": 2,
+        "freezeCount": 0,
+        "nackCount": 5,
+        "pliCount": 1,
+        "packetsLost": 10,
+        "packetsReceived": 1000
+      },
+      "current": {
+        "jitterBufferDelay": 1.6,
+        "jitterBufferTargetDelay": 1.25,
+        "jitterBufferMinimumDelay": 0.0,
+        "jitterBufferEmittedCount": 130,
+        "totalDecodeTime": 0.29,
+        "totalProcessingDelay": 4.2,
+        "framesDecoded": 130,
+        "framesDropped": 2,
+        "freezeCount": 0,
+        "nackCount": 5,
+        "pliCount": 1,
+        "packetsLost": 8,
+        "packetsReceived": 1100
+      },
+      "expected": {
+        "jb_delay_ms": 20,
+        "jb_target_ms": 15,
+        "jb_min_ms": 0,
+        "decode_ms": 3,
+        "processing_ms": 40,
+        "frames_dropped": 0,
+        "freeze_count": 0,
+        "nack_count": 0,
+        "pli_count": 0,
+        "packets_lost_pct_x100": 0
+      }
+    },
+    {
+      "name": "loss-rounding",
+      "previous": {
+        "jitterBufferDelay": 1.0,
+        "jitterBufferTargetDelay": 0.8,
+        "jitterBufferMinimumDelay": 0.0,
+        "jitterBufferEmittedCount": 100,
+        "totalDecodeTime": 0.2,
+        "totalProcessingDelay": 3.0,
+        "framesDecoded": 100,
+        "framesDropped": 2,
+        "freezeCount": 0,
+        "nackCount": 5,
+        "pliCount": 1,
+        "packetsLost": 10,
+        "packetsReceived": 1000
+      },
+      "current": {
+        "jitterBufferDelay": 1.6,
+        "jitterBufferTargetDelay": 1.25,
+        "jitterBufferMinimumDelay": 0.0,
+        "jitterBufferEmittedCount": 130,
+        "totalDecodeTime": 0.29,
+        "totalProcessingDelay": 4.2,
+        "framesDecoded": 130,
+        "framesDropped": 2,
+        "freezeCount": 0,
+        "nackCount": 5,
+        "pliCount": 1,
+        "packetsLost": 11,
+        "packetsReceived": 1002
+      },
+      "expected": {
+        "jb_delay_ms": 20,
+        "jb_target_ms": 15,
+        "jb_min_ms": 0,
+        "decode_ms": 3,
+        "processing_ms": 40,
+        "frames_dropped": 0,
+        "freeze_count": 0,
+        "nack_count": 0,
+        "pli_count": 0,
+        "packets_lost_pct_x100": 3333
+      }
+    }
+  ],
+  "jbMinMsBucketVectors": [
+    { "ms": 0, "bucket": "0" },
+    { "ms": 0.49, "bucket": "0" },
+    { "ms": 0.5, "bucket": "1_19" },
+    { "ms": 19.9, "bucket": "1_19" },
+    { "ms": 20, "bucket": "20_49" },
+    { "ms": 50, "bucket": "50_99" },
+    { "ms": 100, "bucket": "100_199" },
+    { "ms": 200, "bucket": "200_plus" },
+    { "ms": 4000, "bucket": "200_plus" }
+  ],
   "aiTracks": [
     {
       "windowId": 1,
