@@ -127,6 +127,12 @@ pinned by `contracts/petal-contracts.json` -> `remoteControlLatencySummary`;
 tracking issue #369 says which phase feeds which stage. The same fields go
 to `petal.log` as one `remote-control-latency-summary:` line per interval.
 
+Dashboard (#379): the "Remote-control latency" insights are checked in as
+HogQL in `docs/telemetry/remote-control-latency-dashboard.sql`;
+`scripts/posthog-sync-latency-dashboard.mjs` prints the dry-run plan for
+project 317298. How to read it: `docs/VALIDATION.md`, "Remote-control latency
+dashboard".
+
 | Property | Type | Meaning |
 |---|---|---|
 | `role` | `host` \| `controller` | Which side measured it |
