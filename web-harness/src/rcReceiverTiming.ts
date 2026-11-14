@@ -18,7 +18,7 @@ import {
 import type { RcLatencyAggregator, RcLatencyCounter } from '@petal/shared/logic/rcLatencyAggregator';
 import type { ClockEstimate } from './latencyProbeClock.ts';
 
-export type FrameMetadataLike = { userTimestamp: bigint | number };
+export type FrameMetadataLike = { userTimestamp: bigint | number; frameId?: number };
 
 export interface RcTimingTrack {
   getRTCStatsReport?: () => Promise<StatsReportLike | undefined | null>;
@@ -39,6 +39,8 @@ export interface RcTimingVideo {
 export interface RcReceiverTarget {
   /** LiveKit-verified identity of the host whose clock stamped the frames. */
   hostIdentity: string;
+  /** #376: the publication's track sid, so photon never matches across a republish. */
+  trackSid?: string;
   track: RcTimingTrack;
   video: RcTimingVideo;
 }
@@ -54,6 +56,8 @@ export interface RcReceiverTimingDeps {
   nowMs?: () => number;
   /** Wall-clock ms at performance.now() = 0, read now (not timeOrigin) so it tracks clock steps. */
   wallClockAnchor?: () => number;
+  /** #376: presented frames (trailer id, expectedDisplayTime) for press-to-photon, from this same rVFC loop. */
+  photon?: { presented(trackSid: string, frameId: number, presentMs: number): void; reset(): void };
 }
 
 const DELTA_COUNTERS: ReadonlyArray<[keyof ReturnType<typeof inboundRtpDeltas>, RcLatencyCounter]> = [
@@ -127,6 +131,10 @@ export function createRcReceiverTiming(deps: RcReceiverTimingDeps) {
     }
     metadataHit = true;
     setFrameMetadata('available');
+    // #376: same monotonic timebase as the controller's send stamp; no clock offset.
+    if (typeof frame.frameId === 'number' && target.trackSid) {
+      deps.photon?.presented(target.trackSid, frame.frameId, metadata.expectedDisplayTime);
+    }
     const clock = deps.clock(target.hostIdentity, nowMs());
     if (!clock) return;
     const captureHostMs = Number(frame.userTimestamp) / 1000;
@@ -188,7 +196,13 @@ export function createRcReceiverTiming(deps: RcReceiverTimingDeps) {
       stop();
       return Promise.resolve();
     }
-    if (!current || current.track !== target.track || current.video !== target.video || current.hostIdentity !== target.hostIdentity) {
+    if (
+      !current ||
+      current.track !== target.track ||
+      current.video !== target.video ||
+      current.hostIdentity !== target.hostIdentity ||
+      current.trackSid !== target.trackSid
+    ) {
       stop();
       current = target;
       startFrames(target, generation);
@@ -199,6 +213,8 @@ export function createRcReceiverTiming(deps: RcReceiverTimingDeps) {
 
   function stop() {
     stopFrames();
+    // A new track restarts frame ids; release ends the session.
+    deps.photon?.reset();
     current = null;
     generation += 1;
     previousCounters = null;

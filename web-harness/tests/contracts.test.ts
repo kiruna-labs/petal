@@ -869,6 +869,7 @@ test('remote-control topic and all-variant JSON field names are pinned', () => {
       'result-applied-v2-host-hold',
       'request-lk-node-hash',
       'status-active-lk-node-hash',
+      'input-frame',
     ],
   );
 
@@ -936,6 +937,7 @@ test('remote-control packet policy pins reliability, destination, and authority'
     { packet: 'release', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'status', reliability: 'reliable', destination: 'controller', authority: 'authenticatedHost' },
     { packet: 'result', reliability: 'reliable', destination: 'controller', authority: 'authenticatedHost' },
+    { packet: 'inputFrame', reliability: 'reliable', destination: 'controller', authority: 'authenticatedHost' },
     { packet: 'pointerMoveNoButtons', reliability: 'lossy', destination: 'host', authority: 'authenticatedController' },
     { packet: 'pointerHeldOrDiscrete', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'wheelLegacy', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },

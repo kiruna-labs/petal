@@ -1473,6 +1473,9 @@ pub(crate) fn start_compositor_feed(
                         // trigger (see `starvation_action_for_macos`).
                         // `RemoteVideoTrack` is `Clone` (an `Arc` inside).
                         let video_track_for_stats = video_track.clone();
+                        // #376: frame ids restart per publication; key frames by its sid.
+                        let photon_track =
+                            crate::rc_photon::track_key(&video_track_for_stats.sid().to_string());
                         // #374: must precede `NativeVideoStream::new` below, or
                         // decoder-output timing is never wired into the stream.
                         crate::rc_receiver_timing::spawn_for_window_track(
@@ -1947,12 +1950,14 @@ pub(crate) fn start_compositor_feed(
                                 continue;
                             };
                             let receive_timestamp_us = now_us();
+                            let frame_id = frame.frame_metadata.as_ref().and_then(|m| m.frame_id);
                             let present_stamp = crate::rc_receiver_timing::controlled_frame_stamp(
                                 &owner_identity_for_frames,
                                 window_id,
                                 receive_timestamp_us,
+                                frame_id,
+                                photon_track,
                             );
-                            let frame_id = frame.frame_metadata.as_ref().and_then(|m| m.frame_id);
                             crate::diagnostics::record_native_receiver_frame(
                                 &app_for_frames,
                                 &owner_identity_for_frames,
@@ -3373,6 +3378,8 @@ fn spawn_windows_decode_loop(
             key.1,
             cancel_token.clone(),
         );
+        // #376: frame ids restart per publication; key frames by its sid.
+        let photon_track = crate::rc_photon::track_key(&video_track.sid().to_string());
         let rtc_track = video_track.rtc_track();
         let mut stream = NativeVideoStream::new(rtc_track.clone());
         let mut first_frame_logged = false;
@@ -3699,8 +3706,13 @@ fn spawn_windows_decode_loop(
                 // Do not fight that source change with repeated HIGH requests.
                 reassert_high_after_low_layer(&key, frame_width, frame_height);
             }
-            let present_stamp =
-                crate::rc_receiver_timing::controlled_frame_stamp(&key.0, key.1, now_us());
+            let present_stamp = crate::rc_receiver_timing::controlled_frame_stamp(
+                &key.0,
+                key.1,
+                now_us(),
+                frame.frame_metadata.as_ref().and_then(|m| m.frame_id),
+                photon_track,
+            );
             let i420 = frame.buffer.to_i420();
             let (y, u, v) = i420.data();
             let (y_stride, u_stride, v_stride) = i420.strides();

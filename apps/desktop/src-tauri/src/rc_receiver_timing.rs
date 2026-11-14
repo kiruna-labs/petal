@@ -487,6 +487,10 @@ pub(crate) fn spawn_for_window_track(
 pub(crate) struct PresentStamp {
     decoded_at_us: u64,
     grant: u64,
+    /// #376: the trailer frame id and its publication (`rc_photon::track_key`
+    /// of the track sid), for the press-to-photon correlator.
+    frame_id: Option<u32>,
+    track: u64,
 }
 
 /// The decode-side stamp for a frame of a window we control; `None` (no
@@ -495,9 +499,15 @@ pub(crate) fn controlled_frame_stamp(
     host_identity: &str,
     window_id: u32,
     decoded_at_us: u64,
+    frame_id: Option<u32>,
+    track: u64,
 ) -> Option<PresentStamp> {
-    rc_input_timing::window_grant(host_identity, window_id)
-        .map(|grant| PresentStamp { decoded_at_us, grant })
+    rc_input_timing::window_grant(host_identity, window_id).map(|grant| PresentStamp {
+        decoded_at_us,
+        grant,
+        frame_id,
+        track,
+    })
 }
 
 /// `hand-off - decoded + one refresh`: an estimate, since neither
@@ -526,13 +536,25 @@ pub(crate) fn record_present(
     handed_off_us: u64,
     refresh_ms: f64,
 ) {
+    let live_grant = rc_input_timing::window_grant(host_identity, window_id);
     record_present_checked(
         rc_latency_telemetry::aggregator(RcRole::Controller),
         stamp,
-        rc_input_timing::window_grant(host_identity, window_id),
+        live_grant,
         handed_off_us,
         refresh_ms,
     );
+    // #376: the same hand-off (+ one refresh) is the photon end.
+    if let (Some(frame_id), true) = (stamp.frame_id, live_grant == Some(stamp.grant)) {
+        crate::rc_photon::controller_presented(
+            host_identity,
+            window_id,
+            stamp.grant,
+            stamp.track,
+            frame_id,
+            refresh_ms,
+        );
+    }
 }
 
 /// #374: a frame decoded under a grant that has since ended (or been
@@ -745,6 +767,8 @@ mod tests {
         let stamp = PresentStamp {
             decoded_at_us: 1_000_000,
             grant: 5,
+            frame_id: None,
+            track: 1,
         };
         record_present_checked(&aggregator, stamp, None, 1_004_000, 8.0);
         record_present_checked(&aggregator, stamp, Some(6), 1_004_000, 8.0);

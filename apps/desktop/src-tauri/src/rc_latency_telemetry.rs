@@ -232,6 +232,8 @@ closed_keys!(Counter {
     NackCount => "nack_count",
     PliCount => "pli_count",
     FreezeDurationMs => "freeze_duration_ms",
+    // #376: an announced input whose frame was not presented within 1 s.
+    PhotonTimeout => "photon_timeout",
 });
 
 // Max-per-interval values that qualify the stage samples recorded with them.

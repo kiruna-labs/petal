@@ -16,7 +16,7 @@
   import { identityColorCss } from '#lib/data/identityColor.js';
   import { platformKey } from '#lib/platform.js';
   import { createOrderedSender } from '#lib/orderedSend.js';
-  import { stampSentAtMs } from '@petal/shared/logic/remoteControlTiming';
+  import { remoteTextChunkCount, reserveSeqs, stampSentAtMs } from '@petal/shared/logic/remoteControlTiming';
   import {
     findRemoteWindowDebugTrack,
     formatDebugMetric,
@@ -814,11 +814,15 @@
   // needed here (contrast web-harness, which publishes directly).
   function sendComposedText(text: string) {
     if (!active || !text) return;
+    // #376: Rust numbers an oversized text's chunks seq, seq+1, ...; reserve
+    // them all so the next input never reuses a chunk's seq.
+    const reserved = reserveSeqs(seq, remoteTextChunkCount(text));
+    seq = reserved.last;
     send({
       kind: 'text',
       windowId,
       targetOwnerId: ownerIdentity,
-      seq: nextSeq(),
+      seq: reserved.first,
       grantToken: grantToken ?? undefined,
       text,
       modifiers: { alt: false, ctrl: false, meta: false, shift: false }

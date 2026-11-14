@@ -489,6 +489,8 @@ fn sync_controller_at(window_exists: impl Fn(&str, u32) -> bool, now: Instant) {
         lock(pending_rtt()).clear();
         lock(host_clock_windows()).clear();
     }
+    // #376: before the sync, so a timeout lands in the closing interval.
+    crate::rc_photon::controller_tick();
     rc_latency_telemetry::sync(RcRole::Controller, active);
 }
 
@@ -1021,6 +1023,45 @@ mod tests {
         assert_eq!(window_grant("host-receive", 42), None);
         sync_controller_at(|_, _| true, Instant::now());
         assert_eq!(host_clock("host-receive", now_ms()), None, "cleared with control");
+        clear_all();
+    }
+
+    /// #376: the native controller chain through the real entry points: a
+    /// grant, the send, the compositor hand-off (`record_present`) and the
+    /// host's `inputFrame` resolve one press-to-photon sample.
+    #[test]
+    fn a_controlled_window_resolves_press_to_photon_through_the_real_entry_points() {
+        let _targets = controller_targets_test_lock();
+        clear_all();
+        let host = "host-photon";
+        let mut active = message(RemoteControlType::Status, None);
+        active.controller_id = host.to_string();
+        controller_status(&active, ControllerStatusEffect::Activate);
+        let mut click = message(RemoteControlType::Pointer, Some(RemoteControlAction::Click));
+        click.target_user_id = host.to_string();
+        click.seq = 77;
+        let track = crate::rc_photon::track_key("TR_photon");
+        let stamp = |frame_id| {
+            crate::rc_receiver_timing::controlled_frame_stamp(host, 42, crate::time_util::now_us(), Some(frame_id), track)
+                .expect("controlled")
+        };
+        // Sent before the first controlled frame: that frame must not erase it.
+        crate::rc_photon::controller_sent(&click);
+        crate::rc_receiver_timing::record_present(stamp(10), host, 42, crate::time_util::now_us(), 8.0);
+        crate::rc_receiver_timing::record_present(stamp(11), host, 42, crate::time_util::now_us(), 8.0);
+        assert_eq!(crate::rc_photon::controller_state_for_test(host, 42), Some((vec![10, 11], 1)));
+        let mut frame = message(RemoteControlType::InputFrame, None);
+        frame.controller_id = host.to_string();
+        frame.seq = 77;
+        frame.frame_id = Some(11);
+        frame.track_sid = Some("TR_photon".to_string());
+        crate::rc_photon::controller_input_frame(&frame);
+        assert_eq!(crate::rc_photon::controller_state_for_test(host, 42), Some((vec![10, 11], 0)), "resolved");
+        // An uncontrolled window is never stamped, so it never feeds photon.
+        assert!(crate::rc_receiver_timing::controlled_frame_stamp(host, 7, 0, Some(1), track).is_none());
+        controller_status(&active, ControllerStatusEffect::Terminate);
+        sync_controller_at(|_, _| true, Instant::now());
+        assert_eq!(crate::rc_photon::controller_state_for_test(host, 42), None, "dropped with control");
         clear_all();
     }
 
