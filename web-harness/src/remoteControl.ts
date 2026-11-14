@@ -1,4 +1,4 @@
-import { wireMs } from '@petal/shared/logic/remoteControlTiming';
+import { REMOTE_TEXT_CHUNK_CHARS, wireMs } from '@petal/shared/logic/remoteControlTiming';
 import { isLkNodeHash } from '@petal/shared/logic/lkNodeHash';
 import { normalizedPointInContainedMedia } from './telepointer.ts';
 import {
@@ -405,7 +405,7 @@ export const EMPTY_REMOTE_CONTROL_MODIFIERS: RemoteControlModifiers = {
 // the cap. Chunk on the sender side the same way desktop's
 // `remote_control_send` command chunks outbound drafts, so the web
 // controller doesn't quietly drop part of a long composed string.
-export const MAX_REMOTE_TEXT_CHARS = 1000;
+export const MAX_REMOTE_TEXT_CHARS = REMOTE_TEXT_CHUNK_CHARS;
 
 export function chunkRemoteText(text: string): string[] {
   // Split on Unicode scalar values (code points), matching Rust's

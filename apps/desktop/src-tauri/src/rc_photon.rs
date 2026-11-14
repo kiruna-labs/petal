@@ -1047,6 +1047,17 @@ mod tests {
         assert_eq!(old.kind, PreInputFrameKind::Unknown);
     }
 
+    /// #376: the overlay reserves one seq per chunk using the shared TS
+    /// constant; it must equal the host's per-packet cap.
+    #[test]
+    fn the_shared_text_chunk_constant_matches_the_replay_cap() {
+        let ts = include_str!("../../../../shared/logic/remoteControlTiming.ts");
+        assert!(ts.contains(&format!(
+            "export const REMOTE_TEXT_CHUNK_CHARS = {};",
+            crate::remote_control::MAX_REPLAY_TEXT_CHARS
+        )));
+    }
+
     /// Wiring guard: the producers need a live room, so pin that each sits
     /// on the real path: replay success, the #373 match point, the pump's
     /// accepted push, the controller send, its receive, and the present.
