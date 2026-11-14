@@ -1,4 +1,5 @@
 import { stampSentAtMs } from '@petal/shared/logic/remoteControlTiming';
+import { sameEdge } from '@petal/shared/logic/lkNodeHash';
 import type { ActiveRemoteControl, HarnessContext } from './context.ts';
 import { REMOTE_CONTROL_TOPIC, type RemoteControlCapability, type RemoteControlMessage } from './trackNames.ts';
 import {
@@ -486,6 +487,11 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
         active.grantToken = message.grantToken;
         syncRcLatency();
       }
+      // #372: the same edge dimensions the native summary records, logged
+      // until the web latency summary lands (#375). Hashes only.
+      logEvent(
+        `remote control edge window_id=${message.windowId} same_edge=${sameEdge(state.lkEdge?.lkNodeHash, message.lkNodeHash)} lk_region=${state.lkEdge?.lkRegion ?? 'unknown'} self_hosted_sfu=${state.lkEdge?.selfHostedSfu ?? 'unknown'}`
+      );
       if (message.controlSessionId) {
         active.controlSessionId = message.controlSessionId;
         active.resultCapability = message.resultCapability;
@@ -864,9 +870,12 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
     };
     const base = remoteControlBase(state.activeRemoteControl);
     if (base) {
+      const lkNodeHash = state.lkEdge?.lkNodeHash;
       publishRemoteControlFromUi({
         ...base,
         kind: 'request',
+        // #372: the host records `same_edge` against this.
+        ...(lkNodeHash ? { lkNodeHash } : {}),
         ...(shareInstanceId
           ? {
               targetKind,

@@ -1,3 +1,4 @@
+import type { LocalEdge } from '@petal/shared/logic/lkNodeHash';
 import type { RedundantInputSender } from './remoteControlRedundant.ts';
 import type {
   Room,
@@ -456,6 +457,9 @@ export interface HarnessState {
   layoutModeButtons: Record<TileLayoutMode, HTMLButtonElement> | null;
   speakerSmoothingTimer: ReturnType<typeof setInterval> | null;
   activeRemoteControl: ActiveRemoteControl | null;
+  /** #372: this connection's LiveKit edge (`room.serverInfo`), refreshed on
+   * reconnect. The raw node id is never stored, only its `lkNodeHash`. */
+  lkEdge?: LocalEdge | null;
   remoteControlSeq: number;
   viewerDemandSeq: number;
   audioCtx: AudioContext | null;

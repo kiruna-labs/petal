@@ -417,3 +417,31 @@ The vendored crate is not a workspace member, so run them from
 
 Drop this patch once upstream's `server_version` returns the version when it
 is present and `perform_rpc` no longer unwraps the parse.
+
+# Petal patch: `Room::server_info()` (#372)
+
+## Why this exists
+
+Remote-control latency telemetry needs to know which LiveKit edge a
+participant is on (`lk_region`) and whether controller and host share a node
+(`same_edge`). The engine already keeps the `JoinResponse`, whose
+`server_info` carries `region` and `node_id`, but `Room` exposed none of it.
+
+## The fix
+
+`Room::server_info() -> Option<ServerInfoSummary { region, node_id, version,
+cloud_edition }>`, read live from the current signal session's
+`JoinResponse`, so a full reconnect (new session) is reflected on the next
+call and a resume keeps its node. Purely additive. Petal reads it on connect
+and on `RoomEvent::Reconnected` (`sfu_edge.rs`) and never sends the raw
+`node_id`: peers exchange only a salted hash. Test:
+`room/rpc/tests.rs::server_info_summary_maps_join_response_server_info`, run
+the same way as the RPC tests above plus
+`--config 'patch.crates-io.webrtc-sys-build.path="<abs>/vendor/webrtc-sys-build"'`
+(without it the standalone build fetches a newer prebuilt libwebrtc whose
+headers do not compile against the vendored `webrtc-sys`).
+
+## Updating
+
+Drop this patch once upstream exposes the server info (region and node id)
+on `Room`.

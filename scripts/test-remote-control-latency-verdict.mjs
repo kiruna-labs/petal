@@ -438,6 +438,16 @@ test('latency-summary mirror lines are parsed and reported without gating', () =
   assert.equal(summary.replayInject.p95MaxMs, 9);
   assert.equal(summarizeLatencySummaries(intervals, 'controller').intervals, 0);
   assert.equal(summarizeLatencySummaries([]).replayComplete.p95MaxMs, null);
+  // #372: edge dimensions are reported from the latest interval carrying them.
+  assert.equal(summary.edge, null);
+  const edgeLine = `${prefix}${contract.remoteControlLatencySummary.example.logLine} lk_region=unknown same_edge=true self_hosted_sfu=true ice_candidate_type=host ice_protocol=udp`;
+  assert.deepEqual(summarizeLatencySummaries(parseLatencySummaryLog(`${log}\n${edgeLine}`)).edge, {
+    lk_region: 'unknown',
+    same_edge: 'true',
+    self_hosted_sfu: 'true',
+    ice_candidate_type: 'host',
+    ice_protocol: 'udp',
+  });
   // Not gated: a run with no summary lines still produces the same checks.
   const metrics = collectLatencyMetrics({ hostLog: log });
   assert.equal(metrics.latencySummary.replayComplete.p95MaxMs, 131);

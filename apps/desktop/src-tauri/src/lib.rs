@@ -133,6 +133,7 @@ mod control_consent;
 mod analytics;
 mod rc_input_timing;
 mod rc_latency_telemetry;
+mod sfu_edge;
 pub mod logging;
 mod main_window;
 mod meeting_core;

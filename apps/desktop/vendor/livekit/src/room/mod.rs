@@ -441,6 +441,29 @@ impl Default for RoomOptions {
     }
 }
 
+/// Petal patch (#372): the LiveKit server a `Room` is connected to, from
+/// `JoinResponse.server_info`. Empty strings mean the server sent none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerInfoSummary {
+    pub region: String,
+    pub node_id: String,
+    pub version: String,
+    /// `true` for LiveKit Cloud (`Edition::Cloud`).
+    pub cloud_edition: bool,
+}
+
+impl ServerInfoSummary {
+    pub(crate) fn from_proto(info: Option<proto::ServerInfo>) -> Option<Self> {
+        let info = info?;
+        Some(Self {
+            cloud_edition: info.edition() == proto::server_info::Edition::Cloud,
+            region: info.region,
+            node_id: info.node_id,
+            version: info.version,
+        })
+    }
+}
+
 pub struct Room {
     inner: Arc<RoomSession>,
 }
@@ -860,6 +883,15 @@ impl Room {
 
     pub async fn get_stats(&self) -> EngineResult<SessionStats> {
         self.inner.rtc_engine.get_stats().await
+    }
+
+    /// Petal patch (#372): the connected server's edge from the current
+    /// signal session's `JoinResponse`. Read live, so a full reconnect (a new
+    /// session) is reflected on the next call; a resume keeps its node.
+    pub fn server_info(&self) -> Option<ServerInfoSummary> {
+        ServerInfoSummary::from_proto(
+            self.inner.rtc_engine.session().signal_client().join_response().server_info,
+        )
     }
 
     pub fn subscribe(&self) -> mpsc::UnboundedReceiver<RoomEvent> {

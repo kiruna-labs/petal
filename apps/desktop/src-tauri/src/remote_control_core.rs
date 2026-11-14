@@ -1620,6 +1620,12 @@ pub struct RemoteControlMessage {
     /// controller can subtract host time from its round trip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_hold_ms: Option<u64>,
+    /// #372: the sender's `lkNodeHash` (8 hex chars of a salted SHA-256 of
+    /// its LiveKit node id), on a controller `request` and a host `active`
+    /// status only, so each side can record `same_edge`. Additive: old peers
+    /// ignore it; a missing or malformed value means `same_edge=unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lk_node_hash: Option<String>,
     #[serde(default)]
     pub modifiers: RemoteControlModifiers,
 }
@@ -1685,6 +1691,7 @@ impl RemoteControlDraft {
             supports_binary_hot_path_v2: false,
             sent_at_ms: self.sent_at_ms,
             host_hold_ms: None,
+            lk_node_hash: None,
             modifiers: self.modifiers,
         }
     }

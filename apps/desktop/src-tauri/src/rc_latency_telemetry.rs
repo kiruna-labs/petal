@@ -566,6 +566,13 @@ pub(crate) fn take_host_interval_for_test() -> Option<Summary> {
     guard.as_mut()?.take_interval(RcRole::Host, Instant::now(), false)
 }
 
+/// Test hook: force `role`'s current interval out now.
+#[cfg(test)]
+pub(crate) fn take_interval_for_test(role: RcRole) -> Option<Summary> {
+    let mut guard = aggregator(role).session.lock().unwrap_or_else(|p| p.into_inner());
+    guard.as_mut()?.take_interval(role, Instant::now(), false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

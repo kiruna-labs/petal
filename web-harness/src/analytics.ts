@@ -332,10 +332,12 @@ function capture(spec: EventSpec): void {
   });
 }
 
-export function meetingJoined(): void {
+/** #372: `lkRegion` is the SFU edge's region token (`lkRegionToken`), never
+ * the user's location; omitted when the room reported no server info. */
+export function meetingJoined(lkRegion?: string): void {
   meeting = { joinedAt: Date.now(), reconnects: 0 };
   leaveRequested = false;
-  capture({ name: 'meeting_joined', extras: {} });
+  capture({ name: 'meeting_joined', extras: lkRegion ? { lk_region: lkRegion } : {} });
 }
 
 export function noteLeaveRequested(): void {
