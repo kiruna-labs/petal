@@ -1496,6 +1496,7 @@ pub(crate) fn start_compositor_feed(
                     }
 
                     let app_for_frames = app.clone();
+                    let feed_generation_for_frames = generation.value();
                     let owner_identity_for_frames = owner_identity.clone();
                     let track_name_for_frames = track_name.clone();
                     let generation_for_frames = generation.clone();
@@ -2046,6 +2047,7 @@ pub(crate) fn start_compositor_feed(
                                             cv_pixel_buffer,
                                             frame.buffer.width(),
                                             frame.buffer.height(),
+                                            feed_generation_for_frames,
                                         );
                                         continue;
                                     }
@@ -2088,6 +2090,7 @@ pub(crate) fn start_compositor_feed(
                                         pixel_buffer.as_ptr(),
                                         i420.width(),
                                         i420.height(),
+                                        feed_generation_for_frames,
                                     );
                                 }
                                 Err(e) => {

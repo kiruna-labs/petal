@@ -618,7 +618,8 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
         if ((await currentRoom()) === roomName) await leaveRoom();
       },
       // #360: end the native hold on remote windows kept across the rejoin.
-      // Scoped natively to this room and this hold: a stale run is a no-op.
+      // Scoped natively to this room and to holds at or after this run's
+      // (a failed post-commit attempt re-holds under a newer id).
       release: async () => {
         if (rejoinHoldId !== null) await releaseRejoinHold(recoveringRoom, rejoinHoldId);
       },

@@ -616,6 +616,9 @@ struct CompositorWindow {
     /// recurs every 5s must not re-log or re-signal) and is what lets the
     /// header's paused label be cleared exactly when a frame reaches the layer.
     held_reason: Option<HoldWindowReason>,
+    /// #360: the feed generation that re-bound this window after a rejoin.
+    /// Only a frame from that feed (or newer) ends the rejoin hold.
+    rejoin_claimed_at_generation: Option<u64>,
     stripped_for_pool: bool,
     app_origin: Option<String>,
     /// #844: whether the receiver-side AI-chat overlay is currently
@@ -1179,6 +1182,8 @@ struct PendingDisplaySample {
     sample: OwnedCMSampleBuffer,
     source_width: u32,
     source_height: u32,
+    /// #360: room generation of the feed that decoded this frame.
+    feed_generation: u64,
 }
 
 #[derive(Debug)]
@@ -2433,6 +2438,7 @@ pub fn ensure_window(
                 revealed_first_frame: false,
                 layer_has_content: false,
                 held_reason: None,
+                rejoin_claimed_at_generation: None,
                 stripped_for_pool: false,
                 app_origin: None,
                 ai_chat_overlay_open: false,
@@ -4005,6 +4011,7 @@ pub fn push_frame(
     cv_pixel_buffer: *mut std::ffi::c_void,
     source_width: u32,
     source_height: u32,
+    feed_generation: u64,
 ) {
     let key = RemoteWindowKey::new(owner_identity, window_id);
 
@@ -4142,6 +4149,7 @@ pub fn push_frame(
                         sample,
                         source_width,
                         source_height,
+                        feed_generation,
                     })
                 })
                 .unwrap_or(false);
@@ -4218,13 +4226,29 @@ fn rejoin_hold_unclaimed(s: &CompositorState, key: &RemoteWindowKey) -> bool {
         .is_some_and(|hold| hold.deadlines.contains_key(key))
 }
 
-/// A frame reached the layer: clear the hold it ends, if any. An unclaimed
-/// rejoin hold is not ended by a frame (it can only be the dead feed's).
-fn clear_hold_for_displayed_frame(win: &mut CompositorWindow, rejoin_held: bool) -> bool {
-    if rejoin_held && win.held_reason == Some(HoldWindowReason::RejoinInProgress) {
-        return false;
+/// A frame reached the layer: clear the hold it ends, if any. A rejoin hold
+/// ends only on a frame from the feed that re-bound the window (or newer): an
+/// unclaimed hold, or a frame the dead room's feed queued, is not live media.
+fn clear_hold_for_displayed_frame(
+    win: &mut CompositorWindow,
+    rejoin_held: bool,
+    newest_feed_generation: Option<u64>,
+) -> bool {
+    if win.held_reason == Some(HoldWindowReason::RejoinInProgress) {
+        if rejoin_held {
+            return false;
+        }
+        if let Some(claimed) = win.rejoin_claimed_at_generation {
+            if newest_feed_generation.is_none_or(|generation| generation < claimed) {
+                return false;
+            }
+        }
     }
-    win.held_reason.take().is_some()
+    let cleared = win.held_reason.take().is_some();
+    if cleared {
+        win.rejoin_claimed_at_generation = None;
+    }
+    cleared
 }
 
 fn drain_pending_display_samples_on_main(app: &AppHandle, key: &RemoteWindowKey) {
@@ -4244,6 +4268,7 @@ fn drain_pending_display_samples_on_main(app: &AppHandle, key: &RemoteWindowKey)
         if pending.is_empty() {
             return false;
         }
+        let newest_feed_generation = pending.iter().map(|p| p.feed_generation).max();
         let Some(display) = win.display.as_ref() else {
             return false;
         };
@@ -4268,7 +4293,8 @@ fn drain_pending_display_samples_on_main(app: &AppHandle, key: &RemoteWindowKey)
         // stalled track recovers with no new `TrackSubscribed` (#627).
         // #360: except a rejoin hold the new feed has not claimed yet -- a
         // frame queued by the dead room's feed is not live media.
-        let resumed_from_hold = clear_hold_for_displayed_frame(win, rejoin_held);
+        let resumed_from_hold =
+            clear_hold_for_displayed_frame(win, rejoin_held, newest_feed_generation);
         if win.revealed_first_frame {
             if resumed_from_hold {
                 cleared_hold = true;
@@ -5855,6 +5881,9 @@ fn begin_rejoin_hold_state(
             HoldStep::NewlyHeld => outcome.newly_held.push(key.clone()),
             HoldStep::AlreadyHeld => {}
         }
+        if let Some(win) = s.windows.get_mut(key) {
+            win.rejoin_claimed_at_generation = None;
+        }
         let hold = s.rejoin_hold.get_or_insert_with(|| RejoinHold {
             room_id: room.id.clone(),
             room_name: room.name.clone(),
@@ -6048,7 +6077,13 @@ pub fn claim_rejoin_hold(owner_identity: &str, window_id: u32, feed_generation: 
             .rejoin_hold
             .as_ref()
             .is_some_and(|hold| feed_generation > hold.begun_at_generation);
-        newer_feed && release_rejoin_hold_key(s, &key)
+        let claimed = newer_feed && release_rejoin_hold_key(s, &key);
+        if claimed {
+            if let Some(win) = s.windows.get_mut(&key) {
+                win.rejoin_claimed_at_generation = Some(feed_generation);
+            }
+        }
+        claimed
     });
     if claimed {
         log::info!(
@@ -6079,9 +6114,12 @@ pub fn release_rejoin_hold(app: &AppHandle, room_name: &str, hold_id: u64) -> us
 }
 
 /// #360: the meeting route gave up its automatic rejoin of `room_name`
-/// (`connectionRecovery.ts`'s terminal failure). Scoped to that room AND to the
-/// hold the failed recovery started for (`room-left`'s `rejoinHoldId`): any
-/// other hold, or none, is left alone.
+/// (`connectionRecovery.ts`'s terminal failure). Scoped to that room and to
+/// holds at or after the one the recovery started for (`room-left`'s
+/// `rejoinHoldId`): a failed attempt after a commit that re-bound every window
+/// re-holds under a NEW id within the same run. Ids only grow, and a
+/// superseded run never reaches release (it re-checks `cancelled()`), so an
+/// older hold or another room is never touched.
 #[tauri::command]
 pub fn compositor_release_rejoin_hold(app: AppHandle, room_name: String, hold_id: u64) -> usize {
     release_rejoin_hold(&app, &room_name, hold_id)
@@ -6095,7 +6133,7 @@ fn release_rejoin_hold_with(
     let detached = with_state(|s| {
         if s.rejoin_hold
             .as_ref()
-            .is_some_and(|hold| hold.room_name == room_name && hold.id == hold_id)
+            .is_some_and(|hold| hold.room_name == room_name && hold.id >= hold_id)
         {
             detach_whole_rejoin_hold(s, RemoveWindowReason::LeaveRoom)
         } else {
@@ -8636,6 +8674,7 @@ mod tests {
             revealed_first_frame: false,
             layer_has_content: false,
             held_reason: None,
+            rejoin_claimed_at_generation: None,
             stripped_for_pool: false,
             app_origin: None,
             ai_chat_overlay_open: false,
@@ -12078,48 +12117,43 @@ mod tests {
         issue360_reset(&[&a]);
     }
 
-    /// (c) A stale recovery run -- one started for an EARLIER hold of the same
-    /// room -- cannot end a newer hold; a re-hold of the same hold keeps its id
-    /// so the run that owns it still can.
+    /// (c) Round-4 #1: a rejoin attempt that commits and re-binds EVERY window
+    /// ends the hold (and its id); if that attempt then fails after commit,
+    /// its own cleanup re-holds under a NEW id within the same recovery run.
+    /// The run's terminal release (carrying the id it captured at the start)
+    /// must still end that renewed hold -- and must never reach backwards to
+    /// end an older one, or another room's.
     #[test]
-    fn issue_360_stale_release_cannot_end_a_newer_hold() {
+    fn issue_360_release_ends_a_hold_renewed_within_the_same_run() {
         let _serial = REJOIN_TEST_LOCK.lock_unpoisoned();
         let a = issue360_window("issue360-i-owner", 0x360_0091, true);
         issue360_reset(&[]);
         let mut fx = RecordingRejoinEffects::default();
         let t0 = Instant::now();
-        let first = hold_all_windows_for_rejoin_with(&rejoin_room(), t0, issue360_scope, &mut fx)
+        let captured = hold_all_windows_for_rejoin_with(&rejoin_room(), t0, issue360_scope, &mut fx)
             .expect("first hold");
-        // The first hold ends (the rejoin re-bound everything)...
+        // Attempt 1 commits and re-binds everything: the hold record ends.
         assert!(claim(&a, REJOIN_GEN));
         assert!(with_state(|s| s.rejoin_hold.is_none()));
-        // ...then the rejoined room drops too: a NEW hold for the same room.
-        let second = hold_all_windows_for_rejoin_with(
+        // ...then fails after commit: its cleanup re-holds under a new id.
+        let renewed = hold_all_windows_for_rejoin_with(
             &RejoinRoom {
                 generation: REJOIN_GEN + 1,
                 ..rejoin_room()
             },
-            t0 + Duration::from_secs(30),
+            t0 + Duration::from_secs(10),
             issue360_scope,
             &mut fx,
         )
-        .expect("second hold");
-        assert_ne!(first, second);
-        // The first recovery run gives up late: its release must not touch it.
-        assert_eq!(release_rejoin_hold_with("issue360-room", first, &mut fx), 0);
+        .expect("renewed hold");
+        assert!(renewed > captured, "hold ids only grow");
+        // Another room's release, or one naming a LATER hold, does nothing.
+        assert_eq!(release_rejoin_hold_with("issue360-other-room", captured, &mut fx), 0);
+        assert_eq!(release_rejoin_hold_with("issue360-room", renewed + 1, &mut fx), 0);
         assert!(held_for_rejoin(&a));
-        // A failed attempt's own cleanup re-holds the same hold: same id.
-        let again = hold_all_windows_for_rejoin_with(
-            &RejoinRoom {
-                generation: REJOIN_GEN + 3,
-                ..rejoin_room()
-            },
-            t0 + Duration::from_secs(35),
-            issue360_scope,
-            &mut fx,
-        );
-        assert_eq!(again, Some(second));
-        assert_eq!(release_rejoin_hold_with("issue360-room", second, &mut fx), 1);
+        // The run gives up: its captured id ends the renewed hold now.
+        assert_eq!(release_rejoin_hold_with("issue360-room", captured, &mut fx), 1);
+        assert!(!is_open_for_owner(&a.owner_identity, a.window_id));
         assert_no_rejoin_phantom(&[]);
         issue360_reset(&[&a]);
     }
@@ -12135,22 +12169,27 @@ mod tests {
         issue360_reset(&[]);
         let mut fx = RecordingRejoinEffects::default();
         hold_all_windows_for_rejoin_with(&rejoin_room(), Instant::now(), issue360_scope, &mut fx);
-        // The drain's own state step, in its order.
-        let drain = |key: &RemoteWindowKey| {
+        // The drain's own state step, in its order, for frames of `generation`.
+        let drain = |key: &RemoteWindowKey, generation: u64| {
             with_state(|s| {
                 let rejoin_held = rejoin_hold_unclaimed(s, key);
                 let win = s.windows.get_mut(key).expect("open");
-                clear_hold_for_displayed_frame(win, rejoin_held)
+                clear_hold_for_displayed_frame(win, rejoin_held, Some(generation))
             })
         };
-        assert!(!drain(&a), "a stale frame must not end the rejoin hold");
+        let old_feed = LOST_GEN - 1;
+        assert!(!drain(&a, old_feed), "a stale frame must not end the rejoin hold");
         assert!(held_for_rejoin(&a));
         assert!(claim(&a, REJOIN_GEN));
-        assert!(drain(&a), "the re-bound feed's first frame ends it");
+        // Round-4 #2: an old-feed frame drained AFTER the take-back is still
+        // not live media.
+        assert!(!drain(&a, old_feed), "an old feed's frame must not end it after the claim");
+        assert!(held_for_rejoin(&a));
+        assert!(drain(&a, REJOIN_GEN), "the re-bound feed's first frame ends it");
         assert!(!held_for_rejoin(&a));
         // Other holds are still cleared by frames, as before (#627).
         with_state(|s| hold_state_step(s, &a, HoldWindowReason::NoFrameWatchdog));
-        assert!(drain(&a));
+        assert!(drain(&a, old_feed));
         issue360_reset(&[&a]);
     }
 
