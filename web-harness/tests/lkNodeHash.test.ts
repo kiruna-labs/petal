@@ -150,10 +150,14 @@ test('#372: an overtaken refresh, or one for a room that is gone, never lands', 
   assert.equal(state.lkEdge, null);
 });
 
-test('#372: edgeDimensions feeds the web summary, empty while the edge is unknown', () => {
+test('#372: edgeDimensions sets what is known and clears the rest', () => {
   const local: LocalEdge = { lkRegion: 'us-east-1', selfHostedSfu: 'false', lkNodeHash: '69e94d0a' };
   assert.deepEqual(edgeDimensions(local, '69e94d0a'), { lk_region: 'us-east-1', self_hosted_sfu: 'false', same_edge: 'true' });
-  assert.deepEqual(edgeDimensions(local, undefined).same_edge, 'unknown');
-  assert.deepEqual(edgeDimensions({ selfHostedSfu: 'true' }, 'e4c80fa5'), { self_hosted_sfu: 'true', same_edge: 'unknown' });
-  assert.deepEqual(edgeDimensions(null, '69e94d0a'), {});
+  assert.equal(edgeDimensions(local, undefined).same_edge, 'unknown');
+  assert.deepEqual(edgeDimensions({ selfHostedSfu: 'false' }, 'e4c80fa5'), {
+    lk_region: undefined,
+    self_hosted_sfu: 'false',
+    same_edge: 'unknown',
+  });
+  assert.deepEqual(edgeDimensions(null, '69e94d0a'), { lk_region: undefined, self_hosted_sfu: undefined, same_edge: undefined });
 });

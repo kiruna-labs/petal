@@ -240,6 +240,11 @@ export class RcLatencyAggregator {
     return true;
   }
 
+  /** #372: remove a dimension that no longer has data (missing is omitted). */
+  clearDimension(key: RcLatencyDimension): void {
+    this.session?.dimensions.delete(key);
+  }
+
   /** Drain the interval. Empty intervals (no samples, no non-zero counter) and capped sessions emit nothing. */
   private takeInterval(session: Session, nowMs: number, final: boolean): void {
     const stages: RcLatencySummary['stages'] = {};

@@ -191,3 +191,14 @@ test('dimensions are closed and a session caps at 120 events including the final
   aggregator.sync(false, now);
   assert.equal(emitted.length, RC_LATENCY_MAX_EVENTS_PER_SESSION, 'the final partial is capped too');
 });
+
+test('#372: clearDimension removes a dimension from the running session', () => {
+  const { aggregator, emitted } = collect();
+  aggregator.sync(true, 0);
+  assert.equal(aggregator.setDimension('lk_region', 'us-east-1'), true);
+  assert.equal(aggregator.setDimension('same_edge', 'true'), true);
+  aggregator.clearDimension('lk_region');
+  for (const ms of [2, 3, 4, 5, 6]) aggregator.recordStage('jb_delay_ms', ms);
+  aggregator.sync(true, 60_000);
+  assert.deepEqual(emitted[0].dimensions, { same_edge: 'true' });
+});

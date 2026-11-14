@@ -121,7 +121,11 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
     if (active) {
       // #372: re-stamped every tick, so a refreshed edge or host hash lands.
       const edge = edgeDimensions(state.lkEdge, state.activeRemoteControl?.hostLkNodeHash);
-      for (const [key, value] of Object.entries(edge)) rcLatency.setDimension(key as keyof typeof edge, value);
+      for (const [key, value] of Object.entries(edge)) {
+        const dimension = key as keyof typeof edge;
+        if (value === undefined) rcLatency.clearDimension(dimension);
+        else rcLatency.setDimension(dimension, value);
+      }
     }
     void receiverTiming.sync(active ? controlledReceiverTarget() : null);
   }

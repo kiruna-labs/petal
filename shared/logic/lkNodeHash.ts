@@ -95,16 +95,17 @@ export function currentServerInfo(room: {
   return latest ? latest.serverInfo : room.serverInfo;
 }
 
-/** The edge dimensions of a control session's latency summary (#372); empty
- * while the local edge is unknown or being refreshed. ICE is native-only. */
+/** The edge dimensions of a control session's latency summary (#372): a
+ * string to set, `undefined` to clear (an unknown edge, a refresh in flight,
+ * or a reconnect with no server info must not keep the old value). ICE is
+ * native-only. */
 export function edgeDimensions(
   local: LocalEdge | null | undefined,
   peerHash: string | undefined
-): Partial<Record<'lk_region' | 'self_hosted_sfu' | 'same_edge', string>> {
-  if (!local) return {};
+): Record<'lk_region' | 'self_hosted_sfu' | 'same_edge', string | undefined> {
   return {
-    ...(local.lkRegion ? { lk_region: local.lkRegion } : {}),
-    self_hosted_sfu: local.selfHostedSfu,
-    same_edge: sameEdge(local.lkNodeHash, peerHash),
+    lk_region: local?.lkRegion,
+    self_hosted_sfu: local?.selfHostedSfu,
+    same_edge: local ? sameEdge(local.lkNodeHash, peerHash) : undefined,
   };
 }

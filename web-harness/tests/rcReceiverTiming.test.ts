@@ -314,6 +314,11 @@ test('the control lifecycle polls only the controlled window and stops on releas
     assert.equal(other.track.polls, 0, 'only the controlled window is polled');
     assert.equal(other.video.callbacks.size, 0);
     for (let i = 0; i < 5; i += 1) controlled.video.present({ expectedDisplayTime: 40, receiveTime: 25 });
+    // #372: a reconnect whose server sent no info: the refreshed edge has no
+    // region or hash, and the summary must drop the old values, not keep them.
+    (ctx.state as { lkEdge?: unknown }).lkEdge = { selfHostedSfu: 'false' };
+    mock.timers.tick(RC_LATENCY_SYNC_MS);
+    await flush();
 
     // A local release stops the frame loop at once, not on the next tick.
     (setupResult as { stopRemoteControl: () => void }).stopRemoteControl();
@@ -323,7 +328,7 @@ test('the control lifecycle polls only the controlled window and stops on releas
       mock.timers.tick(RC_LATENCY_SYNC_MS);
       await flush();
     }
-    assert.equal(controlled.track.polls, 3, 'polling stops on release');
+    assert.equal(controlled.track.polls, 4, 'polling stops on release (3 + the reconnect tick)');
     assert.equal(controlled.video.callbacks.size, 0);
     const events = sink.filter((event) => event.name === 'remote_control_latency_summary');
     assert.equal(events.length, 1, 'the final partial');
@@ -334,8 +339,8 @@ test('the control lifecycle polls only the controlled window and stops on releas
     assert.equal(events[0].properties.sub_rtt_ms_n, 3);
     assert.equal(events[0].properties.jb_delay_ms_p50, 20);
     assert.equal(events[0].properties.frame_metadata, 'unavailable', 'no worker in node');
-    assert.equal(events[0].properties.same_edge, 'false');
-    assert.equal(events[0].properties.lk_region, 'us-east-1');
+    assert.equal(events[0].properties.lk_region, undefined, 'the old region is gone');
+    assert.equal(events[0].properties.same_edge, 'unknown', 'no local hash after the reconnect');
     assert.equal(events[0].properties.self_hosted_sfu, 'false');
     assert.ok(logs.some((line) => line.startsWith('remote-control-latency-summary: role=controller ')));
   } finally {
