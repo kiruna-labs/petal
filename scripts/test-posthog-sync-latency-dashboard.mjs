@@ -86,6 +86,19 @@ test('the lockstep check rejects an unknown property or value', () => {
   assert.deepEqual(lockstepProblems("WHERE properties.lk_region = 'any-region' AND properties.photon_ms_n >= 5"), []);
 });
 
+// Checked against PostHog's HogQL allowlist (posthog/hogql/functions/) on
+// 2026-11-13. `quantileExactLow` is commented out there: use medianExactLow.
+const HOGQL_FUNCTIONS = new Set([
+  'argMax', 'avg', 'count', 'countIf', 'dateDiff', 'greatest', 'if', 'ifNull', 'max', 'maxIf', 'medianExactLow',
+  'medianExactLowIf', 'min', 'minIf', 'multiIf', 'now', 'toFloat', 'toInt', 'toStartOfDay', 'toString', 'uniqExactIf',
+]);
+
+test('the SQL calls only HogQL functions known to be allowlisted', () => {
+  const code = sqlText.split('\n').filter((line) => !line.trimStart().startsWith('--')).join('\n');
+  const called = new Set([...code.matchAll(/\b([A-Za-z_]\w*)\(/g)].map((match) => match[1]).filter((name) => !['IN', 'AS'].includes(name)));
+  assert.deepEqual([...called].filter((name) => !HOGQL_FUNCTIONS.has(name)), []);
+});
+
 test('every events scan filters the event, the 14-day window and self-hosted SFUs', () => {
   for (const insight of insights) {
     const scans = insight.query.match(/FROM events\b/g).length;
@@ -142,11 +155,15 @@ test('main dry-runs without touching the network and refuses other modes', () =>
     assert.equal(main([], io), 0);
     assert.match(out.pop(), /Insights: 9 to create, 0 to update, 0 unchanged, 0 not in the file\./);
 
-    const snapshot = JSON.stringify({ dashboard: { id: 9 }, insights: [{ id: 7, ...insightPayload(insights[0], 9) }] });
+    const snapshot = JSON.stringify({ dashboard: { id: 9, name: 'Remote-control latency' }, insights: [{ id: 7, ...insightPayload(insights[0], 9) }] });
     const readFile = (file) => (file === 'snapshot.json' ? snapshot : readFileSync(file, 'utf8'));
     assert.equal(main(['--existing', 'snapshot.json', '--json'], { ...io, readFile }), 0);
     const plan = JSON.parse(out.pop());
     assert.deepEqual(plan[1], { ...plan[1], action: 'unchanged', id: 7 });
+
+    const wrong = JSON.stringify({ dashboard: { id: 3, name: 'Unrelated dashboard' }, insights: [] });
+    assert.equal(main(['--existing', 'wrong.json'], { ...io, readFile: () => wrong }), 2);
+    assert.match(err.pop(), /not "Remote-control latency"/);
 
     assert.equal(main(['--apply'], io), 2);
     assert.match(err.pop(), /dry run only/);

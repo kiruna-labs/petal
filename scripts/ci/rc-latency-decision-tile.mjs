@@ -257,6 +257,8 @@ export function decisionEvents(events, { now = Date.now(), windowDays = WINDOW_D
     .filter((event) => event?.event === EVENT_NAME)
     .map((event) => ({ ts: timeMs(event.timestamp), p: event.properties ?? {} }))
     .filter((event) => Number.isFinite(event.ts) && event.ts > since)
+    // SQL's count(DISTINCT) skips a NULL session id; so does this.
+    .filter((event) => typeof event.p.rc_session_id === 'string' && event.p.rc_session_id !== '')
     .filter((event) => String(event.p.self_hosted_sfu) !== 'true');
 }
 

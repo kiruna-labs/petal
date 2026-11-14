@@ -67,6 +67,9 @@ function existingQuery(entry) {
 // insights the file does not define are reported and left alone; nothing is
 // ever deleted.
 export function planSync(insights, { dashboard = null, insights: existing = [] } = {}) {
+  if (dashboard && dashboard.name !== DASHBOARD_NAME) {
+    throw new Error(`snapshot dashboard is "${dashboard.name}", not "${DASHBOARD_NAME}"`);
+  }
   const dashboardId = dashboard?.id ?? null;
   const dashboardStep = dashboard
     ? { action: 'unchanged', kind: 'dashboard', name: DASHBOARD_NAME, id: dashboardId }
@@ -118,7 +121,13 @@ export function main(argv, { readFile = (file) => readFileSync(file, 'utf8'), lo
     }
     existing = JSON.parse(readFile(argv[at + 1]));
   }
-  const plan = planSync(parseDashboardSql(readFile(SQL_PATH)), existing);
+  let plan;
+  try {
+    plan = planSync(parseDashboardSql(readFile(SQL_PATH)), existing);
+  } catch (failure) {
+    error(failure.message);
+    return 2;
+  }
   log(argv.includes('--json') ? JSON.stringify(plan, null, 2) : formatPlan(plan));
   return 0;
 }

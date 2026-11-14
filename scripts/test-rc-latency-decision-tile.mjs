@@ -174,6 +174,12 @@ test('self-hosted SFUs, other events and old events are left out', () => {
   assert.equal(verdicts(selfHosted).a_input_leg_p95_fleet, 'INSUFFICIENT');
   const unnamed = fleet({ host: { input_leg_ms: [30, 70] } }).map(({ event: _name, ...rest }) => rest);
   assert.equal(verdicts(unnamed).a_input_leg_p95_fleet, 'INSUFFICIENT');
+  // 49 sessions plus intervals with no session id are still 49 sessions.
+  const noId = fleet({ sessions: 1, host: { input_leg_ms: [30, 70] } }).map((event) => {
+    const { rc_session_id: _drop, ...properties } = event.properties;
+    return { ...event, properties };
+  });
+  assert.equal(verdicts([...fleet({ sessions: 49, host: { input_leg_ms: [30, 70] } }), ...noId]).a_input_leg_p95_fleet, 'INSUFFICIENT');
   const other = fleet({ host: { input_leg_ms: [30, 70] } }).map((event) => ({ ...event, event: 'meeting_joined' }));
   assert.equal(verdicts(other).a_input_leg_p95_fleet, 'INSUFFICIENT');
   const old = fleet({ host: { input_leg_ms: [30, 70] } }).map((event) => ({ ...event, timestamp: Date.parse(event.timestamp) - 30 * DAY }));
