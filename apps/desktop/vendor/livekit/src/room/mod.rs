@@ -447,20 +447,12 @@ impl Default for RoomOptions {
 pub struct ServerInfoSummary {
     pub region: String,
     pub node_id: String,
-    pub version: String,
-    /// `true` for LiveKit Cloud (`Edition::Cloud`).
-    pub cloud_edition: bool,
 }
 
 impl ServerInfoSummary {
     pub(crate) fn from_proto(info: Option<proto::ServerInfo>) -> Option<Self> {
         let info = info?;
-        Some(Self {
-            cloud_edition: info.edition() == proto::server_info::Edition::Cloud,
-            region: info.region,
-            node_id: info.node_id,
-            version: info.version,
-        })
+        Some(Self { region: info.region, node_id: info.node_id })
     }
 }
 

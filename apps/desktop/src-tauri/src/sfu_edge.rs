@@ -244,12 +244,24 @@ enum IceState {
     Known(IcePath),
 }
 
+/// The room this state describes: `key` is its address (identity only,
+/// never dereferenced), `weak` reads its live server info.
+struct RoomRef {
+    key: usize,
+    weak: std::sync::Weak<livekit::Room>,
+    url: String,
+}
+
+fn room_key(room: &livekit::Room) -> usize {
+    room as *const livekit::Room as usize
+}
+
 #[derive(Default)]
 struct EdgeState {
     /// The connected room, weak so this module never extends its life
     /// (#883). Re-read on every use: a full reconnect lands on a new signal
     /// session whose join response may name another node.
-    room: Option<(std::sync::Weak<livekit::Room>, String)>,
+    room: Option<RoomRef>,
     local: Option<LocalEdge>,
     ice: IceState,
     /// Bumped on every connect, reconnect and leave, so an ICE sample begun
@@ -265,18 +277,61 @@ struct EdgeState {
 impl EdgeState {
     /// Whether `room` is the connection this state describes; a task from
     /// an older connection must never write into a newer one's state.
-    fn is_current(&self, room: &livekit::Room) -> bool {
-        self.room
-            .as_ref()
-            .is_some_and(|(weak, _)| std::ptr::eq(weak.as_ptr(), room))
+    fn is_current(&self, key: usize) -> bool {
+        self.room.as_ref().is_some_and(|room| room.key == key)
     }
 
     fn refresh_local(&mut self) {
-        if let Some((room, url)) = &self.room {
-            if let Some(room) = room.upgrade() {
-                self.local = Some(LocalEdge::new(room.server_info().as_ref(), url));
+        if let Some(room) = &self.room {
+            if let Some(live) = room.weak.upgrade() {
+                self.local = Some(LocalEdge::new(live.server_info().as_ref(), &room.url));
             }
         }
+    }
+
+    /// A (re)connect of room `key`: a new generation, and a path stamped on
+    /// the old peer connections reads `unknown` until resampled.
+    fn begin_connection(&mut self, room: RoomRef) {
+        self.room = Some(room);
+        self.generation += 1;
+        if self.ice != IceState::NotSampled {
+            self.ice = IceState::Unknown;
+        }
+    }
+
+    /// Room `key` left. False (and untouched) for an older room's late leave.
+    fn leave(&mut self, key: usize) -> bool {
+        if !self.is_current(key) {
+            return false;
+        }
+        *self = EdgeState {
+            generation: self.generation + 1,
+            ..EdgeState::default()
+        };
+        true
+    }
+
+    /// The generation an ICE sample of room `key` must carry, `None` for an
+    /// older room's poller.
+    fn sample_generation(&self, key: usize) -> Option<u64> {
+        self.is_current(key).then_some(self.generation)
+    }
+
+    /// Accept a sample begun at `generation`; false for a stale one.
+    fn accept_ice(&mut self, generation: u64, path: Option<IcePath>) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        let next = path.map_or(IceState::Unknown, IceState::Known);
+        if self.ice != next {
+            log::info!(
+                "sfu-edge: ice_candidate_type={} ice_protocol={}",
+                path.map_or(UNKNOWN, |p| p.candidate_type),
+                path.map_or(UNKNOWN, |p| p.protocol)
+            );
+            self.ice = next;
+        }
+        true
     }
 }
 
@@ -292,39 +347,47 @@ fn role_slot(role: RcRole) -> usize {
     }
 }
 
-/// Dimension values for one role's session; anything unknown is omitted
-/// except `same_edge`, which says `unknown` once the local edge is known.
-fn dimensions_for(state: &EdgeState, role: RcRole) -> Vec<(Dimension, String)> {
-    let mut out = Vec::new();
-    if let Some(local) = &state.local {
-        let peers = state.session_peers[role_slot(role)]
-            .iter()
-            .map(|p| state.peer_hashes.get(p).map(String::as_str));
-        if let Some(region) = &local.lk_region {
-            out.push((Dimension::LkRegion, region.clone()));
-        }
-        out.push((Dimension::SelfHostedSfu, local.self_hosted_sfu.to_string()));
-        out.push((Dimension::SameEdge, same_edge_all(local.node_hash.as_deref(), peers).to_string()));
-    }
+/// Every edge dimension for one role's session: `Some` to set, `None` to
+/// clear (missing data is omitted, and a value from an earlier connection
+/// must not outlive it). `same_edge` says `unknown` once the local edge is known.
+fn dimensions_for(state: &EdgeState, role: RcRole) -> Vec<(Dimension, Option<String>)> {
+    let local = state.local.as_ref();
+    let peers = state.session_peers[role_slot(role)]
+        .iter()
+        .map(|p| state.peer_hashes.get(p).map(String::as_str));
     let ice = match state.ice {
         IceState::NotSampled => None,
         IceState::Unknown => Some((UNKNOWN, UNKNOWN)),
         IceState::Known(path) => Some((path.candidate_type, path.protocol)),
     };
-    if let Some((candidate_type, protocol)) = ice {
-        out.push((Dimension::IceCandidateType, candidate_type.to_string()));
-        out.push((Dimension::IceProtocol, protocol.to_string()));
-    }
-    out
+    vec![
+        (Dimension::LkRegion, local.and_then(|l| l.lk_region.clone())),
+        (Dimension::SelfHostedSfu, local.map(|l| l.self_hosted_sfu.to_string())),
+        (
+            Dimension::SameEdge,
+            local.map(|l| same_edge_all(l.node_hash.as_deref(), peers).to_string()),
+        ),
+        (Dimension::IceCandidateType, ice.map(|(t, _)| t.to_string())),
+        (Dimension::IceProtocol, ice.map(|(_, p)| p.to_string())),
+    ]
 }
 
-fn apply_locked(state: &EdgeState, role: RcRole) {
+fn apply_with(state: &EdgeState, role: RcRole, mut write: impl FnMut(Dimension, Option<&str>)) {
     if state.session_peers[role_slot(role)].is_empty() {
         return;
     }
     for (dimension, value) in dimensions_for(state, role) {
-        rc_latency_telemetry::set_dimension(role, dimension, &value);
+        write(dimension, value.as_deref());
     }
+}
+
+fn apply_locked(state: &EdgeState, role: RcRole) {
+    apply_with(state, role, |dimension, value| match value {
+        Some(value) => {
+            rc_latency_telemetry::set_dimension(role, dimension, value);
+        }
+        None => rc_latency_telemetry::clear_dimension(role, dimension),
+    });
 }
 
 fn apply_all_locked(state: &EdgeState) {
@@ -378,13 +441,11 @@ pub(crate) fn local_lk_region() -> Option<String> {
 /// path is dropped until the next sample.
 pub(crate) fn note_room_connected(room: &std::sync::Arc<livekit::Room>, url: &str) {
     let mut state = state().lock_unpoisoned();
-    state.room = Some((std::sync::Arc::downgrade(room), url.to_string()));
-    state.generation += 1;
-    // A reconnect may have rebuilt the peer connections: until the next
-    // sample, a session already stamped with the old path says `unknown`.
-    if state.ice != IceState::NotSampled {
-        state.ice = IceState::Unknown;
-    }
+    state.begin_connection(RoomRef {
+        key: room_key(room),
+        weak: std::sync::Arc::downgrade(room),
+        url: url.to_string(),
+    });
     state.refresh_local();
     if let Some(local) = &state.local {
         log::info!(
@@ -400,15 +461,7 @@ pub(crate) fn note_room_connected(room: &std::sync::Arc<livekit::Room>, url: &st
 /// `room` left: nothing from it may label the next connection. A late
 /// `Disconnected` from an older room leaves a newer room's state alone.
 pub(crate) fn note_room_left(room: &livekit::Room) {
-    let mut state = state().lock_unpoisoned();
-    if !state.is_current(room) {
-        return;
-    }
-    let generation = state.generation + 1;
-    *state = EdgeState {
-        generation,
-        ..EdgeState::default()
-    };
+    state().lock_unpoisoned().leave(room_key(room));
 }
 
 /// An ICE sample taken on connection `generation`. Re-stamps active
@@ -417,30 +470,16 @@ pub(crate) fn note_room_left(room: &livekit::Room) {
 /// it. `None` (no selected pair) records `unknown`.
 fn note_ice_path_for(generation: u64, path: Option<IcePath>) {
     let mut state = state().lock_unpoisoned();
-    if state.generation != generation {
-        return;
+    if state.accept_ice(generation, path) {
+        apply_all_locked(&state);
     }
-    let next = path.map_or(IceState::Unknown, IceState::Known);
-    if state.ice != next {
-        log::info!(
-            "sfu-edge: ice_candidate_type={} ice_protocol={}",
-            path.map_or(UNKNOWN, |p| p.candidate_type),
-            path.map_or(UNKNOWN, |p| p.protocol)
-        );
-        state.ice = next;
-    }
-    apply_all_locked(&state);
 }
 
 /// Sample both peer connections' selected candidate pairs. Bounded: the
 /// caller is the diagnostics poller, which must not stall on a wedged PC.
 pub(crate) async fn sample_ice_path(room: &livekit::Room) {
-    let generation = {
-        let state = state().lock_unpoisoned();
-        if !state.is_current(room) {
-            return;
-        }
-        state.generation
+    let Some(generation) = state().lock_unpoisoned().sample_generation(room_key(room)) else {
+        return;
     };
     let stats = tokio::time::timeout(std::time::Duration::from_secs(2), room.get_stats()).await;
     let Ok(Ok(stats)) = stats else {
@@ -621,39 +660,110 @@ mod tests {
         }
     }
 
+    fn info(region: &str, node: &str) -> livekit::ServerInfoSummary {
+        livekit::ServerInfoSummary {
+            region: region.into(),
+            node_id: node.into(),
+        }
+    }
+
+    fn room_ref(key: usize) -> RoomRef {
+        RoomRef {
+            key,
+            weak: std::sync::Weak::new(),
+            url: "wss://petal-x.livekit.cloud".into(),
+        }
+    }
+
+    fn dim(state: &EdgeState, wanted: Dimension) -> Option<String> {
+        dimensions_for(state, RcRole::Host)
+            .into_iter()
+            .find(|(d, _)| *d == wanted)
+            .and_then(|(_, v)| v)
+    }
+
     /// A no-pair sample says `unknown`; a never-sampled connection omits ICE.
     #[test]
     fn ice_dimensions_follow_the_sample_state() {
-        let ice_dims = |ice| {
-            let state = EdgeState {
-                ice,
-                ..EdgeState::default()
-            };
-            dimensions_for(&state, RcRole::Host)
-        };
-        assert!(ice_dims(IceState::NotSampled).is_empty());
-        assert_eq!(
-            ice_dims(IceState::Unknown),
-            vec![
-                (Dimension::IceCandidateType, "unknown".to_string()),
-                (Dimension::IceProtocol, "unknown".to_string()),
-            ]
-        );
-        let relay = IcePath {
+        let mut state = EdgeState::default();
+        assert_eq!(dim(&state, Dimension::IceCandidateType), None);
+        state.ice = IceState::Unknown;
+        assert_eq!(dim(&state, Dimension::IceCandidateType).as_deref(), Some("unknown"));
+        assert_eq!(dim(&state, Dimension::IceProtocol).as_deref(), Some("unknown"));
+        state.ice = IceState::Known(IcePath {
             candidate_type: "relay",
             protocol: "tcp",
+        });
+        assert_eq!(dim(&state, Dimension::IceCandidateType).as_deref(), Some("relay"));
+    }
+
+    /// A reconnect whose server sends no info clears the old edge's region
+    /// from the running session instead of leaving it stale.
+    #[test]
+    fn reconnect_without_server_info_clears_the_session_region() {
+        let aggregator = rc_latency_telemetry::Aggregator::new(RcRole::Host);
+        let now = std::time::Instant::now();
+        aggregator.sync_at(true, now);
+        let write = |dimension: Dimension, value: Option<&str>| match value {
+            Some(value) => {
+                aggregator.set_dimension(dimension, value);
+            }
+            None => aggregator.clear_dimension(dimension),
         };
-        assert_eq!(ice_dims(IceState::Known(relay))[0].1, "relay");
+        let url = "wss://petal-x.livekit.cloud";
+        let mut state = EdgeState {
+            local: Some(LocalEdge::new(Some(&info("us-east-1", "ND_7xKqM2pLz9Rb")), url)),
+            ..EdgeState::default()
+        };
+        state.session_peers[0] = vec!["controller".into()];
+        apply_with(&state, RcRole::Host, write);
+        state.local = Some(LocalEdge::new(None, url));
+        apply_with(&state, RcRole::Host, write);
+        aggregator.record_stage(rc_latency_telemetry::Stage::ReplayInjectMs, 5.0);
+        let summary = aggregator
+            .sync_at(true, now + rc_latency_telemetry::EMIT_INTERVAL)
+            .expect("interval with a sample emits");
+        let line = summary.log_line();
+        assert!(!line.contains("lk_region="), "{line}");
+        assert!(line.contains("self_hosted_sfu=false") && line.contains("same_edge=unknown"), "{line}");
+    }
+
+    /// Round-3 races: an older room's ICE sample and its late `Disconnected`
+    /// never write into the newer room's state.
+    #[test]
+    fn an_older_room_never_writes_into_the_newer_rooms_state() {
+        let relay = Some(IcePath {
+            candidate_type: "relay",
+            protocol: "tcp",
+        });
+        let mut state = EdgeState::default();
+        state.begin_connection(room_ref(1));
+        let stale = state.sample_generation(1).expect("room 1 is current");
+        state.begin_connection(room_ref(2));
+        // Room 1's poller can no longer start a sample, and one it started
+        // before the switch is discarded.
+        assert_eq!(state.sample_generation(1), None);
+        assert!(!state.accept_ice(stale, relay));
+        assert_eq!(state.ice, IceState::NotSampled);
+        // A sample begun before room 2's own reconnect is stale too.
+        let before = state.sample_generation(2).unwrap();
+        state.begin_connection(room_ref(2));
+        assert!(!state.accept_ice(before, relay));
+        let current = state.sample_generation(2).unwrap();
+        assert!(state.accept_ice(current, relay));
+        assert_eq!(state.ice, IceState::Known(relay.unwrap()));
+        // Room 1's late leave leaves room 2 alone; room 2's own leave clears.
+        state.peer_hashes.insert("peer".into(), "69e94d0a".into());
+        assert!(!state.leave(1));
+        assert!(state.is_current(2) && !state.peer_hashes.is_empty());
+        assert!(state.leave(2));
+        assert!(state.room.is_none() && state.peer_hashes.is_empty());
+        assert!(!state.accept_ice(current, relay), "a sample from before the leave");
     }
 
     #[test]
     fn local_edge_never_carries_the_raw_node_id() {
-        let info = livekit::ServerInfoSummary {
-            region: "us-east-1".into(),
-            node_id: "ND_7xKqM2pLz9Rb".into(),
-            version: "1.9.1".into(),
-            cloud_edition: true,
-        };
+        let info = info("us-east-1", "ND_7xKqM2pLz9Rb");
         let edge = LocalEdge::new(Some(&info), "wss://petal-x.livekit.cloud");
         assert_eq!(edge.lk_region.as_deref(), Some("us-east-1"));
         assert_eq!(edge.self_hosted_sfu, "false");

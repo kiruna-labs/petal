@@ -16,7 +16,9 @@ import {
   sameEdge,
   selfHostedSfu,
   type EdgeFlag,
+  type LocalEdge,
 } from '@petal/shared/logic/lkNodeHash';
+import { createLkEdgeRefresher } from '../src/lkEdgeRefresh.ts';
 
 const contract = JSON.parse(
   readFileSync(new URL('../../contracts/petal-contracts.json', import.meta.url), 'utf8')
@@ -91,4 +93,58 @@ test('#372: a full reconnect\'s join response wins over the first-connect server
   assert.equal(currentServerInfo({ serverInfo: first, engine: {} }), first);
   assert.equal(currentServerInfo({}), undefined);
   assert.equal(currentServerInfo({ serverInfo: first, engine: { latestJoinResponse: {} } }), undefined);
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+test('#372: a refresh clears the old edge at once, so nothing in the window carries the old hash', async () => {
+  const room = { serverInfo: { region: 'us-east-1', nodeId: 'ND_7xKqM2pLz9Rb' } };
+  const state: { room: unknown; lkEdge?: LocalEdge | null } = {
+    room,
+    lkEdge: { lkRegion: 'us-east-1', selfHostedSfu: 'false', lkNodeHash: '69e94d0a' },
+  };
+  const pending = deferred<LocalEdge>();
+  const refresh = createLkEdgeRefresher({ state, logEvent: () => {}, computeEdge: () => pending.promise });
+  const done = refresh(room, 'wss://petal-x.livekit.cloud');
+  assert.equal(state.lkEdge, null, 'old hash withdrawn while the new one is computed');
+  pending.resolve({ lkRegion: 'eu-west-1', selfHostedSfu: 'false', lkNodeHash: 'e4c80fa5' });
+  await done;
+  assert.equal((state.lkEdge as LocalEdge | null)?.lkNodeHash, 'e4c80fa5');
+});
+
+test('#372: an overtaken refresh, or one for a room that is gone, never lands', async () => {
+  const room = { serverInfo: {} };
+  const state: { room: unknown; lkEdge?: LocalEdge | null } = { room };
+  const first = deferred<LocalEdge>();
+  const second = deferred<LocalEdge>();
+  const queue = [first, second];
+  const logs: string[] = [];
+  const refresh = createLkEdgeRefresher({
+    state,
+    logEvent: (line) => logs.push(line),
+    computeEdge: () => queue.shift()!.promise,
+  });
+  const older = refresh(room, 'wss://petal-x.livekit.cloud');
+  const newer = refresh(room, 'wss://petal-x.livekit.cloud');
+  second.resolve({ lkRegion: 'eu-west-1', selfHostedSfu: 'false', lkNodeHash: 'e4c80fa5' });
+  await newer;
+  first.resolve({ lkRegion: 'us-east-1', selfHostedSfu: 'false', lkNodeHash: '69e94d0a' });
+  await older;
+  assert.equal(state.lkEdge?.lkNodeHash, 'e4c80fa5', 'the older answer arrived last but lost');
+  assert.equal(logs.length, 1);
+
+  const gone = deferred<LocalEdge>();
+  const refreshGone = createLkEdgeRefresher({ state, logEvent: () => {}, computeEdge: () => gone.promise });
+  const leaving = refreshGone(room, 'wss://petal-x.livekit.cloud');
+  state.room = null;
+  state.lkEdge = null;
+  gone.resolve({ lkRegion: 'us-east-1', selfHostedSfu: 'false', lkNodeHash: '69e94d0a' });
+  await leaving;
+  assert.equal(state.lkEdge, null);
 });

@@ -14,7 +14,7 @@ import {
 } from 'livekit-client';
 import type { HarnessContext } from './context.ts';
 import { livekitRoomName } from '@petal/shared/logic/meetingCode';
-import { currentServerInfo, localEdge, type LocalEdge } from '@petal/shared/logic/lkNodeHash';
+import { createLkEdgeRefresher } from './lkEdgeRefresh.ts';
 import {
   AI_CHAT_TOPIC,
   COCKPIT_TOPIC,
@@ -200,18 +200,8 @@ export function setupConnection(
     audioReceiverParticipants.clear();
   }
 
-  /** #372: read this connection's edge; a stale room's or an overtaken
-   * refresh's answer is dropped. */
-  let lkEdgeRefreshSeq = 0;
-  async function refreshLkEdge(room: Room, url: string): Promise<void> {
-    const seq = ++lkEdgeRefreshSeq;
-    const edge: LocalEdge = await localEdge(currentServerInfo(room), url);
-    if (state.room !== room || seq !== lkEdgeRefreshSeq) return;
-    state.lkEdge = edge;
-    logEvent(
-      `sfu edge: lk_region=${edge.lkRegion ?? 'none'} self_hosted_sfu=${edge.selfHostedSfu} lk_node_hash=${edge.lkNodeHash ?? 'none'}`
-    );
-  }
+  // #372: this connection's edge, refreshed on connect and reconnect.
+  const refreshLkEdge = createLkEdgeRefresher({ state, logEvent });
 
   function removeAudioPlaybackPrompt() {
     audioPlaybackPrompt?.remove();

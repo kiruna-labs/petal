@@ -429,8 +429,8 @@ participant is on (`lk_region`) and whether controller and host share a node
 
 ## The fix
 
-`Room::server_info() -> Option<ServerInfoSummary { region, node_id, version,
-cloud_edition }>`, read live from the current signal session's
+`Room::server_info() -> Option<ServerInfoSummary { region, node_id }>` (only
+what Petal reads), read live from the current signal session's
 `JoinResponse`, so a full reconnect (new session) is reflected on the next
 call and a resume keeps its node. Purely additive. Petal reads it on connect
 and on `RoomEvent::Reconnected` (`sfu_edge.rs`) and never sends the raw
