@@ -1576,7 +1576,7 @@ verdict parses the line, and the web client reproduces it
 - Press-to-photon (#376): `photon_ms` = presentation of the first frame
   whose trailer id is `>=` the host's `inputFrame.frameId` − the controller's
   monotonic send instant for that input `seq` (`performance.now()` at the web
-  publish, `Instant` at the native `remote_control_send`; never the wall-clock
+  publish, `Instant` at the native `remote_control_send`, never for a chunked text's fabricated seqs; never the wall-clock
   `sentAtMs`). Both ends are the controller's clock, so no offset. Web presentation is the rVFC `expectedDisplayTime` (the same
   loop as `capture_to_present_ms`); native is the compositor hand-off
   (`Instant`) + one refresh (estimated). `photonCorrelator` pins the bounds (64 sent inputs, 2 s
