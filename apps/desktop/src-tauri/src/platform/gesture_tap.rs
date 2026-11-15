@@ -158,6 +158,27 @@ pub fn gesture_fresh_for(wid: u32, max_ms: u64) -> bool {
     gesture_track_for(wid, max_ms).is_some()
 }
 
+/// The window a left mouse-down starts tracking, if any.
+///
+/// A press that WindowServer routes to one of Petal's own windows (the share
+/// tab, the meeting window) drags no foreign window. Tracking the one beneath
+/// it read the first 1-3px of pointer movement as a rigid drag and nudged the
+/// share tab while the tab's own drag command was running. Click-through
+/// Petal chrome (share border, share overlay) is not a hit: WindowServer's
+/// hit-test skips windows that ignore mouse events, so a press through it
+/// still tracks the shared window. When the hit-test is unavailable
+/// (`press_owner_pid` is `None`), tracking falls back to the registry walk.
+fn press_track_target(
+    self_pid: i32,
+    press_owner_pid: impl FnOnce() -> Option<i32>,
+    topmost_foreign: impl FnOnce() -> Option<u32>,
+) -> Option<u32> {
+    if press_owner_pid() == Some(self_pid) {
+        return None;
+    }
+    topmost_foreign()
+}
+
 extern "C" fn tap_callback(
     _proxy: CGEventTapProxy,
     event_type: u32,
@@ -174,8 +195,20 @@ extern "C" fn tap_callback(
         }
         K_CG_EVENT_LEFT_MOUSE_DOWN => {
             let p = unsafe { CGEventGetLocation(event) };
-            let hit = crate::window_registry::global()
-                .and_then(|reg| reg.topmost_foreign_at(p.x, p.y, std::process::id() as i32));
+            let self_pid = std::process::id() as i32;
+            let hit = press_track_target(
+                self_pid,
+                || {
+                    // `find_window_at`'s second value is the owner's
+                    // CONNECTION id, not its pid: resolve the pid through CG.
+                    crate::platform::sls::find_window_at(p.x, p.y)
+                        .and_then(|(wid, _)| crate::platform::cg::owner_pid_for_window_id(wid))
+                },
+                || {
+                    crate::window_registry::global()
+                        .and_then(|reg| reg.topmost_foreign_at(p.x, p.y, self_pid))
+                },
+            );
             *target().lock().expect("gesture target lock poisoned") = hit.and_then(|wid| {
                 let (fx, fy, fw, fh) = crate::platform::cg::frame_for_window_id_raw(wid)?;
                 Some(GestureTrack {
@@ -348,6 +381,30 @@ pub fn start(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn press_on_a_petal_window_tracks_nothing() {
+        let hit = press_track_target(
+            42,
+            || Some(42),
+            || panic!("a press on Petal's own window must not look for a foreign window"),
+        );
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn press_on_a_foreign_window_tracks_the_topmost_foreign_window() {
+        assert_eq!(
+            press_track_target(42, || Some(7), || Some(1234)),
+            Some(1234)
+        );
+    }
+
+    #[test]
+    fn press_falls_back_to_the_registry_walk_when_the_hit_test_is_unavailable() {
+        assert_eq!(press_track_target(42, || None, || Some(1234)), Some(1234));
+        assert_eq!(press_track_target(42, || None, || None), None);
+    }
 
     /// #761 rigidity license: lockstep motion within epsilon = rigid; content
     /// drags (cursor moves, frame doesn't) and stationary events are not.
