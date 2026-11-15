@@ -203,6 +203,8 @@ export const COMMANDS = {
   sharedWindowIds: 'shared_window_ids',
   startTestCockpit: 'start_test_cockpit',
   startCameraPublish: 'start_camera_publish_command',
+  /** PETAL-WORKAROUND(tao-drag-window): macOS drag-region drags (src/lib/windowDrag.ts). */
+  startWindowDrag: 'start_window_drag',
   stopCameraPublish: 'stop_camera_publish_command',
   cameraPublishState: 'camera_publish_state',
   logCameraPreviewState: 'log_camera_preview_state',
@@ -1810,6 +1812,7 @@ export interface CommandArgs {
   /** Measured content height, same resize-to-content pattern as shareNoticePresent. */
   [COMMANDS.controlConsentPresent]: { height: number };
   [COMMANDS.closeRegionWindow]: { windowLabel: string };
+  [COMMANDS.startWindowDrag]: Record<string, never>; // PETAL-WORKAROUND(tao-drag-window)
   [COMMANDS.openRegionWindow]: { userName?: string | null; followCursor?: boolean };
   [COMMANDS.shareNoticeDismiss]: Record<string, never>;
   /** `height` is the page's own measured content height (logical points) --
@@ -1865,6 +1868,7 @@ export interface CommandReturns {
   [COMMANDS.animateMainWindowResize]: AnimatedResizeOutcome;
   [COMMANDS.captureWindowThumbnail]: string;
   [COMMANDS.closeRegionWindow]: void;
+  [COMMANDS.startWindowDrag]: void; // PETAL-WORKAROUND(tao-drag-window)
   [COMMANDS.checkAccessibility]: boolean;
   [COMMANDS.checkCamera]: AuthStatus;
   [COMMANDS.checkCompatibleUpdateAvailable]: {
