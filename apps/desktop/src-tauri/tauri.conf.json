@@ -33,6 +33,7 @@
         "resizable": true,
         "decorations": false,
         "transparent": true,
+        "acceptFirstMouse": true,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --ignore-gpu-blocklist --enable-gpu --enable-gpu-compositing --enable-zero-copy --enable-accelerated-video-decode",
         "theme": "Dark",
         "visible": false,

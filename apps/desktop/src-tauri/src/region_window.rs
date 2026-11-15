@@ -119,6 +119,11 @@ pub async fn open_region_window(
         .transparent(true)
         .shadow(false)
         .always_on_top(true)
+        // Petal is usually inactive while the selector is in use (sharing
+        // hands focus back to the source app), and without this macOS spends
+        // the first click on activating Petal, so a single click on the
+        // selector's controls does nothing.
+        .accept_first_mouse(true)
         .resizable(true)
         .inner_size(640.0, 400.0)
         .min_inner_size(160.0, 120.0)
