@@ -1469,6 +1469,37 @@ fn plan_border_actions(
     .actions
 }
 
+/// The source frame one tracker tick plans a border against.
+///
+/// - `Display`: the display's current bounds (`display_frame`).
+/// - `DisplayRegion`: the area the Petal View capture is sending
+///   (`RegionWindowSource::captured_frame`), not the selector's live frame.
+///   The capture keeps its last good region while a new one waits for proof,
+///   is refused, or the Petal View is off its display, so following the
+///   selector would leave the area that is still being sent. With no captured
+///   area yet, the border keeps the frame it was shown at.
+/// - `Window`: the stored frame; `plan_border` reads the live one itself.
+fn tracked_source_frame(
+    source_kind: SharedSourceKind,
+    shared_number: i64,
+    stored_frame: WindowFrame,
+    region_captured: Option<crate::region_window::RegionRect>,
+    display_frame: impl FnOnce(u32, WindowFrame) -> WindowFrame,
+) -> WindowFrame {
+    match source_kind {
+        SharedSourceKind::Display => display_frame(shared_number as u32, stored_frame),
+        SharedSourceKind::DisplayRegion => {
+            region_captured.map_or(stored_frame, |area| WindowFrame {
+                x: area.x.round() as i32,
+                y: area.y.round() as i32,
+                width: area.width.round() as i32,
+                height: area.height.round() as i32,
+            })
+        }
+        SharedSourceKind::Window => stored_frame,
+    }
+}
+
 fn plan_border(
     stack: &[BorderStackEntry],
     panel_number: i64,
@@ -1716,11 +1747,17 @@ pub fn start_tracker(app: &AppHandle) {
             suppressed_misorder_ticks,
         ) in borders
         {
-            let source_frame = if source_kind == SharedSourceKind::Display {
-                display_frame_for_source_id(shared_number as u32, source_frame)
-            } else {
-                source_frame
-            };
+            let region_captured = (source_kind == SharedSourceKind::DisplayRegion)
+                .then(|| crate::region_window::resolve(shared_number as u32))
+                .flatten()
+                .and_then(|source| source.captured_frame);
+            let source_frame = tracked_source_frame(
+                source_kind,
+                shared_number,
+                source_frame,
+                region_captured,
+                display_frame_for_source_id,
+            );
             let plan = plan_border(
                 &stack,
                 panel_number,
@@ -3013,5 +3050,141 @@ mod tests {
         ];
         assert!(plan_border_actions(&stack, PANEL, SHARED, false, SELF_PID, None).is_empty());
         assert!(plan_border_actions(&stack, panel_b, shared_b, false, SELF_PID, None).is_empty());
+    }
+
+    fn no_display_lookup(_: u32, _: WindowFrame) -> WindowFrame {
+        panic!("only a display share reads display bounds")
+    }
+
+    fn area(frame: WindowFrame) -> crate::region_window::RegionRect {
+        crate::region_window::RegionRect::new(
+            frame.x as f64,
+            frame.y as f64,
+            frame.width as f64,
+            frame.height as f64,
+        )
+    }
+
+    /// One tracker tick for a Petal View border: resolve the frame the way
+    /// `start_tracker` does, then plan against the same snapshot. The
+    /// snapshot holds the selector at `selector`, wherever capture is.
+    fn region_tick(
+        selector: WindowFrame,
+        stored: WindowFrame,
+        captured: Option<crate::region_window::RegionRect>,
+    ) -> (WindowFrame, Vec<BorderAction>) {
+        let stack = vec![
+            s(PANEL, SELF_PID, pf(stored)),
+            s(SHARED, SELF_PID, selector),
+            s(OTHER, OTHER_PID, f(0, 0, 800, 600)),
+        ];
+        let frame = tracked_source_frame(
+            SharedSourceKind::DisplayRegion,
+            SHARED,
+            stored,
+            captured,
+            no_display_lookup,
+        );
+        let plan = plan_border(
+            &stack,
+            PANEL,
+            SHARED,
+            SharedSourceKind::DisplayRegion,
+            frame,
+            false,
+            SELF_PID,
+            None,
+            0,
+        );
+        (frame, plan.actions)
+    }
+
+    #[test]
+    fn region_border_moves_to_the_area_capture_now_sends() {
+        let started = f(100, 100, 640, 400);
+        let moved = f(300, 220, 720, 450);
+
+        let (frame, actions) = region_tick(moved, started, Some(area(moved)));
+
+        assert_eq!(frame, moved);
+        assert_eq!(actions, vec![BorderAction::SetFrame(moved)]);
+    }
+
+    #[test]
+    fn region_border_is_still_once_it_marks_the_captured_area() {
+        let moved = f(300, 220, 720, 450);
+
+        let (_, actions) = region_tick(moved, moved, Some(area(moved)));
+
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn region_border_stays_on_the_captured_area_while_the_selector_is_elsewhere() {
+        // The selector moved on, but capture still sends the last area it
+        // proved: a new ROI waiting for proof, a refused one, or a selector
+        // off its display. The border keeps marking what is sent.
+        let captured = f(800, 500, 640, 400);
+        let selector = f(1200, 500, 640, 400);
+
+        let (frame, actions) = region_tick(selector, captured, Some(area(captured)));
+
+        assert_eq!(frame, captured);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn region_border_keeps_its_shown_frame_before_capture_starts() {
+        let shown = f(100, 100, 640, 400);
+
+        assert_eq!(
+            region_tick(f(300, 220, 720, 450), shown, None),
+            (shown, vec![])
+        );
+    }
+
+    #[test]
+    fn region_border_rounds_the_captured_area_to_whole_points() {
+        let captured = crate::region_window::RegionRect::new(872.6, 99.4, 639.5, 400.2);
+
+        let frame = tracked_source_frame(
+            SharedSourceKind::DisplayRegion,
+            SHARED,
+            f(0, 0, 1, 1),
+            Some(captured),
+            no_display_lookup,
+        );
+
+        assert_eq!(frame, f(873, 99, 640, 400));
+    }
+
+    #[test]
+    fn tracked_frame_for_window_and_display_shares_is_unchanged() {
+        let stored = f(100, 100, 640, 400);
+        let captured = Some(area(f(300, 220, 720, 450)));
+        assert_eq!(
+            tracked_source_frame(
+                SharedSourceKind::Window,
+                SHARED,
+                stored,
+                captured,
+                no_display_lookup,
+            ),
+            stored
+        );
+        let bounds = f(0, 0, 1512, 982);
+        assert_eq!(
+            tracked_source_frame(
+                SharedSourceKind::Display,
+                SHARED,
+                stored,
+                captured,
+                |id, fallback| {
+                    assert_eq!((id, fallback), (SHARED as u32, stored));
+                    bounds
+                },
+            ),
+            bounds
+        );
     }
 }

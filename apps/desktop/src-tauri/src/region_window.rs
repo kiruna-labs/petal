@@ -1487,6 +1487,21 @@ pub(crate) struct RegionWindowSource {
     pub display: Option<RegionDisplay>,
     pub active_share: bool,
     pub outside_display: bool,
+    /// The area the region capture is configured to send: set when a capture
+    /// starts and when a delivered frame proves a new ROI (see
+    /// `capture::commit_region_proof` for what a same-size move proves),
+    /// cleared when it stops. The share border marks this area rather than
+    /// the selector's live frame, because the capture keeps its last good
+    /// region while a new one is pending or refused.
+    pub captured_frame: Option<RegionRect>,
+    /// The capture that may write `captured_frame`: the one that claimed it
+    /// last, or 0 once that capture stops. A capture that claimed it earlier
+    /// and is discarded later, such as a rebuilt capture from a share that
+    /// has since stopped, can't move the border of the share that replaced it.
+    pub captured_owner: u64,
+    /// The last claim, kept when its capture stops so that capture's next
+    /// start attempt can renew it (`renew_captured_frame_owner`).
+    pub captured_claim: u64,
 }
 
 impl RegionWindowSource {
@@ -1500,6 +1515,9 @@ impl RegionWindowSource {
             display: None,
             active_share: false,
             outside_display: false,
+            captured_frame: None,
+            captured_owner: 0,
+            captured_claim: 0,
         }
     }
 
@@ -1648,6 +1666,66 @@ pub(crate) fn classify_outside_display(
     Some(!display.contains(frame))
 }
 
+/// Make a capture that is about to start the only writer of this selector's
+/// captured area, and forget the area an earlier capture left. Returns the
+/// new owner, never 0.
+pub(crate) fn begin_captured_frame_owner(token: u32) -> u64 {
+    let owner = next_captured_frame_owner();
+    if let Some(source) = registry().lock_unpoisoned().sources.get_mut(&token) {
+        source.captured_claim = owner;
+        source.captured_owner = owner;
+        source.captured_frame = None;
+    }
+    owner
+}
+
+/// Like `begin_captured_frame_owner` for the next start attempt of the same
+/// capture, which may follow an attempt that stopped and gave up its rights.
+/// Returns 0, an owner that never writes, when another capture has claimed
+/// the area since `previous`.
+pub(crate) fn renew_captured_frame_owner(token: u32, previous: u64) -> u64 {
+    let mut guard = registry().lock_unpoisoned();
+    let Some(source) = guard.sources.get_mut(&token) else {
+        return 0;
+    };
+    if previous == 0 || source.captured_claim != previous {
+        return 0;
+    }
+    let owner = next_captured_frame_owner();
+    source.captured_claim = owner;
+    source.captured_owner = owner;
+    source.captured_frame = None;
+    owner
+}
+
+fn next_captured_frame_owner() -> u64 {
+    static NEXT_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT_OWNER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Record the area capture `owner` now sends. Ignored unless `owner` is the
+/// capture that claimed it last and hasn't stopped.
+pub(crate) fn record_captured_frame(token: u32, owner: u64, frame: RegionRect) {
+    if let Some(source) = registry().lock_unpoisoned().sources.get_mut(&token) {
+        if owner != 0 && source.captured_owner == owner {
+            source.captured_frame = Some(frame);
+        }
+    }
+}
+
+/// Forget the captured area when capture `owner` stops, and stop it writing
+/// again, so a frame it delivers while stopping can't bring the area back and
+/// the next share's border can't jump to it. Ignored unless `owner` is the
+/// current writer.
+pub(crate) fn release_captured_frame(token: u32, owner: u64) {
+    if let Some(source) = registry().lock_unpoisoned().sources.get_mut(&token) {
+        if source.captured_owner == owner {
+            source.captured_frame = None;
+            source.captured_owner = 0;
+        }
+    }
+}
+
 pub(crate) fn set_outside_display(token: u32, outside: bool) -> Option<bool> {
     let mut guard = registry().lock_unpoisoned();
     let source = guard.sources.get_mut(&token)?;
@@ -1715,6 +1793,110 @@ mod tests {
         );
         assert_eq!(selector_label_from_title("Petal View: winful"), None);
         assert_eq!(selector_label_from_title("Petal View: a #b"), None);
+    }
+
+    fn captured(token: u32) -> Option<RegionRect> {
+        resolve(token).and_then(|source| source.captured_frame)
+    }
+
+    #[test]
+    fn captured_frame_survives_selector_reregistration() {
+        let token = 4_000_000_101;
+        let title = "Petal View: Captured #4000000101".to_string();
+        let area = RegionRect::new(10.0, 20.0, 640.0, 400.0);
+        register(RegionWindowSource::new(token, 1, title.clone(), area));
+        assert_eq!(captured(token), None);
+        let owner = begin_captured_frame_owner(token);
+        record_captured_frame(token, owner, area);
+        // The hover tracker re-registers the selector with its live frame on
+        // every tick. That moves the selector, not the captured area.
+        register(RegionWindowSource::new(
+            token,
+            1,
+            title,
+            RegionRect::new(300.0, 20.0, 640.0, 400.0),
+        ));
+        let source = resolve(token).expect("registered");
+        assert_eq!(source.frame.x, 300.0);
+        assert_eq!(source.captured_frame, Some(area));
+        unregister(token);
+    }
+
+    #[test]
+    fn only_the_capture_that_began_last_writes_the_captured_area() {
+        let token = 4_000_000_102;
+        let old_area = RegionRect::new(10.0, 20.0, 640.0, 400.0);
+        let new_area = RegionRect::new(300.0, 20.0, 640.0, 400.0);
+        register(RegionWindowSource::new(
+            token,
+            1,
+            "Petal View: Owners #4000000102".to_string(),
+            new_area,
+        ));
+        // Pump recovery claims the area while its share is current, then
+        // awaits. Meanwhile the share stops, and a new share's capture claims
+        // the area and records it.
+        let rebuilt = begin_captured_frame_owner(token);
+        let replacement = begin_captured_frame_owner(token);
+        record_captured_frame(token, replacement, new_area);
+        // The rebuilt capture finishes starting late and is then discarded.
+        record_captured_frame(token, rebuilt, old_area);
+        release_captured_frame(token, rebuilt);
+        assert_eq!(captured(token), Some(new_area));
+        // The live capture still moves its border.
+        record_captured_frame(token, replacement, old_area);
+        assert_eq!(captured(token), Some(old_area));
+
+        // Stopping the current capture forgets its area, and a frame it
+        // delivers while stopping can't bring the area back.
+        release_captured_frame(token, replacement);
+        assert_eq!(captured(token), None);
+        record_captured_frame(token, replacement, new_area);
+        assert_eq!(captured(token), None);
+
+        // The next capture starts with nothing recorded, even if the last one
+        // never stopped cleanly.
+        let next = begin_captured_frame_owner(token);
+        record_captured_frame(token, next, new_area);
+        begin_captured_frame_owner(token);
+        assert_eq!(captured(token), None);
+        unregister(token);
+    }
+
+    #[test]
+    fn a_retried_start_attempt_renews_the_claim_unless_another_capture_took_it() {
+        let token = 4_000_000_103;
+        let area = RegionRect::new(300.0, 20.0, 640.0, 400.0);
+        register(RegionWindowSource::new(
+            token,
+            1,
+            "Petal View: Retry #4000000103".to_string(),
+            area,
+        ));
+        // Pump recovery reserves the claim, and its first start attempt
+        // renews it, then times out and stops.
+        let reserved = begin_captured_frame_owner(token);
+        let first = renew_captured_frame_owner(token, reserved);
+        assert_ne!(first, 0);
+        release_captured_frame(token, first);
+        // The second attempt still gets writer rights.
+        let second = renew_captured_frame_owner(token, first);
+        assert_ne!(second, 0);
+        record_captured_frame(token, second, area);
+        assert_eq!(captured(token), Some(area));
+        // A stale attempt can't renew once a newer claim exists.
+        assert_eq!(renew_captured_frame_owner(token, first), 0);
+
+        // When another share claims the area between attempts, the next
+        // attempt gets an owner that never writes, even into a stopped area.
+        let newer = begin_captured_frame_owner(token);
+        release_captured_frame(token, newer);
+        let stale = renew_captured_frame_owner(token, second);
+        assert_eq!(stale, 0);
+        record_captured_frame(token, stale, area);
+        assert_eq!(captured(token), None);
+        assert_eq!(renew_captured_frame_owner(token, 0), 0);
+        unregister(token);
     }
 
     #[test]
