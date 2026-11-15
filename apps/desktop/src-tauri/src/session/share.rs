@@ -5868,7 +5868,8 @@ async fn start_share_with_capture_source(
 /// Outside-display warning lifecycle for macOS region shares (parity with
 /// Windows `session_stub::sync_region_warning`): classify the selector
 /// against its latched display, persist the state, and emit `region-warning`
-/// with the selector's native label only on transitions. The frontend banner
+/// with the selector's native label on every transition, in both directions,
+/// so the banner clears once the selector is back inside. The frontend banner
 /// routes by that label because capture tokens diverge from selector numbers.
 fn sync_region_outside_display(
     app: &tauri::AppHandle,
@@ -5885,19 +5886,9 @@ fn sync_region_outside_display(
     else {
         return;
     };
-    if *last == Some(outside) {
+    let Some(outside) = record_region_outside_display(window_id, outside, last) else {
         return;
-    }
-    // Persist first so other consumers (metadata/replay gates) see it even if
-    // the emit fails; the registry dedupes no-op writes.
-    let changed = crate::region_window::set_outside_display(window_id, outside);
-    if changed.is_none() && last.is_none() {
-        return;
-    }
-    *last = Some(outside);
-    if !changed.unwrap_or(false) {
-        return;
-    }
+    };
     let payload = serde_json::json!({
         "windowId": window_id,
         "selectorLabel": crate::region_window::selector_label_from_title(&source.title),
@@ -5906,6 +5897,25 @@ fn sync_region_outside_display(
     if let Err(error) = app.emit("region-warning", payload) {
         log::warn!("session: region warning emit failed for {window_id}: {error}");
     }
+}
+
+/// Persist the classified outside-display state, then return it when it is a
+/// transition this pump has not emitted yet. The emit decision follows the
+/// pump's own `last`, not the registry write's return value: that value is
+/// the new state (`Some(false)` on return), not a "changed" flag.
+fn record_region_outside_display(
+    window_id: u32,
+    outside: bool,
+    last: &mut Option<bool>,
+) -> Option<bool> {
+    // Persist first so other consumers (metadata/replay gates) see it even if
+    // the emit fails; the registry dedupes no-op writes.
+    crate::region_window::set_outside_display(window_id, outside);
+    if *last == Some(outside) {
+        return None;
+    }
+    *last = Some(outside);
+    Some(outside)
 }
 
 fn record_published_frame_timing(
@@ -15194,6 +15204,51 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
     fn interaction_snapshot_coalesces_an_already_handled_epoch() {
         assert!(!interaction_snapshot_decision(4, 4, 0, 10_000));
         assert!(interaction_snapshot_decision(5, 4, 0, 10_000));
+    }
+
+    fn register_region_outside_test_source(token: u32) {
+        crate::region_window::register(crate::region_window::RegionWindowSource::new(
+            token,
+            1,
+            format!("Petal View {token}"),
+            crate::region_window::RegionRect::new(0.0, 0.0, 100.0, 100.0),
+        ));
+    }
+
+    #[test]
+    fn region_outside_display_emits_the_return_inside_as_well_as_leaving() {
+        let token = 0x0583_0001;
+        register_region_outside_test_source(token);
+        let mut last = None;
+        let mut sequence = Vec::new();
+        for outside in [false, true, true, false, false, true] {
+            sequence.push(record_region_outside_display(token, outside, &mut last));
+            assert_eq!(
+                crate::region_window::resolve(token).map(|source| source.outside_display),
+                Some(outside),
+                "the registry holds the classified state before any emit"
+            );
+        }
+        crate::region_window::unregister(token);
+        assert_eq!(
+            sequence,
+            [Some(false), Some(true), None, Some(false), None, Some(true)],
+            "every transition emits once, including back inside; repeats stay quiet"
+        );
+    }
+
+    #[test]
+    fn region_outside_display_fresh_pump_emits_state_the_registry_already_holds() {
+        // A selector re-registered for a new share keeps the previous share's
+        // outside flag, so the new pump must still tell its banner.
+        let token = 0x0583_0002;
+        register_region_outside_test_source(token);
+        crate::region_window::set_outside_display(token, true);
+        let mut last = None;
+        let first = record_region_outside_display(token, true, &mut last);
+        let back = record_region_outside_display(token, false, &mut last);
+        crate::region_window::unregister(token);
+        assert_eq!((first, back), (Some(true), Some(false)));
     }
 
     // -- Interaction-burst policy (#290 step 5) --------------------------
