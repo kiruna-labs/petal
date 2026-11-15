@@ -27,7 +27,9 @@ use tauri::Manager;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::HWND;
 #[cfg(target_os = "windows")]
-use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, IsIconic};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowTextW, IsIconic, IsWindow, IsWindowVisible,
+};
 
 const AUDIO_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const AUDIO_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -37,6 +39,13 @@ const AUDIO_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 pub(crate) const MAX_CONCURRENT_SHARES: usize = 4;
 const SHARE_FIRST_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SHARE_LOSS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+/// How long a shared window must stay hidden, from the first poll that sees
+/// it hidden, before it counts as closed, so a window that hides for a moment
+/// (a style change) survives.
+const SHARE_HIDDEN_TO_CLOSE: std::time::Duration = std::time::Duration::from_millis(1500);
+/// A loss poll that wakes later than this after its scheduled time is timed
+/// by when it ran, not by its schedule.
+const SHARE_LOSS_POLL_LATE: std::time::Duration = std::time::Duration::from_millis(50);
 /// Per-interval push-cadence log from the share frame pump (the plan's
 /// "measured rather than inferred" capture-to-push gate).
 const SHARE_PUMP_HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -2126,6 +2135,7 @@ pub(crate) async fn start_share_token(
         generation.clone(),
         status.clone(),
         token,
+        kind,
     );
 
     // Allocate a unique audio incarnation only after the visual publication is
@@ -2830,7 +2840,8 @@ fn region_frame_generation_is_current(token: u32, generation: Option<u64>) -> bo
 }
 
 /// Terminal-capture watchdog: stops the share when the WGC capture reports a
-/// terminal error (source closed, frame pipeline failure). Self-terminates
+/// terminal error (source closed, frame pipeline failure), or when a shared
+/// application window has been closed without being destroyed. Self-terminates
 /// once the share is no longer registered (generation change or an explicit
 /// stop).
 fn start_share_loss_monitor(
@@ -2839,45 +2850,161 @@ fn start_share_loss_monitor(
     generation: RoomGeneration,
     status: crate::windows_screen_capture::CaptureStatus,
     token: u32,
+    kind: SharedSourceKind,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        let mut interval = tokio::time::interval(SHARE_LOSS_POLL_INTERVAL);
-        loop {
-            interval.tick().await;
-            if !generation.is_current() {
-                break;
+        let Some(loss) =
+            wait_for_share_loss(&generation, kind, token, || status.terminal_error()).await
+        else {
+            return;
+        };
+        let (error, reason) = match loss {
+            ShareLoss::Capture(error) => (error, crate::analytics::ShareStoppedReason::CaptureFailed),
+            ShareLoss::WindowHidden => {
+                log::info!("windows session: share {token} window was hidden (closed to the tray); unsharing");
+                (
+                    "capture target closed".to_string(),
+                    crate::analytics::ShareStoppedReason::WindowGone,
+                )
             }
-            let Some(error) = status.terminal_error() else {
-                continue;
-            };
-            let Some(state) = app.try_state::<SessionState>() else {
-                break;
-            };
-            let _control = state.lock_share_control().await;
-            if !generation.is_current() {
-                break;
-            }
-            let share = {
-                let mut joined = state.joined.lock_unpoisoned();
-                joined.as_mut().and_then(|session| {
-                    let position = session
-                        .media
-                        .shares
-                        .iter()
-                        .position(|share| share.token == token)?;
-                    Some(session.media.shares.remove(position))
-                })
-            };
-            let Some(share) = share else {
-                break;
-            };
-            stop_share(&app, state.inner(), share, room_connection.clone()).await;
-            crate::analytics::share_stopped(crate::analytics::ShareStoppedReason::CaptureFailed);
-            emit_share_state_changed(&app, token, false);
-            emit_share_error(&app, token, false, ShareError::Capture(error));
-            break;
+        };
+        let Some(state) = app.try_state::<SessionState>() else {
+            return;
+        };
+        let _control = state.lock_share_control().await;
+        if !generation.is_current() {
+            return;
         }
+        let share = {
+            let mut joined = state.joined.lock_unpoisoned();
+            joined.as_mut().and_then(|session| {
+                let position = session
+                    .media
+                    .shares
+                    .iter()
+                    .position(|share| share.token == token)?;
+                Some(session.media.shares.remove(position))
+            })
+        };
+        let Some(share) = share else {
+            return;
+        };
+        stop_share(&app, state.inner(), share, room_connection.clone()).await;
+        crate::analytics::share_stopped(reason);
+        emit_share_state_changed(&app, token, false);
+        emit_share_error(&app, token, false, ShareError::Capture(error));
     })
+}
+
+/// Why the share-loss monitor stops a share.
+#[derive(Debug, PartialEq, Eq)]
+enum ShareLoss {
+    /// WGC reported a terminal capture error.
+    Capture(String),
+    /// The shared application window was gone or hidden long enough to count
+    /// as closed.
+    WindowHidden,
+}
+
+/// The share-loss monitor's polling loop: resolves when the share should
+/// stop, or `None` once its room generation is no longer current.
+async fn wait_for_share_loss(
+    generation: &RoomGeneration,
+    kind: SharedSourceKind,
+    token: u32,
+    terminal_error: impl Fn() -> Option<String>,
+) -> Option<ShareLoss> {
+    poll_share_loss(
+        &mut share_loss_interval(),
+        generation,
+        kind,
+        || shared_window_hidden(token),
+        terminal_error,
+    )
+    .await
+}
+
+fn share_loss_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(SHARE_LOSS_POLL_INTERVAL);
+    // After a runtime stall, one late poll instead of a burst of catch-up
+    // polls, and later polls stay on the 500 ms schedule. `Delay` would
+    // restart the schedule from any wakeup over 5 ms late, so polls a little
+    // late each time drift and the stop slips past 2 s.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
+}
+
+/// The share-loss monitor's poll schedule: `tick` waits for the next poll
+/// and returns the time it was scheduled for.
+trait LossPollTicks {
+    async fn tick(&mut self) -> tokio::time::Instant;
+    fn now(&self) -> tokio::time::Instant {
+        tokio::time::Instant::now()
+    }
+}
+
+impl LossPollTicks for tokio::time::Interval {
+    async fn tick(&mut self) -> tokio::time::Instant {
+        tokio::time::Interval::tick(self).await
+    }
+}
+
+async fn poll_share_loss(
+    ticks: &mut impl LossPollTicks,
+    generation: &RoomGeneration,
+    kind: SharedSourceKind,
+    window_hidden: impl Fn() -> bool,
+    terminal_error: impl Fn() -> Option<String>,
+) -> Option<ShareLoss> {
+    let mut hidden_since: Option<tokio::time::Instant> = None;
+    loop {
+        let scheduled = ticks.tick().await;
+        if !generation.is_current() {
+            return None;
+        }
+        if let Some(error) = terminal_error() {
+            return Some(ShareLoss::Capture(error));
+        }
+        if kind == SharedSourceKind::Window && window_hidden() {
+            // Polls are timed on their schedule: wakeups land a few ms late by
+            // different amounts, which made 1.5 s read as just under it and
+            // cost one more poll. A poll that read the window well after its
+            // time (a stall) can only shorten the measured hidden time: it
+            // starts the hidden time at the next scheduled poll, and ends it
+            // at when it ran. The clock is read after the window, so a stall
+            // while reading it counts as late too.
+            let now = ticks.now();
+            let late = now.saturating_duration_since(scheduled);
+            let (starts_at, ends_at) = if late > SHARE_LOSS_POLL_LATE {
+                let missed = late.as_nanos() / SHARE_LOSS_POLL_INTERVAL.as_nanos() + 1;
+                (scheduled + SHARE_LOSS_POLL_INTERVAL * missed as u32, now)
+            } else {
+                (scheduled, scheduled)
+            };
+            let since = *hidden_since.get_or_insert(starts_at);
+            if ends_at.saturating_duration_since(since) >= SHARE_HIDDEN_TO_CLOSE {
+                return Some(ShareLoss::WindowHidden);
+            }
+        } else {
+            hidden_since = None;
+        }
+    }
+}
+
+/// Many apps "close" to the tray by hiding their window, not destroying it, so
+/// WGC never reports it closed. A window that is gone or no longer visible
+/// counts as closed. Minimized windows and windows on another virtual desktop
+/// (cloaked) keep `WS_VISIBLE`, so they stay shared.
+fn shared_window_hidden(token: u32) -> bool {
+    let Ok(target) = crate::windows_capture_target::resolve(token) else {
+        // Already retired: the share is stopping anyway.
+        return false;
+    };
+    if target.kind() != TargetKind::Window {
+        return false;
+    }
+    let hwnd = HWND(target.raw_handle() as *mut core::ffi::c_void);
+    !unsafe { IsWindow(Some(hwnd)) }.as_bool() || !unsafe { IsWindowVisible(hwnd) }.as_bool()
 }
 
 async fn stop_share(
@@ -5179,5 +5306,299 @@ mod tests {
         // Unknown capture size (no frame pumped yet): fall back to the
         // client rect rather than dropping the share from the snapshot.
         assert_eq!(telepointer_content_frame(client, outer, None), client);
+    }
+
+    /// Polls scheduled every 500 ms whose wakeups land a few ms late, by
+    /// different amounts, the way a real runtime runs them.
+    struct JitteredTicks {
+        start: tokio::time::Instant,
+        /// (scheduled, woken) offsets from `start`, in ms.
+        polls: std::vec::IntoIter<(u64, u64)>,
+        /// When set, the next clock read returns this offset once: the
+        /// thread stalled between the poll waking and the clock read.
+        stall: std::rc::Rc<std::cell::Cell<Option<u64>>>,
+    }
+
+    impl JitteredTicks {
+        fn new(start: tokio::time::Instant, polls: Vec<(u64, u64)>) -> Self {
+            Self { start, polls: polls.into_iter(), stall: Default::default() }
+        }
+    }
+
+    impl LossPollTicks for JitteredTicks {
+        async fn tick(&mut self) -> tokio::time::Instant {
+            let (scheduled, woken) = self.polls.next().expect("the test ran out of polls");
+            let ms = std::time::Duration::from_millis;
+            tokio::time::sleep_until(self.start + ms(woken)).await;
+            self.start + ms(scheduled)
+        }
+        fn now(&self) -> tokio::time::Instant {
+            match self.stall.take() {
+                Some(offset) => self.start + std::time::Duration::from_millis(offset),
+                None => tokio::time::Instant::now(),
+            }
+        }
+    }
+
+    /// Sandbox run green-3 (2026-11-15): a wakeup a few ms later on the first
+    /// hidden poll than on the third made 1.5 s measure as just under 1.5 s,
+    /// and the stop waited one more poll. The stop lands on the poll scheduled
+    /// 1.5 s after the first one that saw the window hidden.
+    #[tokio::test(start_paused = true)]
+    async fn share_loss_monitor_stops_on_the_poll_scheduled_at_the_hidden_limit() {
+        let start = tokio::time::Instant::now();
+        let mut ticks = JitteredTicks::new(
+            start,
+            vec![(0, 4), (500, 501), (1000, 1002), (1500, 1501), (2000, 2001), (2500, 2501)],
+        );
+        let generation = RoomGeneration::new(Arc::new(AtomicU64::new(1)), 1);
+        let loss = poll_share_loss(&mut ticks, &generation, SharedSourceKind::Window, || true, || None).await;
+        assert_eq!(loss, Some(ShareLoss::WindowHidden));
+        assert_eq!(
+            start.elapsed(),
+            std::time::Duration::from_millis(1501),
+            "stopped on the wrong poll"
+        );
+    }
+
+    /// A poll that runs long after its scheduled time (a stalled runtime)
+    /// counts as the next scheduled poll, so a window hidden just before it
+    /// isn't treated as hidden since the poll's stale scheduled time.
+    #[tokio::test(start_paused = true)]
+    async fn share_loss_monitor_counts_a_stalled_poll_from_the_next_scheduled_one() {
+        let start = tokio::time::Instant::now();
+        let mut ticks = JitteredTicks::new(
+            start,
+            vec![(0, 1), (500, 3000), (3500, 3501), (4000, 4001), (4500, 4501), (5000, 5001), (5500, 5501)],
+        );
+        let generation = RoomGeneration::new(Arc::new(AtomicU64::new(1)), 1);
+        let hidden = || start.elapsed() >= std::time::Duration::from_millis(2900);
+        let loss = poll_share_loss(&mut ticks, &generation, SharedSourceKind::Window, hidden, || None).await;
+        assert_eq!(loss, Some(ShareLoss::WindowHidden));
+        assert_eq!(
+            start.elapsed(),
+            std::time::Duration::from_millis(5001),
+            "stopped before the window was hidden for 1.5 s"
+        );
+    }
+
+    /// The poll is timed after it reads the window, so a stall while it
+    /// reads (a lock held elsewhere) can't count as hidden time.
+    #[tokio::test(start_paused = true)]
+    async fn share_loss_monitor_times_a_poll_after_it_reads_the_window() {
+        let start = tokio::time::Instant::now();
+        let mut ticks = JitteredTicks::new(
+            start,
+            vec![(0, 1), (500, 501), (4000, 4001), (4500, 4501), (5000, 5001), (5500, 5501)],
+        );
+        let stall = ticks.stall.clone();
+        let reads = std::cell::Cell::new(0);
+        let hidden = || {
+            reads.set(reads.get() + 1);
+            if reads.get() == 2 {
+                // The second read finds the window hidden 3 s after its poll woke.
+                stall.set(Some(3491));
+            }
+            reads.get() >= 2
+        };
+        let generation = RoomGeneration::new(Arc::new(AtomicU64::new(1)), 1);
+        let loss = poll_share_loss(&mut ticks, &generation, SharedSourceKind::Window, hidden, || None).await;
+        assert_eq!(loss, Some(ShareLoss::WindowHidden));
+        assert_eq!(
+            start.elapsed(),
+            std::time::Duration::from_millis(5001),
+            "stopped before the window was hidden for 1.5 s"
+        );
+    }
+
+    /// A late poll that ends the hidden time counts from when it ran, not
+    /// from the next scheduled poll, so it can't stop the share before the
+    /// window has been hidden for 1.5 s.
+    #[tokio::test(start_paused = true)]
+    async fn share_loss_monitor_ends_the_hidden_time_at_a_late_poll_when_it_ran() {
+        let start = tokio::time::Instant::now();
+        let mut ticks = JitteredTicks::new(
+            start,
+            vec![(0, 1), (500, 501), (1000, 1051), (1500, 1501), (2000, 2001)],
+        );
+        let generation = RoomGeneration::new(Arc::new(AtomicU64::new(1)), 1);
+        let loss = poll_share_loss(&mut ticks, &generation, SharedSourceKind::Window, || true, || None).await;
+        assert_eq!(loss, Some(ShareLoss::WindowHidden));
+        assert_eq!(
+            start.elapsed(),
+            std::time::Duration::from_millis(1501),
+            "stopped before the window was hidden for 1.5 s"
+        );
+    }
+
+    /// A late poll doesn't move the schedule: tokio's `Delay` restarts it
+    /// from the late wakeup, so polls 20 ms late each time drift 20 ms per
+    /// poll and add up to a stop past 2 s.
+    #[tokio::test(start_paused = true)]
+    async fn share_loss_interval_keeps_its_schedule_after_a_late_poll() {
+        let ms = std::time::Duration::from_millis;
+        let start = tokio::time::Instant::now();
+        let mut interval = share_loss_interval();
+        assert_eq!(interval.tick().await, start);
+        tokio::time::advance(ms(520)).await;
+        assert_eq!(interval.tick().await, start + ms(500));
+        assert_eq!(interval.tick().await, start + ms(1000), "the schedule moved");
+    }
+
+    /// The share-loss monitor's own polling loop against a real Win32 window,
+    /// through the capture-target registry the picker uses: only a window
+    /// that stays hidden (closed to the tray) or is destroyed stops the share.
+    #[cfg(target_os = "windows")]
+    #[tokio::test(start_paused = true)]
+    async fn share_loss_monitor_stops_a_window_share_once_its_window_stays_hidden() {
+        use std::time::Duration;
+        use tokio::time::{advance, sleep, timeout, Instant};
+        use windows::core::BOOL;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+        use windows::Win32::System::Threading::GetCurrentProcessId;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, IsIconic, IsWindow, ShowWindow, SHOW_WINDOW_CMD,
+            SW_HIDE, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        };
+
+        struct Window(HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                if unsafe { IsWindow(Some(self.0)) }.as_bool() {
+                    let _ = unsafe { DestroyWindow(self.0) };
+                }
+            }
+        }
+        // Off-screen tool window, so a test run never flashes or takes focus.
+        let window = Window(
+            unsafe {
+                CreateWindowExW(
+                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    windows::core::w!("STATIC"),
+                    windows::core::w!("Petal share-loss fixture"),
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    -20_000,
+                    -20_000,
+                    200,
+                    150,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .expect("fixture window"),
+        );
+        let show = |command: SHOW_WINDOW_CMD| {
+            let _ = unsafe { ShowWindow(window.0, command) };
+        };
+        let cloak = |cloaked: bool| {
+            let value = BOOL::from(cloaked);
+            unsafe {
+                DwmSetWindowAttribute(
+                    window.0,
+                    DWMWA_CLOAK,
+                    &value as *const BOOL as *const core::ffi::c_void,
+                    std::mem::size_of::<BOOL>() as u32,
+                )
+            }
+            .expect("cloak the fixture window");
+        };
+        // Retires the registry token even when an assertion fails; dropped
+        // before the window because it is declared after it.
+        struct Registered(u32);
+        impl Drop for Registered {
+            fn drop(&mut self) {
+                crate::windows_capture_target::invalidate(self.0);
+            }
+        }
+        let registered = Registered(
+            crate::windows_capture_target::register(window.0 .0 as usize, unsafe {
+                GetCurrentProcessId()
+            })
+            .expect("register the fixture window"),
+        );
+        let token = registered.0;
+        let counter = Arc::new(AtomicU64::new(1));
+        let generation = RoomGeneration::new(counter.clone(), 1);
+        let watch = |kind| wait_for_share_loss(&generation, kind, token, || None);
+        let stays_shared = |kind| async move {
+            timeout(Duration::from_secs(10), watch(kind)).await.is_err()
+        };
+
+        assert!(stays_shared(SharedSourceKind::Window).await, "visible window");
+        show(SW_SHOWMINNOACTIVE);
+        assert!(unsafe { IsIconic(window.0) }.as_bool());
+        assert!(stays_shared(SharedSourceKind::Window).await, "minimized window");
+        show(SW_SHOWNOACTIVATE);
+        // Another virtual desktop cloaks a window without clearing WS_VISIBLE.
+        cloak(true);
+        assert!(stays_shared(SharedSourceKind::Window).await, "cloaked window");
+        cloak(false);
+
+        // Display shares never look at a window.
+        show(SW_HIDE);
+        assert!(stays_shared(SharedSourceKind::Display).await, "display share");
+
+        // Hidden for 1.2 s, then shown again: the share survives.
+        tokio::select! {
+            biased;
+            loss = watch(SharedSourceKind::Window) => panic!("brief hide stopped the share: {loss:?}"),
+            () = async {
+                sleep(Duration::from_millis(1200)).await;
+                show(SW_SHOWNOACTIVATE);
+                sleep(Duration::from_secs(10)).await;
+            } => {}
+        }
+
+        // A runtime stall makes overdue polls run back to back. A window
+        // hidden just before they run has not been hidden for 1.5 s.
+        tokio::select! {
+            biased;
+            loss = watch(SharedSourceKind::Window) => panic!("catch-up polls stopped the share: {loss:?}"),
+            () = async {
+                sleep(Duration::from_millis(1)).await;
+                show(SW_HIDE);
+                advance(Duration::from_secs(3)).await;
+                show(SW_SHOWNOACTIVATE);
+                sleep(Duration::from_secs(10)).await;
+            } => {}
+        }
+
+        // Closed to the tray: stops 1.5 to 2 s after the hide.
+        show(SW_HIDE);
+        let hidden_at = Instant::now();
+        assert_eq!(
+            watch(SharedSourceKind::Window).await,
+            Some(ShareLoss::WindowHidden)
+        );
+        let waited = hidden_at.elapsed();
+        assert!(
+            (Duration::from_millis(1500)..=Duration::from_millis(2000)).contains(&waited),
+            "stopped {waited:?} after the hide"
+        );
+
+        // A WGC terminal error stops the share on the next poll.
+        show(SW_SHOWNOACTIVATE);
+        assert_eq!(
+            wait_for_share_loss(&generation, SharedSourceKind::Window, token, || {
+                Some("capture target closed".to_string())
+            })
+            .await,
+            Some(ShareLoss::Capture("capture target closed".to_string()))
+        );
+
+        // Destroyed outright: also stops.
+        unsafe { DestroyWindow(window.0) }.expect("destroy the fixture window");
+        assert_eq!(
+            watch(SharedSourceKind::Window).await,
+            Some(ShareLoss::WindowHidden)
+        );
+
+        // A stale room generation ends the loop without a stop.
+        counter.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(watch(SharedSourceKind::Window).await, None);
     }
 }
