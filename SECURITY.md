@@ -28,7 +28,9 @@ receives security fixes. There is no long-term-support branch.
 In scope:
 
 - **The desktop app** (`apps/desktop/`) — screen capture, the native window
-  compositor, the `petal://` URL scheme handler, permission handling.
+  compositor, the `petal://` URL scheme handler, permission handling, and live
+  streaming (stream key storage, the RTMP(S) connection, and keeping
+  opted-out participants' audio off the stream).
 - **Remote control** (`remote_control.rs`) — the input-injection path and its
   authorization model.
 - **The token backend** (`backend/`) — token minting, scope and TTL of issued

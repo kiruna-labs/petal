@@ -23,6 +23,8 @@ In rough order of blast radius if compromised:
 | **Admin token** (`PETAL_ADMIN_TOKEN`) | Backend env | Kick/close any room. |
 | **Shared screen content** | Sharer's GPU → H.264 → SFU → every subscriber's compositor | The product's payload. Not end-to-end encrypted; the SFU operator can read it. |
 | **Remote-control input** | Data channel `petal.remote-control` → host's AX/CGEvent injection | Synthetic keyboard/mouse into a window on the sharer's machine: the most dangerous capability in the product. Native clipboard Copy/Paste also moves plain text across this authenticated boundary; the SFU can read it. |
+| **Live stream key** | The OS credential store (Keychain / Windows Credential Manager); in memory only while connecting and live | Lets anyone publish to the streamer's channel on the streaming service. Never logged: the RTMP module redacts it from errors. |
+| **Live stream content** | Streamer's capture + meeting audio -> H.264/AAC -> RTMP(S) -> the streaming service the streamer chose | Leaves the room for a public audience: the shared window, the streamer's mic and the remote participants who haven't kept their audio off (`docs/CONTRACTS.md` "Opting out of streams"). |
 | **Telemetry identifiers** | Sentry DSN / PostHog key baked into official builds | Low value, but leaked keys let a third party pollute the maintainers' error and analytics streams. |
 
 ## 2. Components and trust boundaries
@@ -69,7 +71,12 @@ Boundaries, and what crosses each:
    signature against the pubkey compiled into the app, and `updater.rs`
    additionally checks the archive's architecture (Mach-O slices / PE machine
    type) before staging. Builds from source ship no endpoint and never fetch.
-6. **OS → App**: `petal://join/<code>` deep links (any local app or web page
+6. **Desktop app → Streaming service** (RTMP or RTMPS to the server URL the
+   streamer enters or picks). Carries the stream key and the live stream.
+   Plain `rtmp://` sends both in cleartext; the go-live dialog warns about it.
+   Remote participants' consent is enforced by the streamer's client
+   (`petal.stream-optout`), not by the SFU or the streaming service.
+7. **OS → App**: `petal://join/<code>` deep links (any local app or web page
    can open one), the macOS TCC grants (Screen Recording, Accessibility) the
    app holds, and the window list the app enumerates.
 
@@ -191,7 +198,8 @@ Runs as the same user, without admin. Out of scope per `SECURITY.md`
    rule that is also a confidentiality one: the compositor must never display
    a frame from a different track than the one the window is bound to).
 6. Source builds make no network calls except to the LiveKit/backend the user
-   configured.
+   configured, and, while the user is live streaming, to the RTMP(S) server
+   they entered for that stream.
 
 ## 5. Known gaps (accepted or open)
 
