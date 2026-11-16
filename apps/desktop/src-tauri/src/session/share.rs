@@ -5417,6 +5417,7 @@ async fn start_share_with_capture_source(
         let mut guard = state.inner.lock_unpoisoned();
         let seq = guard.next_share_seq;
         guard.next_share_seq += 1;
+        guard.last_started_share_seq.insert(window_id, seq);
         seq
     };
     // issue #249/#299: publish source metadata (title/color/kind receivers key
@@ -7787,7 +7788,8 @@ async fn stop_share_with_started_seq(
 
 /// #586: once a region share ends, its pump can no longer lower the
 /// "Move Petal View back onto its display" banner, so every stop path clears
-/// it here. Skips a window whose newer share generation is still active.
+/// it here. Decided and emitted under `inner` so a re-share of the same
+/// selector, whose pump runs before it is in `shares`, cannot be overtaken.
 fn clear_region_warning_after_share_end(
     app: &tauri::AppHandle,
     state: &SessionState,
@@ -7795,16 +7797,23 @@ fn clear_region_warning_after_share_end(
 ) {
     use tauri::Emitter;
 
-    let Some(payload) = ended_region_share_warning(state, window_id) else {
+    let guard = state.inner.lock_unpoisoned();
+    let Some(payload) = ended_region_share_warning(&guard, window_id) else {
         return;
     };
     if let Err(error) = app.emit("region-warning", payload) {
         log::warn!("session: region warning clear failed for {window_id}: {error}");
     }
+    drop(guard);
 }
 
-fn ended_region_share_warning(state: &SessionState, window_id: u32) -> Option<serde_json::Value> {
-    if state.is_share_active(window_id) {
+/// The stopped share must still be this window's newest generation: no
+/// active share and no later start allocated since it was removed.
+fn ended_region_share_warning(guard: &SessionInner, window_id: u32) -> Option<serde_json::Value> {
+    let last_stopped = guard.last_stopped_share_seq.get(&window_id)?;
+    if guard.shares.contains_key(&window_id)
+        || guard.last_started_share_seq.get(&window_id) != Some(last_stopped)
+    {
         return None;
     }
     crate::region_window::end_share_outside_display(window_id)
@@ -11602,24 +11611,45 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             "Petal View #5861".to_string(),
             crate::region_window::RegionRect::new(0.0, 0.0, 100.0, 100.0),
         ));
-        crate::region_window::set_outside_display(token, true);
+        let outside = || crate::region_window::resolve(token).map(|s| s.outside_display);
         let state = SessionState::default();
-        let payload = ended_region_share_warning(&state, token);
-        let outside_after = crate::region_window::resolve(token).map(|s| s.outside_display);
+        let mut guard = state.inner.lock_unpoisoned();
+        crate::region_window::set_outside_display(token, true);
+        let never_stopped = ended_region_share_warning(&guard, token);
+
+        // The stop path recorded generation 7 as both started and stopped.
+        guard.last_started_share_seq.insert(token, 7);
+        record_last_stopped_share_generation(&mut guard.last_stopped_share_seq, token, 7);
+        let ended = ended_region_share_warning(&guard, token);
+        let outside_after_end = outside();
+
+        // A re-share (generation 8) allocated before this stop's clear: its
+        // pump may already have raised the banner, so it must stay up.
+        crate::region_window::set_outside_display(token, true);
+        guard.last_started_share_seq.insert(token, 8);
+        let overtaken = ended_region_share_warning(&guard, token);
+        let outside_after_overtaken = outside();
+        drop(guard);
         crate::region_window::unregister(token);
+
+        assert_eq!(never_stopped, None, "no stopped generation, nothing to clear");
         assert_eq!(
-            payload,
+            ended,
             Some(serde_json::json!({
                 "windowId": token,
                 "selectorLabel": "region-window-5861",
                 "outsideDisplay": false,
             }))
         );
-        assert_eq!(outside_after, Some(false), "the next share must start from inside");
+        assert_eq!(outside_after_end, Some(false), "the next share must start from inside");
+        assert_eq!(overtaken, None, "a newer generation owns the banner");
+        assert_eq!(outside_after_overtaken, Some(true));
+        let mut unregistered = state.inner.lock_unpoisoned();
+        unregistered.last_started_share_seq.insert(token, 7);
         assert_eq!(
-            ended_region_share_warning(&state, token),
+            ended_region_share_warning(&unregistered, token),
             None,
-            "a non-region (unregistered) source emits nothing"
+            "an unregistered (non-region) source emits nothing"
         );
     }
 
@@ -11653,7 +11683,8 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             .split_once("fn clear_region_warning_after_share_end(")
             .map(|(_, body)| body)
             .expect("clear helper follows the wrapper");
-        assert!(emit.contains("ended_region_share_warning(state, window_id)"));
+        assert!(emit.contains("let guard = state.inner.lock_unpoisoned();"));
+        assert!(emit.contains("ended_region_share_warning(&guard, window_id)"));
         assert!(emit.contains("app.emit(\"region-warning\", payload)"));
     }
 
