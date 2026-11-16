@@ -1685,6 +1685,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn windows_share_stop_clears_the_region_warning_after_the_capture_drop() {
+        // #586: Windows stop_share is compiled only on Windows, so pin its
+        // wiring from source here, where the macOS gate runs it too. After
+        // the capture drop, or the capture thread can re-raise the flag.
+        let source = include_str!("session_stub.rs");
+        let stop = source
+            .split_once("\nasync fn stop_share(")
+            .and_then(|(_, rest)| rest.split_once("\npub(crate) async fn stop_share_token("))
+            .map(|(body, _)| body)
+            .expect("Windows stop_share must precede stop_share_token");
+        let drop = stop
+            .find("drop_share_capture(capture).await;")
+            .expect("Windows stop_share drops the capture");
+        let clear = stop
+            .find("crate::region_window::end_share_outside_display(token)")
+            .expect("Windows stop_share must clear the region warning");
+        assert!(drop < clear);
+        assert!(stop[clear..].contains("\"region-warning\", payload"));
+    }
+
+    #[test]
     fn outside_display_classification_needs_a_latched_display_and_containment() {
         let display = RegionDisplay {
             id: 1,
