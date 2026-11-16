@@ -39,8 +39,8 @@ const tiles = readFileSync(new URL('../src/tiles.ts', import.meta.url), 'utf8');
 const pipelineStats = readFileSync(new URL('../src/pipelineStats.ts', import.meta.url), 'utf8');
 const pkg = readFileSync(new URL('../package.json', import.meta.url), 'utf8');
 
-test('closed allowlist is twelve names and never posthog-js', () => {
-  assert.equal(EVENT_NAMES.length, 12);
+test('closed allowlist is thirteen names and never posthog-js', () => {
+  assert.equal(EVENT_NAMES.length, 13);
   assert.doesNotMatch(pkg, /posthog-js/);
   assert.doesNotMatch(pkg, /"posthog"/);
   assert.match(analyticsSrc, /VITE_PETAL_POSTHOG_KEY/);
@@ -48,6 +48,17 @@ test('closed allowlist is twelve names and never posthog-js', () => {
   assert.doesNotMatch(analyticsSrc, /phc_[A-Za-z0-9]{8,}/);
   assert.match(analyticsSrc, /\$geoip_disable/);
   assert.match(analyticsSrc, /client: 'web'/);
+});
+
+test('#372: meeting_joined omits lk_region when no server info was read', () => {
+  const events = installTestSink();
+  try {
+    meetingJoined();
+    assert.equal(events[0]?.name, 'meeting_joined');
+    assert.equal(events[0]?.properties.lk_region, undefined);
+  } finally {
+    uninstallTestSink();
+  }
 });
 
 test('keyless capture is a no-op outside the test sink', () => {
@@ -60,16 +71,18 @@ test('keyless capture is a no-op outside the test sink', () => {
 test('payloads only carry allowlisted keys and client=web', () => {
   const events = installTestSink();
   try {
-    meetingJoined();
+    meetingJoined('us-east-1');
     shareStarted('picker');
     permissionDenied('mic');
     assert.equal(events[0]?.name, 'meeting_joined');
+    // #372: the edge region rides meeting_joined.
+    assert.equal(events[0]?.properties.lk_region, 'us-east-1');
     assert.equal(events[0]?.properties.client, 'web');
     for (const event of events) {
       for (const key of Object.keys(event.properties)) {
         assert.ok(
           commonPropertyKeys().includes(key) ||
-            ['source', 'kind', 'reason', 'duration_bucket', 'reconnect_count_bucket', 'outcome', 'change'].includes(
+            ['source', 'kind', 'reason', 'duration_bucket', 'reconnect_count_bucket', 'outcome', 'change', 'lk_region'].includes(
               key
             ),
           `leaked property ${key}`

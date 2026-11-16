@@ -44,6 +44,23 @@ pub enum RtcStats {
     Certificate(CertificateStats),
     Stream(StreamStats),
     Track, // Deprecated
+    // PETAL PATCH (#374): a stats `type` this enum does not know (a newer
+    // libwebrtc adds one) is skipped instead of failing the whole report.
+    #[serde(other)]
+    Unknown,
+}
+
+/// PETAL PATCH (#374): parse one `RTCStatsReport::ToJson()` report without
+/// panicking. The upstream callers `unwrap()`ed this inside a C++ callback,
+/// so one unparseable field aborted the process.
+pub fn parse_stats_report(json: &str) -> Result<Vec<RtcStats>, crate::RtcError> {
+    if json.is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(json).map_err(|error| crate::RtcError {
+        error_type: crate::RtcErrorType::Internal,
+        message: format!("unparseable stats report: {error}"),
+    })
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Deserialize)]
@@ -360,8 +377,13 @@ pub mod dictionaries {
         pub total_inter_frame_delay: f64,
         pub total_squared_inter_frame_delay: f64,
         pub pause_count: u32,
+        // PETAL PATCH (#374): libwebrtc's attribute names are the plural
+        // `totalPausesDuration` / `totalFreezesDuration`; camelCase of the
+        // field names never matched, so both always read 0.
+        #[serde(rename = "totalPausesDuration")]
         pub total_pause_duration: f64,
         pub freeze_count: u32,
+        #[serde(rename = "totalFreezesDuration")]
         pub total_freeze_duration: f64,
         pub last_packet_received_timestamp: f64,
         pub header_bytes_received: u64,

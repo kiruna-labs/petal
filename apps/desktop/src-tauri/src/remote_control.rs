@@ -485,6 +485,7 @@ fn message_from_binary(
         supports_binary_hot_path_v2: false,
         sent_at_ms,
         host_hold_ms: None,
+        lk_node_hash: None,
         modifiers: RemoteControlModifiers {
             alt: modifiers & 1 != 0,
             ctrl: modifiers & 2 != 0,
@@ -1800,6 +1801,13 @@ fn granted_window_ids() -> HashSet<u32> {
 /// browser windows and back off when the last grant on that app ends -- see
 /// `input::note_control_grants_changed`. Call it AFTER the grant map changed.
 fn note_control_grants_changed() {
+    // #372: every concurrent controller counts toward the host's `same_edge`.
+    let controllers: Vec<String> = sessions()
+        .lock_unpoisoned()
+        .keys()
+        .map(|key| key.controller_id.clone())
+        .collect();
+    crate::sfu_edge::set_session_peers(RcRole::Host, controllers);
     #[cfg(target_os = "macos")]
     input::note_control_grants_changed();
 }
@@ -2242,7 +2250,6 @@ pub(crate) fn window_has_active_controller(window_id: u32) -> bool {
 /// name and treats multiple simultaneous grants conservatively.
 /// #371: controllers holding any grant on this host. Read from the grant
 /// table on every probe tick, so every revoke path stops the pings.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn granted_controller_identities() -> HashSet<String> {
     sessions()
         .lock_unpoisoned()
@@ -4190,6 +4197,10 @@ fn status_packet_for(status: &RemoteControlStatus, local_identity: &str) -> Remo
         supports_binary_hot_path_v2: status.status == "active",
         sent_at_ms: None,
         host_hold_ms: None,
+        // #372: the controller records `same_edge` against this.
+        lk_node_hash: (status.status == "active")
+            .then(crate::sfu_edge::local_node_hash)
+            .flatten(),
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -4242,6 +4253,7 @@ fn discrete_result_packet(
         supports_binary_hot_path_v2: false,
         sent_at_ms: None,
         host_hold_ms: None,
+        lk_node_hash: None,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -5035,6 +5047,11 @@ fn handle_message(
                 "remote-control: request received from '{}' for shared window {}",
                 message.controller_id,
                 message.window_id
+            );
+            // #372: verified sender; read back at grant for `same_edge`.
+            crate::sfu_edge::note_peer_node_hash(
+                &message.controller_id,
+                message.lk_node_hash.as_deref(),
             );
             if state.active_share_frame(message.window_id).is_none() {
                 log::info!(
@@ -6475,6 +6492,7 @@ fn clipboard_key_message(
         supports_binary_hot_path_v2: false,
         sent_at_ms: None,
         host_hold_ms: None,
+        lk_node_hash: None,
         modifiers,
     }
 }
@@ -6831,6 +6849,8 @@ pub async fn remote_control_set_active(
         supports_binary_hot_path_v2: false,
         sent_at_ms: Some(now_ms()),
         host_hold_ms: None,
+        // #372: the host records `same_edge` against this.
+        lk_node_hash: if active { crate::sfu_edge::local_node_hash() } else { None },
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -6977,6 +6997,7 @@ pub async fn remote_control_request_escalation(
         supports_binary_hot_path_v2: false,
         sent_at_ms: Some(now_ms()),
         host_hold_ms: None,
+        lk_node_hash: crate::sfu_edge::local_node_hash(),
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -15968,6 +15989,7 @@ pub(crate) mod input {
                 supports_binary_hot_path_v2: false,
                 sent_at_ms: None,
                 host_hold_ms: None,
+                lk_node_hash: None,
                 modifiers: RemoteControlModifiers::default(),
             }
         }
@@ -23052,6 +23074,7 @@ mod tests {
             supports_binary_hot_path_v2: false,
             sent_at_ms: None,
             host_hold_ms: None,
+            lk_node_hash: None,
             modifiers: RemoteControlModifiers::default(),
         }
     }
@@ -23977,6 +24000,7 @@ mod tests {
             supports_binary_hot_path_v2: false,
             sent_at_ms: None,
             host_hold_ms: None,
+            lk_node_hash: None,
             modifiers: RemoteControlModifiers::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -24208,6 +24232,7 @@ mod tests {
             supports_binary_hot_path_v2: false,
             sent_at_ms: None,
             host_hold_ms: None,
+            lk_node_hash: None,
             modifiers: RemoteControlModifiers {
                 alt: false,
                 ctrl: false,
@@ -24286,6 +24311,7 @@ mod tests {
             supports_binary_hot_path_v2: false,
             sent_at_ms: None,
             host_hold_ms: None,
+            lk_node_hash: None,
             modifiers: RemoteControlModifiers::default(),
         };
         let value = serde_json::to_value(msg).unwrap();
@@ -25305,7 +25331,6 @@ mod tests {
     /// Drives the real grant install and revoke, which every revoke path
     /// funnels through; the probe re-reads the grant table each tick.
     #[test]
-    #[cfg(target_os = "macos")] // latency_probe is macOS-only
     fn latency_probe_targets_a_controller_only_while_its_grant_is_active() {
         let ids = remote_control_test_ids(
             "latency_probe_targets_a_controller_only_while_its_grant_is_active",
@@ -26640,6 +26665,107 @@ mod tests {
         // Stopped / downgraded host: back to the legacy path.
         engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, None);
         assert!(engine.push_redundant_input(&key, later).is_none());
+    }
+
+    /// #372: a request's `lkNodeHash`, the real grant install and the host's
+    /// `active` status carry the edge dimensions end to end. Hashes stay on
+    /// the wire; only `same_edge` reaches the summary.
+    #[test]
+    fn grant_stamps_edge_dimensions_and_active_status_carries_lk_node_hash() {
+        use crate::sfu_edge::{IcePath, LocalEdge};
+        let ids = remote_control_test_ids(
+            "grant_stamps_edge_dimensions_and_active_status_carries_lk_node_hash",
+        );
+        crate::sfu_edge::set_local_for_test(
+            Some(LocalEdge {
+                lk_region: Some("us-east-1".to_string()),
+                self_hosted_sfu: "false",
+                node_hash: Some("69e94d0a".to_string()),
+            }),
+            Some(IcePath {
+                candidate_type: "relay",
+                protocol: "tcp",
+            }),
+        );
+        let fixture = contract_fixture();
+        let vector = fixture
+            .remote_control_messages
+            .iter()
+            .find(|entry| entry.name == "request-lk-node-hash")
+            .expect("request-lk-node-hash fixture");
+        let mut request: RemoteControlMessage =
+            serde_json::from_value(vector.message.clone()).unwrap();
+        assert_eq!(request.lk_node_hash.as_deref(), Some("e4c80fa5"));
+        request.controller_id = ids.controller_id.clone();
+        crate::sfu_edge::note_peer_node_hash(&request.controller_id, request.lk_node_hash.as_deref());
+
+        // Parallel tests share the host aggregator and grant other
+        // controllers; retry until an interval reflects this grant.
+        let mut line = String::new();
+        for _ in 0..20 {
+            authorize_shared(ids.window_id, &ids.controller_id);
+            rc_latency_telemetry::record_stage(RcRole::Host, Stage::ReplayInjectMs, 10.0);
+            let Some(summary) = rc_latency_telemetry::take_host_interval_for_test() else {
+                continue;
+            };
+            line = summary.log_line();
+            if line.contains("same_edge=false") {
+                break;
+            }
+        }
+        for expected in [
+            "lk_region=us-east-1",
+            "same_edge=false",
+            "self_hosted_sfu=false",
+            "ice_candidate_type=relay",
+            "ice_protocol=tcp",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
+        assert!(!line.contains("e4c80fa5") && !line.contains("69e94d0a"), "{line}");
+
+        let status = active_status_for_session(ids.window_id, ids.controller_id.clone(), "tok".to_string());
+        let json = serde_json::to_value(status_packet_for(&status, "host")).unwrap();
+        assert_eq!(json["lkNodeHash"], serde_json::json!("69e94d0a"));
+        let mut stopped = status;
+        stopped.status = "stopped";
+        let json = serde_json::to_value(status_packet_for(&stopped, "host")).unwrap();
+        assert!(json.get("lkNodeHash").is_none(), "only an active status carries it");
+        revoke(ids.window_id, &ids.controller_id);
+    }
+
+    /// #372: the pre-#372 request and status fixtures (old peers) parse with
+    /// no hash and serialize without the key.
+    #[test]
+    fn lk_node_hash_is_additive_for_old_peers() {
+        let fixture = contract_fixture();
+        let vector = |name: &str| {
+            fixture
+                .remote_control_messages
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("missing contract fixture {name}"))
+                .message
+                .clone()
+        };
+        for legacy in ["request", "status"] {
+            let message: RemoteControlMessage = serde_json::from_value(vector(legacy)).unwrap();
+            assert_eq!(message.lk_node_hash, None, "{legacy}");
+            let json = serde_json::to_value(&message).unwrap();
+            assert!(json.get("lkNodeHash").is_none(), "{legacy}");
+        }
+        let status: RemoteControlMessage =
+            serde_json::from_value(vector("status-active-lk-node-hash")).unwrap();
+        assert_eq!(status.lk_node_hash.as_deref(), Some("69e94d0a"));
+        // Old-peer view: an envelope without the field still parses it.
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PreEdgeEnvelope {
+            kind: RemoteControlType,
+            status: Option<String>,
+        }
+        let old: PreEdgeEnvelope = serde_json::from_value(vector("status-active-lk-node-hash")).unwrap();
+        assert_eq!((old.kind, old.status.as_deref()), (RemoteControlType::Status, Some("active")));
     }
 
     #[test]

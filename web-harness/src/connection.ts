@@ -14,6 +14,7 @@ import {
 } from 'livekit-client';
 import type { HarnessContext } from './context.ts';
 import { livekitRoomName } from '@petal/shared/logic/meetingCode';
+import { createLkEdgeRefresher } from './lkEdgeRefresh.ts';
 import {
   AI_CHAT_TOPIC,
   COCKPIT_TOPIC,
@@ -224,6 +225,9 @@ export function setupConnection(
     audioReceiverTelemetryCleanup.clear();
     audioReceiverParticipants.clear();
   }
+
+  // #372: this connection's edge, refreshed on connect and reconnect.
+  const refreshLkEdge = createLkEdgeRefresher({ state, logEvent });
 
   function removeAudioPlaybackPrompt() {
     audioPlaybackPrompt?.remove();
@@ -591,6 +595,8 @@ export function setupConnection(
 
     newRoom.on(RoomEvent.Reconnected, () => {
       logEvent('reconnected successfully', 'ok');
+      // #372: a full reconnect can land on another edge node.
+      void refreshLkEdge(newRoom, tokenResponse.url);
       // A full reconnect can come back with metadata that predates our
       // writes; re-assert the keys we own (bounded inside the owner).
       if (newRoom.localParticipant) localParticipantMetadata.onEcho(newRoom.localParticipant.metadata);
@@ -869,6 +875,7 @@ export function setupConnection(
       shareBtn.disabled = true;
       micCheckbox.disabled = true;
       state.room = null;
+      state.lkEdge = null;
       localParticipantMetadata.detach();
       ctx.hook?.plugins?.roomDisconnected();
       ctx.hook?.chat?.roomDisconnected();
@@ -1003,12 +1010,14 @@ export function setupConnection(
       // registration loop, or with no `localParticipant` -- would otherwise
       // fall through to a meeting screen and a sync interval over a room the
       // teardown has already discarded.
+      // #372: before `meeting_joined`, which carries `lk_region`.
+      await refreshLkEdge(newRoom, tokenResponse.url);
       if (state.room !== newRoom) return;
       setConnState('connected', 'connected');
       syncAddressBar(meetingCode);
       ctx.hook?.continuity?.entered(meetingCode);
       logEvent(`connected to "${meetingCode}" as "${displayName}"`, 'ok');
-      meetingJoined();
+      meetingJoined(state.lkEdge?.lkRegion);
       localStorage.setItem(HARNESS_ROOM_STORAGE_KEY, meetingCode);
       cb.recordRecentRoom(meetingCode);
       shareBtn.disabled = false;

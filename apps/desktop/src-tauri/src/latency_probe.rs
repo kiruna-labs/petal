@@ -8,7 +8,8 @@
 //! own clock when the pong returns.
 //!
 //! #371: besides the cockpit, a host pings every controller holding a grant,
-//! so the controller->host input leg has a fresh clock offset.
+//! so the controller->host input leg has a fresh clock offset. #374: a
+//! controller pings the hosts it controls, for the capture->receive leg.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -259,6 +260,13 @@ pub fn start_receiver_for_room(
                                 rtt_ms,
                             );
                         }
+                        if crate::rc_input_timing::controlled_hosts().contains(&peer_identity) {
+                            crate::rc_input_timing::record_host_clock(
+                                &peer_identity,
+                                offset_us,
+                                rtt_ms,
+                            );
+                        }
                         diagnostics.record_peer_clock_offset(
                             peer_identity.clone(),
                             offset_us,
@@ -298,7 +306,7 @@ fn start_ping_sender(
                 room.remote_participants()
                     .keys()
                     .map(|identity| identity.to_string()),
-                &crate::remote_control::granted_controller_identities(),
+                &control_peers(),
             );
             for peer_identity in peer_identities {
                 let send_time_ms = now_ms();
@@ -331,16 +339,25 @@ fn start_ping_sender(
     });
 }
 
-/// Every peer while the cockpit is open; otherwise only present peers that
-/// hold a remote-control grant on this host (#371), none once it ends.
+/// Peers on either end of a live grant: controllers holding one on this host
+/// (#371, their input leg) and hosts this controller holds one on (#374, the
+/// host capture stamp's offset). Empty once control ends.
+fn control_peers() -> HashSet<String> {
+    let mut peers = crate::remote_control::granted_controller_identities();
+    peers.extend(crate::rc_input_timing::controlled_hosts());
+    peers
+}
+
+/// Every peer while the cockpit is open; otherwise only present peers in
+/// `control_peers` (#371/#374), none once control ends.
 pub(crate) fn ping_targets(
     cockpit_open: bool,
     present_peers: impl IntoIterator<Item = String>,
-    granted_controllers: &HashSet<String>,
+    control_peers: &HashSet<String>,
 ) -> Vec<String> {
     present_peers
         .into_iter()
-        .filter(|peer| cockpit_open || granted_controllers.contains(peer))
+        .filter(|peer| cockpit_open || control_peers.contains(peer))
         .collect()
 }
 
@@ -393,6 +410,27 @@ mod tests {
 
     fn contract_fixture() -> ContractFixture {
         serde_json::from_str(include_str!("../../../../contracts/petal-contracts.json")).unwrap()
+    }
+
+    /// #371 wiring guard: both platform joins start the probe, or that
+    /// platform's host never gets a controller clock offset and records no
+    /// `input_leg_ms`. Starting it needs a live LiveKit `Room` and there is
+    /// no `tauri::test` harness for `join_room`, so this checks the source.
+    #[test]
+    fn both_platform_session_joins_start_the_probe() {
+        let call = "crate::latency_probe::start_receiver_for_room(";
+        for (platform, source, join) in [
+            ("macOS", include_str!("session/room.rs"), "pub async fn join_room("),
+            ("Windows", include_str!("session_stub.rs"), "pub async fn join_room_command("),
+        ] {
+            let prod = source
+                .split_once("\n#[cfg(test)]\nmod tests {")
+                .map_or(source, |(prod, _)| prod);
+            let join_at = prod.find(join).unwrap_or_else(|| panic!("{platform}: {join}"));
+            let body = &prod[join_at..];
+            let body = &body[..body.find("\n}\n").expect("join fn closes at column 0")];
+            assert_eq!(body.matches(call).count(), 1, "{platform} join must start the probe once");
+        }
     }
 
     #[test]
