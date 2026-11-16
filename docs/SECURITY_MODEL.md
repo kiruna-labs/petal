@@ -23,7 +23,7 @@ In rough order of blast radius if compromised:
 | **Admin token** (`PETAL_ADMIN_TOKEN`) | Backend env | Kick/close any room. |
 | **Shared screen content** | Sharer's GPU → H.264 → SFU → every subscriber's compositor | The product's payload. Not end-to-end encrypted; the SFU operator can read it. |
 | **Remote-control input** | Data channel `petal.remote-control` → host's AX/CGEvent injection | Synthetic keyboard/mouse into a window on the sharer's machine: the most dangerous capability in the product. Native clipboard Copy/Paste also moves plain text across this authenticated boundary; the SFU can read it. |
-| **Live stream key** | The OS credential store (Keychain / Windows Credential Manager); in memory only while connecting and live | Lets anyone publish to the streamer's channel on the streaming service. Never logged: the RTMP module redacts it from errors. |
+| **Live stream key** | Saved in the OS credential store (Keychain / Windows Credential Manager); in memory while the go-live dialog holds it and while connecting and live | Lets anyone publish to the streamer's channel on the streaming service. Never logged: the RTMP module redacts it from errors. |
 | **Live stream content** | Streamer's capture + meeting audio -> H.264/AAC -> RTMP(S) -> the streaming service the streamer chose | Leaves the room for a public audience: the shared window, the streamer's mic and the remote participants who haven't kept their audio off (`docs/CONTRACTS.md` "Opting out of streams"). |
 | **Telemetry identifiers** | Sentry DSN / PostHog key baked into official builds | Low value, but leaked keys let a third party pollute the maintainers' error and analytics streams. |
 
