@@ -774,7 +774,10 @@ test('e2e-gate-verdict.mjs attribution-replay and --loss-pct exit 0 on a correct
 test('the workflow hands the impaired loss % to the attribution verdict', () => {
   const workflow = readFileSync(path.join(repoRoot, '.github/workflows/nightly-loopback.yml'), 'utf8');
   assert.match(workflow, /node "\$VERDICT" attribution [^\n]*\n[^\n]*--delay-ms "\$NET_DELAY_MS" --loss-pct "\$NET_LOSS_PCT"/);
-  assert.match(workflow, /if \[ "\$NET_DELAY_MS" -gt 0 \] \|\| awk -v l="\$NET_LOSS_PCT" 'BEGIN \{ exit !\(l \+ 0 > 0\) \}'/, 'any loss-only impairment runs attribution (and fails it below LOSS_ROW_MIN_PCT)');
+  // Unconditional: a no-op impaired pass (0ms, 0%) must fail the verdict, not skip it.
+  const step = workflow.slice(workflow.indexOf('Post-suite: IMPAIRED remote-control latency gate'), workflow.indexOf('node "$VERDICT" attribution '));
+  assert.ok(!/NET_DELAY_MS" -gt 0|NET_LOSS_PCT"[^\n]*BEGIN/.test(step), 'attribution must run for every impaired pass');
+  assert.equal(attributionVerdict({ clean: LOSS_CLEAN, impaired: LOSS_CLEAN, delayMs: '0', lossPct: '0' }).ok, false);
   // The harness banks web controller summaries only before a mid-suite rejoin,
   // never on the initial join (that page holds an earlier suite's lines).
   const scenario = readFileSync(path.join(rcScripts, 'remote-control-scenario.mjs'), 'utf8');

@@ -1043,13 +1043,11 @@ jobs:
                 node "$VERDICT" latency --pass impaired --results "$IMPAIRED_RESULTS_JSON" --photon "$IMPAIRED_PHOTON_JSON" \
                 --host-log "$IMPAIRED_PETAL_LOG" --json "$IMPAIRED_LATENCY_JSON" 2>&1 | tee -a "$HARNESS_LOG"
               [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
-              # Any impairment gets a verdict; 0ms at < 2% loss fails it (nothing assertable).
-              if [ "$NET_DELAY_MS" -gt 0 ] || awk -v l="$NET_LOSS_PCT" 'BEGIN { exit !(l + 0 > 0) }'; then
-                echo "==> Post-suite: stage attribution (clean vs impaired)" | tee -a "$HARNESS_LOG"
-                node "$VERDICT" attribution --pass impaired --clean "$LATENCY_JSON" --impaired "$IMPAIRED_LATENCY_JSON" \
-                  --delay-ms "$NET_DELAY_MS" --loss-pct "$NET_LOSS_PCT" 2>&1 | tee -a "$HARNESS_LOG"
-                [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
-              fi
+              # Every impaired pass gets a verdict; 0ms at < 2% loss fails it (nothing assertable).
+              echo "==> Post-suite: stage attribution (clean vs impaired)" | tee -a "$HARNESS_LOG"
+              node "$VERDICT" attribution --pass impaired --clean "$LATENCY_JSON" --impaired "$IMPAIRED_LATENCY_JSON" \
+                --delay-ms "$NET_DELAY_MS" --loss-pct "$NET_LOSS_PCT" 2>&1 | tee -a "$HARNESS_LOG"
+              [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
               set -e
             fi
           fi
