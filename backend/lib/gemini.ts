@@ -51,10 +51,13 @@ export class GeminiConfigError extends Error {
 export interface GeminiEnv {
   apiKey: string;
   model: string;
-  // Escape hatch for the Live-token API moving between API versions. Unset
-  // means the SDK default (v1beta), which is what the #654 spike verified.
-  apiVersion?: string;
+  // Escape hatch for the Live-token API moving between API versions.
+  apiVersion: string;
 }
+
+// Pinned, not left to the SDK: @google/genai 3.x defaults to v1, but the #654
+// spike verified `auth_tokens` on v1beta. Override with GEMINI_API_VERSION.
+export const DEFAULT_GEMINI_API_VERSION = 'v1beta';
 
 // Missing GEMINI_API_KEY is the documented GLOBAL KILL SWITCH for hosted AI
 // chat: unset it in Vercel and every /api/ai-token call returns 503 without
@@ -66,7 +69,7 @@ export function loadGeminiEnv(): GeminiEnv {
     throw new GeminiConfigError('Gemini not configured: set GEMINI_API_KEY');
   }
   const model = process.env.GEMINI_LIVE_MODEL?.trim() || DEFAULT_GEMINI_LIVE_MODEL;
-  const apiVersion = process.env.GEMINI_API_VERSION?.trim() || undefined;
+  const apiVersion = process.env.GEMINI_API_VERSION?.trim() || DEFAULT_GEMINI_API_VERSION;
   return { apiKey, model, apiVersion };
 }
 
@@ -101,7 +104,7 @@ function loadGenai(): Promise<typeof import('@google/genai')> {
   return genaiModule;
 }
 
-let cachedClient: { apiKey: string; apiVersion?: string; client: GoogleGenAI } | undefined;
+let cachedClient: { apiKey: string; apiVersion: string; client: GoogleGenAI } | undefined;
 
 async function geminiClient(env: GeminiEnv): Promise<GoogleGenAI> {
   if (cachedClient && cachedClient.apiKey === env.apiKey && cachedClient.apiVersion === env.apiVersion) {
@@ -110,7 +113,7 @@ async function geminiClient(env: GeminiEnv): Promise<GoogleGenAI> {
   const { GoogleGenAI: Client } = await loadGenai();
   const client = new Client({
     apiKey: env.apiKey,
-    ...(env.apiVersion ? { httpOptions: { apiVersion: env.apiVersion } } : {}),
+    httpOptions: { apiVersion: env.apiVersion },
   });
   cachedClient = { apiKey: env.apiKey, apiVersion: env.apiVersion, client };
   return client;
