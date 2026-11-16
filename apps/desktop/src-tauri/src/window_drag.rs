@@ -454,6 +454,12 @@ mod tests {
     /// resolves for this host. Offline and filtered to the host platform, so it
     /// needs only the crates this build already downloaded.
     fn resolved_tauri_drag_js() -> (String, std::path::PathBuf) {
+        // Three tests read it; run `cargo metadata` once per test binary.
+        static RESOLVED: std::sync::OnceLock<(String, std::path::PathBuf)> = std::sync::OnceLock::new();
+        RESOLVED.get_or_init(resolve_tauri_drag_js).clone()
+    }
+
+    fn resolve_tauri_drag_js() -> (String, std::path::PathBuf) {
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let version = std::process::Command::new(rustc).arg("-vV").output().expect("run rustc -vV");
         let version = String::from_utf8_lossy(&version.stdout).into_owned();
@@ -590,6 +596,20 @@ mod tests {
         for (head, pinned) in PINNED_DRAG_REGION_SEMANTICS {
             assert_eq!(declaration(&js, head), Some(pinned), "{}: `{head}` changed. {REVERIFY}", path.display());
         }
+    }
+
+    /// `tests/windowDragRendered.test.ts` drives real presses through this copy.
+    #[test]
+    fn rendered_test_fixture_is_the_resolved_tauri_drag_js() {
+        let (js, path) = resolved_tauri_drag_js();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/tauri-drag.js");
+        let src = std::fs::read_to_string(&fixture).unwrap_or_else(|e| panic!("read {}: {e}", fixture.display()));
+        assert!(
+            normalize_js(&src) == js,
+            "{} differs from {}: copy it over, rerun tests/windowDragRendered.test.ts. {REVERIFY}",
+            fixture.display(),
+            path.display()
+        );
     }
 
     #[test]
