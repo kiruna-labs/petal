@@ -1500,6 +1500,27 @@ fn tracked_source_frame(
     }
 }
 
+/// `tracked_source_frame` with the tracker's real inputs: the region
+/// registry's captured area and the live display bounds.
+#[cfg(target_os = "macos")]
+fn tracker_source_frame(
+    source_kind: SharedSourceKind,
+    shared_number: i64,
+    stored_frame: WindowFrame,
+) -> WindowFrame {
+    let region_captured = (source_kind == SharedSourceKind::DisplayRegion)
+        .then(|| crate::region_window::resolve(shared_number as u32))
+        .flatten()
+        .and_then(|source| source.captured_frame);
+    tracked_source_frame(
+        source_kind,
+        shared_number,
+        stored_frame,
+        region_captured,
+        display_frame_for_source_id,
+    )
+}
+
 fn plan_border(
     stack: &[BorderStackEntry],
     panel_number: i64,
@@ -1747,17 +1768,7 @@ pub fn start_tracker(app: &AppHandle) {
             suppressed_misorder_ticks,
         ) in borders
         {
-            let region_captured = (source_kind == SharedSourceKind::DisplayRegion)
-                .then(|| crate::region_window::resolve(shared_number as u32))
-                .flatten()
-                .and_then(|source| source.captured_frame);
-            let source_frame = tracked_source_frame(
-                source_kind,
-                shared_number,
-                source_frame,
-                region_captured,
-                display_frame_for_source_id,
-            );
+            let source_frame = tracker_source_frame(source_kind, shared_number, source_frame);
             let plan = plan_border(
                 &stack,
                 panel_number,
@@ -3131,6 +3142,36 @@ mod tests {
 
         assert_eq!(frame, captured);
         assert!(actions.is_empty());
+    }
+
+    /// The tracker's own frame lookup reads the area the capture recorded in
+    /// the real region registry, and holds the border once it is released.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tracker_reads_the_captured_area_from_the_region_registry() {
+        let token: u32 = 4_000_000_301;
+        let stored = f(100, 100, 640, 400);
+        let moved = f(300, 220, 720, 450);
+        crate::region_window::register(crate::region_window::RegionWindowSource::new(
+            token,
+            1,
+            "Petal View: Tracker #4000000301".to_string(),
+            area(f(900, 600, 720, 450)),
+        ));
+        let owner = crate::region_window::begin_captured_frame_owner(token);
+        crate::region_window::record_captured_frame(token, owner, area(moved));
+        let tracked = tracker_source_frame(SharedSourceKind::DisplayRegion, token as i64, stored);
+        crate::region_window::release_captured_frame(token, owner);
+        let released = tracker_source_frame(SharedSourceKind::DisplayRegion, token as i64, stored);
+        crate::region_window::unregister(token);
+        assert_eq!(
+            tracked, moved,
+            "the captured area, not the stored or selector frame"
+        );
+        assert_eq!(
+            released, stored,
+            "no captured area holds the border where it is"
+        );
     }
 
     #[test]
