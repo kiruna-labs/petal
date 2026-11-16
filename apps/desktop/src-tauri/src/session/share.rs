@@ -4401,6 +4401,9 @@ async fn start_capture_for_share(
     resolution: CaptureResolution,
     reason: &str,
     diagnostics: Option<crate::diagnostics::DiagnosticsState>,
+    // A Petal View capture's writer id for its captured area, taken by a
+    // caller that must claim it before an await. `None` takes it here.
+    region_owner: Option<u64>,
 ) -> Result<StartedShareCapture, ShareSessionError> {
     // First captured frame tells us the real (window-backing-store) size --
     // same "wait for frame #1 before publishing" approach `publish_probe.rs`
@@ -4509,6 +4512,10 @@ async fn start_capture_for_share(
         let mut last_timeout = None;
         let mut started_without_frame = false;
         let mut started_capture = None;
+        // The Petal View writer claim each attempt renews from the last one, so
+        // an attempt that times out and stops doesn't leave the next one
+        // without writer rights.
+        let mut region_claim = region_owner;
         for attempt in 1..=max_attempts {
             capture_attempt_generation.store(attempt as u64, Ordering::SeqCst);
             let attempt_guard = CaptureAttemptGuard {
@@ -4771,9 +4778,17 @@ async fn start_capture_for_share(
                 ShareCaptureSource::DirectDisplayId => {
                     if let Some(region) = crate::region_window::resolve(window_id) {
                         capture_source_slot = Some(ShareCaptureSource::DirectDisplayId);
+                        let region_owner = match region_claim {
+                            Some(previous) => crate::region_window::renew_captured_frame_owner(
+                                window_id, previous,
+                            ),
+                            None => crate::region_window::begin_captured_frame_owner(window_id),
+                        };
+                        region_claim = Some(region_owner);
                         WindowCapture::start_display_region_with_error_handler_at_resolution(
                             window_id,
                             region.frame,
+                            region_owner,
                             fps,
                             resolution,
                             on_frame,
@@ -5381,6 +5396,7 @@ async fn start_share_with_capture_source(
         resolution,
         "start_share",
         diagnostics.clone(),
+        None,
     )
     .await?;
     if layout_gate.is_failed() {
@@ -7333,7 +7349,7 @@ fn spawn_pump_failure_recovery(
             );
         }
 
-        let (old_capture, had_url_refresh) = {
+        let (old_capture, had_url_refresh, region_owner) = {
             let guard = state.inner.lock_unpoisoned();
             let Some(share) = guard.shares.get(&window_id) else {
                 log::info!(
@@ -7359,7 +7375,17 @@ fn spawn_pump_failure_recovery(
             if let Some(url_refresh) = &share.url_refresh {
                 url_refresh.stop();
             }
-            (Arc::clone(&share.capture), share.url_refresh.is_some())
+            // Claim the Petal View's captured area while this share is still
+            // the current one. A share that replaces it during the awaits
+            // below claims it after this, so this rebuilt capture can't move
+            // that share's border if it is discarded as stale.
+            let region_owner = (share.source_kind == SharedSourceKind::DisplayRegion)
+                .then(|| crate::region_window::begin_captured_frame_owner(window_id));
+            (
+                Arc::clone(&share.capture),
+                share.url_refresh.is_some(),
+                region_owner,
+            )
         };
         log::info!("session: window {window_id} pump recovery capture.stop() begin");
         if let Err(error) = stop_capture_with_timeout(
@@ -7404,6 +7430,7 @@ fn spawn_pump_failure_recovery(
             snapshot.resolution,
             "capture_restart",
             diagnostics.clone(),
+            region_owner,
         )
         .await
         {
@@ -16651,6 +16678,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
                 CaptureResolution::default(),
                 "test_capture_restart_display",
                 None,
+                None,
             )
             .await;
             assert!(
@@ -16675,6 +16703,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
                 5,
                 CaptureResolution::default(),
                 "test_capture_restart_display_wrong_path",
+                None,
                 None,
             )
             .await;
@@ -16720,6 +16749,7 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
                 5,
                 CaptureResolution::default(),
                 "test_capture_restart_display_gone",
+                None,
                 None,
             )
             .await;

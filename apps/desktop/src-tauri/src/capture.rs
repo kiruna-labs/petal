@@ -560,7 +560,33 @@ pub(crate) fn region_frame_generation_is_current(
 #[derive(Debug, Clone)]
 struct PendingRegionConfigurationState {
     configuration: crate::region_window::PendingRegionConfiguration,
+    /// The selector's global frame this configuration captures.
+    frame: crate::region_window::RegionRect,
     started_at: std::time::Instant,
+}
+
+/// Accept a delivered frame's generation. When it proves a pending ROI, that
+/// generation goes live and the region registry records the ROI's area, which
+/// the share border marks. A same-size move is proven by the next delivered
+/// frame, whatever area it shows (the waiver in `region_fence_decision`), so
+/// the border can mark the new area while frames of the old one still arrive.
+/// `region_owner` is this capture's writer id from
+/// `region_window::begin_captured_frame_owner`, or 0 for a capture that
+/// records no area.
+fn commit_region_proof(
+    window_id: u32,
+    region_owner: u64,
+    pending_slot: &Mutex<Option<PendingRegionConfigurationState>>,
+    region_generation: &AtomicU64,
+    generation: u64,
+) {
+    let pending = pending_slot.lock_unpoisoned().take();
+    if let Some(pending) = pending {
+        region_generation.store(generation, Ordering::Release);
+        if region_owner != 0 {
+            crate::region_window::record_captured_frame(window_id, region_owner, pending.frame);
+        }
+    }
 }
 
 /// A live capture session for one window. Dropping this stops the stream
@@ -605,6 +631,17 @@ pub struct WindowCapture {
     /// `NoBufferStreakLog`.
     no_buffer_log: Arc<Mutex<NoBufferStreakLog>>,
     raw_accounting: Arc<RawStreamAccounting>,
+    /// This region capture's writer id for the selector's captured area
+    /// (`region_window::begin_captured_frame_owner`), 0 for other captures.
+    region_owner: u64,
+}
+
+/// A capture dropped without `stop()` gives up its captured area too, so the
+/// next share's border can't jump to it. Releasing twice is harmless.
+impl Drop for WindowCapture {
+    fn drop(&mut self) {
+        self.release_region_owner();
+    }
 }
 
 
@@ -1374,6 +1411,7 @@ impl WindowCapture {
             on_frame,
             on_error,
             diagnostics,
+            0,
         )
     }
 
@@ -1388,6 +1426,10 @@ impl WindowCapture {
     pub fn start_display_region_with_error_handler_at_resolution(
         selector_window_id: u32,
         region: crate::region_window::RegionRect,
+        // From `region_window::begin_captured_frame_owner` (or its renewal for a
+        // retried attempt), taken before any await that could let a newer
+        // share of this selector start first.
+        region_owner: u64,
         fps: u32,
         resolution: CaptureResolution,
         on_frame: impl Fn(CapturedFrame) + Send + Sync + 'static,
@@ -1399,8 +1441,9 @@ impl WindowCapture {
         if !crate::window_source::has_screen_recording_access() {
             return Err(CaptureError::PermissionDenied);
         }
+        // Until this capture starts, the border keeps the frame it was shown at.
         let source = prepare_direct_display_region_source(selector_window_id, region)?;
-        Self::start_prepared(
+        let capture = Self::start_prepared(
             selector_window_id,
             fps,
             resolution,
@@ -1408,7 +1451,10 @@ impl WindowCapture {
             on_frame,
             on_error,
             None,
-        )
+            region_owner,
+        )?;
+        crate::region_window::record_captured_frame(selector_window_id, region_owner, region);
+        Ok(capture)
     }
 
     pub fn start_display_with_error_handler_at_resolution(
@@ -1423,7 +1469,7 @@ impl WindowCapture {
         }
         let source = prepare_direct_display_source(display_id)?;
         Self::start_prepared(
-            display_id, fps, resolution, source, on_frame, on_error, None,
+            display_id, fps, resolution, source, on_frame, on_error, None, 0,
         )
     }
 
@@ -1483,9 +1529,12 @@ impl WindowCapture {
             source_generation: 0,
             origin: CaptureSourceOrigin::SystemPicker,
         };
-        Self::start_prepared(window_id, fps, resolution, source, on_frame, on_error, None)
+        Self::start_prepared(
+            window_id, fps, resolution, source, on_frame, on_error, None, 0,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_prepared(
         window_id: u32,
         fps: u32,
@@ -1494,6 +1543,7 @@ impl WindowCapture {
         on_frame: impl Fn(CapturedFrame) + Send + Sync + 'static,
         on_error: impl Fn(String) + Send + Sync + 'static,
         diagnostics: Option<CaptureDiagnostics>,
+        region_owner: u64,
     ) -> Result<Self, CaptureError> {
         if !crate::window_source::has_screen_recording_access() {
             return Err(CaptureError::PermissionDenied);
@@ -1747,8 +1797,13 @@ impl WindowCapture {
                 match fence {
                     RegionFenceDecision::Accept(generation) => {
                         if pending.is_some() {
-                            region_generation_for_handler.store(generation, Ordering::Release);
-                            *pending_region_generation_for_handler.lock_unpoisoned() = None;
+                            commit_region_proof(
+                                window_id,
+                                region_owner,
+                                &pending_region_generation_for_handler,
+                                &region_generation_for_handler,
+                                generation,
+                            );
                         }
                         frame_region_generation = (generation != 0).then_some(generation);
                     }
@@ -1819,11 +1874,18 @@ impl WindowCapture {
             configured_state,
             no_buffer_log,
             raw_accounting,
+            region_owner,
         })
     }
 
     pub fn window_id(&self) -> u32 {
         self.window_id
+    }
+
+    fn release_region_owner(&self) {
+        if self.region_owner != 0 {
+            crate::region_window::release_captured_frame(self.window_id, self.region_owner);
+        }
     }
 
     pub fn stop(&self) -> Result<(), CaptureError> {
@@ -1845,6 +1907,7 @@ impl WindowCapture {
                 other => log_no_buffer_action(self.window_id, other),
             }
         }
+        self.release_region_owner();
         self.stream
             .stop_capture()
             .map_err(|e| CaptureError::ScreenCaptureKit(e.to_string()))
@@ -2373,16 +2436,15 @@ impl WindowCaptureConfig {
         // proves the new configuration is live by matching its output
         // dimensions (see the proof phase in the output handler). Same-size
         // moves accept the next delivered frame -- documented waiver.
-        *self.pending_region_generation.lock_unpoisoned() = Some(
-            PendingRegionConfigurationState {
-                configuration: crate::region_window::PendingRegionConfiguration {
-                    generation: source.generation.0,
-                    expected_width: width,
-                    expected_height: height,
-                },
-                started_at: reconfiguration_started,
+        *self.pending_region_generation.lock_unpoisoned() = Some(PendingRegionConfigurationState {
+            configuration: crate::region_window::PendingRegionConfiguration {
+                generation: source.generation.0,
+                expected_width: width,
+                expected_height: height,
             },
-        );
+            frame: source.frame,
+            started_at: reconfiguration_started,
+        });
         log::info!(
             "capture: window {} ROI generation {} applied display={} sourceRect=({:.1},{:.1},{:.1},{:.1}) output={}x{} display_changed={} native_reconfigure_ms={:.3}",
             self.window_id,
@@ -3327,6 +3389,72 @@ mod tests {
         let mut tracker = NoBufferStreakLog::default();
         assert!(tracker.on_image_buffer(1_000).is_empty());
         assert!(tracker.on_stop(2_000).is_empty());
+    }
+
+    #[test]
+    fn region_proof_records_the_area_the_capture_now_sends() {
+        let token = 4_000_000_201;
+        let shown = crate::region_window::RegionRect::new(100.0, 100.0, 640.0, 400.0);
+        let moved = crate::region_window::RegionRect::new(300.0, 220.0, 720.0, 450.0);
+        crate::region_window::register(crate::region_window::RegionWindowSource::new(
+            token,
+            1,
+            "Petal View: Proof #4000000201".to_string(),
+            moved,
+        ));
+        let owner = crate::region_window::begin_captured_frame_owner(token);
+        crate::region_window::record_captured_frame(token, owner, shown);
+        let pending = Mutex::new(Some(PendingRegionConfigurationState {
+            configuration: crate::region_window::PendingRegionConfiguration {
+                generation: 7,
+                expected_width: 1440,
+                expected_height: 900,
+            },
+            frame: moved,
+            started_at: std::time::Instant::now(),
+        }));
+        let generation = AtomicU64::new(0);
+
+        // A pending ROI is not the captured area until a frame proves it.
+        assert_eq!(
+            crate::region_window::resolve(token).and_then(|s| s.captured_frame),
+            Some(shown)
+        );
+        commit_region_proof(token, owner, &pending, &generation, 7);
+
+        assert_eq!(generation.load(Ordering::Acquire), 7);
+        assert!(pending.lock_unpoisoned().is_none());
+        assert_eq!(
+            crate::region_window::resolve(token).and_then(|s| s.captured_frame),
+            Some(moved)
+        );
+        // A later frame of the same generation has nothing pending to prove.
+        crate::region_window::record_captured_frame(token, owner, shown);
+        commit_region_proof(token, owner, &pending, &generation, 7);
+        assert_eq!(
+            crate::region_window::resolve(token).and_then(|s| s.captured_frame),
+            Some(shown)
+        );
+        // A capture that is no longer the selector's writer proves its ROI
+        // without moving the border.
+        let newer = crate::region_window::begin_captured_frame_owner(token);
+        crate::region_window::record_captured_frame(token, newer, shown);
+        *pending.lock_unpoisoned() = Some(PendingRegionConfigurationState {
+            configuration: crate::region_window::PendingRegionConfiguration {
+                generation: 8,
+                expected_width: 1440,
+                expected_height: 900,
+            },
+            frame: moved,
+            started_at: std::time::Instant::now(),
+        });
+        commit_region_proof(token, owner, &pending, &generation, 8);
+        assert_eq!(generation.load(Ordering::Acquire), 8);
+        assert_eq!(
+            crate::region_window::resolve(token).and_then(|s| s.captured_frame),
+            Some(shown)
+        );
+        crate::region_window::unregister(token);
     }
 
     #[test]
