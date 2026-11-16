@@ -2977,6 +2977,14 @@ async fn stop_share(
     // otherwise a final frame could contain the selector's own chrome.
     drop_share_capture(capture).await;
     crate::region_window::release_selector_capture_exclusion(selector_capture_exclusion);
+    // #586: after the capture drop, so the capture thread cannot re-raise it.
+    if kind == SharedSourceKind::DisplayRegion {
+        if let Some(payload) = crate::region_window::end_share_outside_display(token) {
+            if let Err(error) = tauri::Emitter::emit(app, "region-warning", payload) {
+                log::debug!("windows session: region warning clear failed for {token}: {error}");
+            }
+        }
+    }
     log::info!(
         "windows session: share {} capture dropped ({:?})",
         token,

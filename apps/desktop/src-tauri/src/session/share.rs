@@ -7781,7 +7781,33 @@ async fn stop_share_with_started_seq(
     )
     .await;
     reconcile_share_overlay_from_authority(app, state, window_id);
+    clear_region_warning_after_share_end(app, state, window_id);
     result
+}
+
+/// #586: once a region share ends, its pump can no longer lower the
+/// "Move Petal View back onto its display" banner, so every stop path clears
+/// it here. Skips a window whose newer share generation is still active.
+fn clear_region_warning_after_share_end(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    window_id: u32,
+) {
+    use tauri::Emitter;
+
+    let Some(payload) = ended_region_share_warning(state, window_id) else {
+        return;
+    };
+    if let Err(error) = app.emit("region-warning", payload) {
+        log::warn!("session: region warning clear failed for {window_id}: {error}");
+    }
+}
+
+fn ended_region_share_warning(state: &SessionState, window_id: u32) -> Option<serde_json::Value> {
+    if state.is_share_active(window_id) {
+        return None;
+    }
+    crate::region_window::end_share_outside_display(window_id)
 }
 
 pub(crate) fn reconcile_share_overlay_from_authority(
@@ -11562,6 +11588,73 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             .map(|(body, _)| body)
             .expect("inner teardown must precede wake restart");
         assert!(!inner.contains("reconcile_share_overlay_from_authority"));
+    }
+
+    #[test]
+    fn ended_region_share_clears_outside_display_and_hides_the_banner() {
+        // #586: a region share stopped while Petal View was off its display
+        // left the banner up. The ended share must lower it and clear the
+        // registry, through the same decision the stop wrapper emits from.
+        let token = 0x0586_0001;
+        crate::region_window::register(crate::region_window::RegionWindowSource::new(
+            token,
+            1,
+            "Petal View #5861".to_string(),
+            crate::region_window::RegionRect::new(0.0, 0.0, 100.0, 100.0),
+        ));
+        crate::region_window::set_outside_display(token, true);
+        let state = SessionState::default();
+        let payload = ended_region_share_warning(&state, token);
+        let outside_after = crate::region_window::resolve(token).map(|s| s.outside_display);
+        crate::region_window::unregister(token);
+        assert_eq!(
+            payload,
+            Some(serde_json::json!({
+                "windowId": token,
+                "selectorLabel": "region-window-5861",
+                "outsideDisplay": false,
+            }))
+        );
+        assert_eq!(outside_after, Some(false), "the next share must start from inside");
+        assert_eq!(
+            ended_region_share_warning(&state, token),
+            None,
+            "a non-region (unregistered) source emits nothing"
+        );
+    }
+
+    #[test]
+    fn every_stop_share_exit_clears_the_region_warning() {
+        // Source-level like #872's guard above: every stop path (user stop,
+        // capture failure, window gone, leave_room, wake restart, reconnect
+        // terminal) exits through this one wrapper, which needs an AppHandle.
+        let full = include_str!("share.rs");
+        let source = full
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map(|(prod, _)| prod)
+            .expect("share.rs must keep its test module in one #[cfg(test)] block");
+        let wrapper = source
+            .split_once("async fn stop_share_with_started_seq(")
+            .and_then(|(_, rest)| rest.split_once("async fn stop_share_with_started_seq_inner("))
+            .map(|(body, _)| body)
+            .expect("single-exit wrapper must directly precede the inner teardown");
+        let inner_call = wrapper
+            .find("let result = stop_share_with_started_seq_inner(")
+            .expect("wrapper must await the inner teardown into result");
+        let clear = wrapper
+            .find("\n    clear_region_warning_after_share_end(app, state, window_id);")
+            .expect("wrapper must clear the region warning unconditionally at function scope");
+        let final_result = wrapper
+            .find("\n    result\n")
+            .expect("wrapper must return the saved inner result");
+        assert!(inner_call < clear && clear < final_result);
+        assert!(!wrapper[inner_call..clear].contains('?'));
+        let emit = wrapper
+            .split_once("fn clear_region_warning_after_share_end(")
+            .map(|(_, body)| body)
+            .expect("clear helper follows the wrapper");
+        assert!(emit.contains("ended_region_share_warning(state, window_id)"));
+        assert!(emit.contains("app.emit(\"region-warning\", payload)"));
     }
 
     #[test]

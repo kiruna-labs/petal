@@ -1658,6 +1658,24 @@ pub(crate) fn set_outside_display(token: u32, outside: bool) -> Option<bool> {
     Some(outside)
 }
 
+/// A share of `token` ended: clear its outside-display state and return the
+/// `region-warning` payload that hides the banner. The pump that raised the
+/// warning is gone, so nothing else would ever lower it (#586). Always
+/// `outsideDisplay: false`; the frontend treats a repeat as a no-op.
+pub(crate) fn end_share_outside_display(token: u32) -> Option<serde_json::Value> {
+    let selector_label = {
+        let mut guard = registry().lock_unpoisoned();
+        let source = guard.sources.get_mut(&token)?;
+        source.outside_display = false;
+        selector_label_from_title(&source.title)
+    };
+    Some(serde_json::json!({
+        "windowId": token,
+        "selectorLabel": selector_label,
+        "outsideDisplay": false,
+    }))
+}
+
 pub(crate) fn unregister(token: u32) -> Option<RegionWindowSource> {
     registry().lock_unpoisoned().sources.remove(&token)
 }
