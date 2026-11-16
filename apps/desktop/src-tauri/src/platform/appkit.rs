@@ -148,6 +148,23 @@ pub fn window_number(window: &tauri::WebviewWindow) -> Result<u32, String> {
     u32::try_from(number).map_err(|_| format!("invalid NSWindow number {number}"))
 }
 
+/// One refresh of the screen `window` is on, in ms (#374 present estimate).
+/// `None` off-screen or when AppKit reports no rate. Main thread only.
+pub fn screen_refresh_interval_ms(window: &tauri::WebviewWindow) -> Option<f64> {
+    let ns_ptr = window.ns_window().ok()?;
+    // SAFETY: a live NSWindow, queried on the main thread (the compositor
+    // drain); `screen` may be nil and is checked before use.
+    let fps: isize = unsafe {
+        let ns = ns_ptr as *mut AnyObject;
+        let screen: *mut AnyObject = msg_send![ns, screen];
+        if screen.is_null() {
+            return None;
+        }
+        msg_send![screen, maximumFramesPerSecond]
+    };
+    (fps > 0).then(|| 1000.0 / fps as f64)
+}
+
 /// Whether an AppKit window is hidden or completely covered by other windows.
 /// `NSWindowOcclusionStateVisible` is bit 1. This is a read-only query; the
 /// caller is responsible for performing it on the main thread when required.

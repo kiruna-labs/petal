@@ -161,3 +161,38 @@ exposes. `transport/publisher.rs` reads it around each `capture_frame` call.
 ### Updating
 
 Keep while webrtc-sys Patch 8/9 are applied; drop together with them.
+
+## Stats report: real freeze/pause keys, no panicking parse (#374)
+
+### Why this exists
+
+`RTCStatsReport::ToJson()` names inbound-rtp attributes from libwebrtc's
+attribute table, which says `totalFreezesDuration` / `totalPausesDuration`
+(plural). `InboundRtpStreamStats` deserialized `totalFreezeDuration` /
+`totalPauseDuration` (camelCase of its field names), and `#[serde(default)]`
+hid the mismatch: both always read 0. Proof against the linked binary (the
+prebuilt `libwebrtc.a` that `webrtc-sys-build` downloads): its inbound-rtp
+attribute strings run `pauseCount`, `totalPausesDuration`, `freezeCount`,
+`totalFreezesDuration`, and neither singular spelling occurs anywhere in it.
+
+Separately, `PeerConnection`, `RtpReceiver` and `RtpSender::get_stats`
+`unwrap()`ed `serde_json::from_str` inside the C++ stats callback, so any
+unparseable report (for example a stats `type` a newer libwebrtc adds) aborted
+the process.
+
+### The fix
+
+- `#[serde(rename = "totalFreezesDuration")]` / `"totalPausesDuration"` on the
+  two fields (Rust field names unchanged).
+- `RtcStats::Unknown` (`#[serde(other)]`) swallows an unrecognised `type`.
+- `stats::parse_stats_report(&str) -> Result<Vec<RtcStats>, RtcError>`; the
+  three callbacks send its result instead of unwrapping.
+
+Desktop tests: `rc_receiver_timing.rs` parses a ToJson-shaped fixture through
+`parse_stats_report` (freeze duration non-zero, unknown type skipped,
+malformed report is an `Err`).
+
+### Updating
+
+Drop the renames once upstream fixes the keys; keep the non-panicking parse
+until upstream stops unwrapping in the callback.
