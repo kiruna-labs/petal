@@ -1658,6 +1658,24 @@ pub(crate) fn set_outside_display(token: u32, outside: bool) -> Option<bool> {
     Some(outside)
 }
 
+/// A share of `token` ended: clear its outside-display state and return the
+/// `region-warning` payload that hides the banner. The pump that raised the
+/// warning is gone, so nothing else would ever lower it (#586). Always
+/// `outsideDisplay: false`; the frontend treats a repeat as a no-op.
+pub(crate) fn end_share_outside_display(token: u32) -> Option<serde_json::Value> {
+    let selector_label = {
+        let mut guard = registry().lock_unpoisoned();
+        let source = guard.sources.get_mut(&token)?;
+        source.outside_display = false;
+        selector_label_from_title(&source.title)
+    };
+    Some(serde_json::json!({
+        "windowId": token,
+        "selectorLabel": selector_label,
+        "outsideDisplay": false,
+    }))
+}
+
 pub(crate) fn unregister(token: u32) -> Option<RegionWindowSource> {
     registry().lock_unpoisoned().sources.remove(&token)
 }
@@ -1665,6 +1683,39 @@ pub(crate) fn unregister(token: u32) -> Option<RegionWindowSource> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_share_stop_clears_the_region_warning_after_the_capture_drop() {
+        // #586: Windows stop_share is compiled only on Windows, so pin its
+        // wiring from source here, where the macOS gate runs it too. After
+        // the capture drop, or the capture thread can re-raise the flag.
+        let source = include_str!("session_stub.rs");
+        let stop = source
+            .split_once("\nasync fn stop_share(")
+            .and_then(|(_, rest)| rest.split_once("\npub(crate) async fn stop_share_token("))
+            .map(|(body, _)| body)
+            .expect("Windows stop_share must precede stop_share_token");
+        let drop = stop
+            .find("drop_share_capture(capture).await;")
+            .expect("Windows stop_share drops the capture");
+        let clear = stop
+            .find("clear_region_warning(app, token);")
+            .expect("Windows stop_share must clear the region warning");
+        assert!(drop < clear);
+        let lost_commit = source
+            .split_once("share start lost the room commit race")
+            .map(|(before, _)| before.rsplit_once("drop_share_capture(capture).await;"))
+            .flatten()
+            .map(|(_, after)| after)
+            .expect("Windows lost-commit cleanup drops the capture");
+        assert!(lost_commit.contains("clear_region_warning(&app, token);"));
+        let helper = source
+            .split_once("fn clear_region_warning(")
+            .map(|(_, body)| body)
+            .expect("Windows clear helper");
+        assert!(helper.contains("crate::region_window::end_share_outside_display(token)"));
+        assert!(helper.contains("\"region-warning\", payload"));
+    }
 
     #[test]
     fn outside_display_classification_needs_a_latched_display_and_containment() {
