@@ -527,7 +527,11 @@ impl EncoderRecoveryOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Event {
-    MeetingJoined,
+    /// #372: `lk_region` is the SFU edge's coarse region token, never the
+    /// user's location; `None` (omitted) when no room info was read.
+    MeetingJoined {
+        lk_region: Option<String>,
+    },
     MeetingLeft {
         duration_bucket: DurationBucket,
         reconnect_count_bucket: ReconnectCountBucket,
@@ -592,7 +596,7 @@ enum Event {
 impl Event {
     fn name(&self) -> &'static str {
         match self {
-            Self::MeetingJoined => "meeting_joined",
+            Self::MeetingJoined { .. } => "meeting_joined",
             Self::MeetingLeft { .. } => "meeting_left",
             Self::JoinFailed { .. } => "join_failed",
             Self::ShareStarted { .. } => "share_started",
@@ -613,7 +617,7 @@ impl Event {
     fn extras(&self) -> BTreeMap<&'static str, &'static str> {
         let mut extras = BTreeMap::new();
         match self {
-            Self::MeetingJoined => {}
+            Self::MeetingJoined { .. } => {}
             Self::MeetingLeft {
                 duration_bucket,
                 reconnect_count_bucket,
@@ -682,6 +686,9 @@ impl Event {
     fn typed_properties(&self) -> Vec<(String, serde_json::Value)> {
         match self {
             Self::RemoteControlLatencySummary(summary) => summary.properties(),
+            Self::MeetingJoined {
+                lk_region: Some(region),
+            } => vec![("lk_region".to_string(), region.clone().into())],
             _ => Vec::new(),
         }
     }
@@ -1389,7 +1396,9 @@ pub(crate) fn meeting_joined() {
         joined_at: Instant::now(),
         reconnects: 0,
     });
-    capture(Event::MeetingJoined);
+    capture(Event::MeetingJoined {
+        lk_region: crate::sfu_edge::local_lk_region(),
+    });
 }
 
 pub(crate) fn meeting_left() {
@@ -1677,7 +1686,7 @@ mod tests {
     #[test]
     fn allowlist_event_names_are_closed() {
         let names: Vec<_> = [
-            Event::MeetingJoined,
+            Event::MeetingJoined { lk_region: None },
             Event::MeetingLeft {
                 duration_bucket: DurationBucket::ZeroToTen,
                 reconnect_count_bucket: ReconnectCountBucket::Zero,
@@ -1813,7 +1822,7 @@ mod tests {
     #[test]
     fn payloads_only_carry_allowlisted_property_keys() {
         let events = [
-            Event::MeetingJoined,
+            Event::MeetingJoined { lk_region: None },
             Event::MeetingLeft {
                 duration_bucket: DurationBucket::TenToThirty,
                 reconnect_count_bucket: ReconnectCountBucket::TwoToFour,
@@ -2434,14 +2443,30 @@ mod tests {
         assert_eq!(take_dropped_since_last(), 0);
     }
 
+    /// #372: `meeting_joined` carries the edge region only when it was read.
+    #[test]
+    fn meeting_joined_carries_lk_region_only_when_known() {
+        let body = build_body(
+            &Event::MeetingJoined {
+                lk_region: Some("us-east-1".to_string()),
+            },
+            "id",
+            0,
+        );
+        assert_eq!(body["event"], json!("meeting_joined"));
+        assert_eq!(body["properties"]["lk_region"], json!("us-east-1"));
+        let bare = build_body(&Event::MeetingJoined { lk_region: None }, "id", 0);
+        assert!(bare["properties"].get("lk_region").is_none());
+    }
+
     #[test]
     fn dropped_since_last_property_appears_only_when_positive() {
-        let clean = build_body(&Event::MeetingJoined, "id", 0);
+        let clean = build_body(&Event::MeetingJoined { lk_region: None }, "id", 0);
         assert!(
             clean["properties"].get("dropped_since_last").is_none(),
             "must not add a zero-value property to every event"
         );
-        let dirty = build_body(&Event::MeetingJoined, "id", 7);
+        let dirty = build_body(&Event::MeetingJoined { lk_region: None }, "id", 7);
         assert_eq!(dirty["properties"]["dropped_since_last"], json!(7));
     }
 
@@ -2905,7 +2930,7 @@ mod tests {
         assert_eq!(carried, 9);
         assert_eq!(DROPPED.load(Ordering::Relaxed), 0);
 
-        let body = build_body(&Event::MeetingJoined, "id", carried);
+        let body = build_body(&Event::MeetingJoined { lk_region: None }, "id", carried);
         assert_eq!(body["properties"]["dropped_since_last"], json!(9));
 
         // Simulate the worker's failure path: a server that always fails,

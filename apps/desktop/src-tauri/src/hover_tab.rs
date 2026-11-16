@@ -494,7 +494,10 @@ pub(crate) async fn toggle_share_for_window_with_color(
     log::info!(
         "hover_tab: toggle_share_for_window(window {window_id}) done -- backend shared={actual_shared}"
     );
-    crate::region_window::emit_region_share_state(app, window_id, actual_shared);
+    // Every surface that shows share state hears it, not only the region window: a share
+    // toggled by another path (the global shortcut) while the hover tab already shows that
+    // window left the tab's menu greyed out until the pointer left the window.
+    emit_share_state_changed(app, window_id, actual_shared);
     actual_shared
 }
 
@@ -3850,6 +3853,32 @@ mod tests {
 
         assert_eq!(border_to_hide, Some(7));
         assert!(!state.borders.contains_key(&42));
+    }
+
+    #[test]
+    fn every_share_toggle_announces_share_state_changed() {
+        // The global shortcut, picker and region window all toggle through
+        // `toggle_share_for_window_with_color`. Announcing the result only to
+        // the region window left an already-shown hover tab (and the meeting
+        // page / window picker, which listen for `share-state-changed`) stale
+        // until the pointer left the window and came back.
+        let source = include_str!("hover_tab.rs");
+        let start = source
+            .find("pub(crate) async fn toggle_share_for_window_with_color(")
+            .expect("toggle_share_for_window_with_color exists");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("function end")];
+        let tail = &body[body
+            .rfind("let actual_shared = state.is_share_active(window_id);")
+            .expect("final backend share-state read")..];
+        assert!(
+            tail.contains("emit_share_state_changed(app, window_id, actual_shared);"),
+            "the final share state must be emitted as share-state-changed"
+        );
+        assert!(
+            !tail.contains("emit_region_share_state("),
+            "emit_share_state_changed already updates the region window"
+        );
     }
 
     #[test]

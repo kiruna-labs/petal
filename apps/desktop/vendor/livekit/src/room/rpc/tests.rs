@@ -812,3 +812,24 @@ async fn perform_rpc_survives_an_empty_or_unparseable_server_version() {
         }
     }
 }
+
+/// Petal patch (#372): `Room::server_info` maps the join response's region
+/// and node id, and a server that sent none reads as `None`.
+#[test]
+fn server_info_summary_maps_join_response_server_info() {
+    use crate::room::ServerInfoSummary;
+    assert_eq!(ServerInfoSummary::from_proto(None), None);
+    let info = proto::ServerInfo {
+        edition: proto::server_info::Edition::Cloud as i32,
+        version: "1.9.1".into(),
+        region: "us-east-1".into(),
+        node_id: "ND_abc123".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        ServerInfoSummary::from_proto(Some(info)),
+        Some(ServerInfoSummary { region: "us-east-1".into(), node_id: "ND_abc123".into() })
+    );
+    let empty = ServerInfoSummary::from_proto(Some(proto::ServerInfo::default())).unwrap();
+    assert!(empty.region.is_empty() && empty.node_id.is_empty());
+}

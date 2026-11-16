@@ -3,7 +3,8 @@
 //! Stage/dimension keys, histogram vectors and the summary log line are
 //! pinned by `contracts/petal-contracts.json` (`latencyHistogramVectors`,
 //! `remoteControlLatencySummary`). What lands with its first producer, not
-//! here: the TS mirror (#375), the Sentry degraded diagnostic (#371/#376).
+//! here: the Sentry degraded diagnostic (#371/#376). The TS mirror is
+//! `shared/logic/rcLatencyAggregator.ts` (#375); the web controller feeds it.
 //!
 //! Producers call only [`record_stage`], [`record_stage_with_max`], [`add_counter`] and
 //! [`set_dimension`]. The owner
@@ -153,7 +154,7 @@ impl LatencyHistogram {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RcRole {
     Host,
-    /// #371: the controlling side; today only `input_rtt_ms`.
+    /// #371: the controlling side (`input_rtt_ms`, #374 receive path).
     Controller,
 }
 
@@ -196,11 +197,13 @@ closed_keys!(Stage {
     PubRttMs => "pub_rtt_ms",
     SubRttMs => "sub_rtt_ms",
     VideoNetMs => "video_net_ms",
+    CaptureToReceiveMs => "capture_to_receive_ms",
     JbDelayMs => "jb_delay_ms",
     JbTargetMs => "jb_target_ms",
     DecodeMs => "decode_ms",
     ProcessingMs => "processing_ms",
     ReceiveToPresentMs => "receive_to_present_ms",
+    CaptureToPresentMs => "capture_to_present_ms",
     PhotonMs => "photon_ms",
 });
 
@@ -212,19 +215,30 @@ closed_keys!(Dimension {
     IceProtocol => "ice_protocol",
     WindowCodec => "window_codec",
     ContentChange => "content_change",
+    JbMinMs => "jb_min_ms",
+    FrameMetadata => "frame_metadata",
+    PresentTiming => "present_timing",
 });
 
-const DIMENSION_COUNT: usize = 7;
+const DIMENSION_COUNT: usize = 10;
 
-// Sum-per-interval counters. A zero counter is never emitted.
+// Sum-per-interval counters. A zero counter is never emitted. The receive
+// counters (frames_dropped ..) come from the web (#375) and native (#374)
+// controllers.
 closed_keys!(Counter {
     InputStallCount => "input_stall_count",
+    FramesDropped => "frames_dropped",
+    FreezeCount => "freeze_count",
+    NackCount => "nack_count",
+    PliCount => "pli_count",
+    FreezeDurationMs => "freeze_duration_ms",
 });
 
 // Max-per-interval values that qualify the stage samples recorded with them.
 // Emitted whenever set, 0 included, but never make an interval emit alone.
 closed_keys!(MaxCounter {
     OffsetErrMs => "offset_err_ms",
+    PacketsLostPctX100 => "packets_lost_pct_x100",
 });
 
 impl Dimension {
@@ -237,6 +251,11 @@ impl Dimension {
             Self::IceProtocol => Some(&["udp", "tcp", "unknown"]),
             Self::WindowCodec => Some(&["h264", "h265", "vp8", "vp9", "av1", "unknown"]),
             Self::ContentChange => Some(&["detected", "unknown"]),
+            Self::FrameMetadata => Some(&["available", "unavailable"]),
+            // #374: native `receive_to_present_ms` is enqueue/Present plus one
+            // refresh; no present callback exists to measure it.
+            Self::PresentTiming => Some(&["estimated"]),
+            Self::JbMinMs => Some(&["0", "1_19", "20_49", "50_99", "100_199", "200_plus"]),
         }
     }
 
@@ -456,6 +475,15 @@ impl Aggregator {
         });
     }
 
+    /// Raise a max counter for this interval with no stage sample (#374: the
+    /// 1 s packet-loss value). Never makes an interval emit on its own.
+    pub(crate) fn note_max(&self, counter: MaxCounter, value: u64) {
+        self.with_session_nonblocking(|session| {
+            let slot = &mut session.max_counters[counter.index()];
+            *slot = Some(slot.map_or(value, |current| current.max(value)));
+        });
+    }
+
     /// False for a value outside the dimension's closed set (old value kept)
     /// or when no session is active.
     pub(crate) fn set_dimension(&self, dimension: Dimension, value: &str) -> bool {
@@ -464,10 +492,22 @@ impl Aggregator {
         }
         let mut set = false;
         self.with_session_nonblocking(|session| {
-            session.dimensions[dimension.index()] = Some(value.to_string());
+            // #374: set per presented frame, so an unchanged value never allocates.
+            let slot = &mut session.dimensions[dimension.index()];
+            if slot.as_deref() != Some(value) {
+                *slot = Some(value.to_string());
+            }
             set = true;
         });
         set
+    }
+
+    /// Remove a dimension that no longer has data (#372: a reconnect whose
+    /// server sent no info must not keep the old edge's region).
+    pub(crate) fn clear_dimension(&self, dimension: Dimension) {
+        self.with_session_nonblocking(|session| {
+            session.dimensions[dimension.index()] = None;
+        });
     }
 
     /// Reconcile with the current control state. Returns the summary that
@@ -506,7 +546,7 @@ impl Aggregator {
 static HOST: Aggregator = Aggregator::new(RcRole::Host);
 static CONTROLLER: Aggregator = Aggregator::new(RcRole::Controller);
 
-fn aggregator(role: RcRole) -> &'static Aggregator {
+pub(crate) fn aggregator(role: RcRole) -> &'static Aggregator {
     match role {
         RcRole::Host => &HOST,
         RcRole::Controller => &CONTROLLER,
@@ -535,6 +575,11 @@ pub(crate) fn set_dimension(role: RcRole, dimension: Dimension, value: &str) -> 
     aggregator(role).set_dimension(dimension, value)
 }
 
+/// Remove a dimension from `role`'s active session (missing data is omitted).
+pub(crate) fn clear_dimension(role: RcRole, dimension: Dimension) {
+    aggregator(role).clear_dimension(dimension);
+}
+
 /// Reconcile `role` with whether control is active right now, and emit any
 /// interval that became due. Called from the remote-control sweeper tick.
 pub(crate) fn sync(role: RcRole, active: bool) {
@@ -551,6 +596,13 @@ pub(crate) fn take_host_interval_for_test() -> Option<Summary> {
     // starting in the future and hold back every later forced take.
     let mut guard = HOST.session.lock().unwrap_or_else(|p| p.into_inner());
     guard.as_mut()?.take_interval(RcRole::Host, Instant::now(), false)
+}
+
+/// Test hook: force `role`'s current interval out now.
+#[cfg(test)]
+pub(crate) fn take_interval_for_test(role: RcRole) -> Option<Summary> {
+    let mut guard = aggregator(role).session.lock().unwrap_or_else(|p| p.into_inner());
+    guard.as_mut()?.take_interval(role, Instant::now(), false)
 }
 
 #[cfg(test)]
@@ -595,6 +647,7 @@ mod tests {
         max_events_per_session: u32,
         log_prefix: String,
         example: Example,
+        controller_example: Example,
     }
 
     #[derive(Deserialize)]
@@ -616,6 +669,8 @@ mod tests {
         stages: serde_json::Map<String, serde_json::Value>,
         #[serde(default)]
         counters: serde_json::Map<String, serde_json::Value>,
+        #[serde(default)]
+        max_counters: serde_json::Map<String, serde_json::Value>,
         dimensions: serde_json::Map<String, serde_json::Value>,
     }
 
@@ -717,11 +772,9 @@ mod tests {
         assert_eq!(contract.log_prefix, LOG_PREFIX);
     }
 
-    #[test]
-    fn example_summary_renders_the_contract_properties_and_log_line() {
-        let example = fixture().summary.example;
+    fn render_example(example: Example, role: RcRole) {
         let input = example.summary;
-        assert_eq!(input.role, RcRole::Host.key());
+        assert_eq!(input.role, role.key());
         let stats = |value: &serde_json::Value| HistogramStats {
             p50: value["p50"].as_u64().unwrap() as u32,
             p95: value["p95"].as_u64().unwrap() as u32,
@@ -729,11 +782,11 @@ mod tests {
             n: value["n"].as_u64().unwrap() as u32,
         };
         let summary = Summary {
-            role: RcRole::Host,
+            role,
             rc_session_id: input.rc_session_id,
             interval_s: input.interval_s,
             is_final: input.is_final,
-            // Summaries hold stages in schema order (serde_json's Map is sorted).
+            // Summaries hold keys in schema order (serde_json's Map is sorted).
             stages: Stage::ALL
                 .iter()
                 .filter_map(|stage| Some((*stage, stats(input.stages.get(stage.key())?))))
@@ -742,7 +795,10 @@ mod tests {
                 .iter()
                 .filter_map(|c| Some((*c, input.counters.get(c.key())?.as_u64()?)))
                 .collect(),
-            max_counters: vec![],
+            max_counters: MaxCounter::ALL
+                .iter()
+                .filter_map(|c| Some((*c, input.max_counters.get(c.key())?.as_u64()?)))
+                .collect(),
             dimensions: Dimension::ALL
                 .iter()
                 .filter_map(|d| {
@@ -755,6 +811,14 @@ mod tests {
         assert_eq!(properties, example.properties);
         // The log line pins key order as well as values.
         assert_eq!(summary.log_line(), example.log_line);
+    }
+
+    #[test]
+    fn example_summary_renders_the_contract_properties_and_log_line() {
+        let contract = fixture().summary;
+        render_example(contract.example, RcRole::Host);
+        // #375: the web controller's keys render identically on both sides.
+        render_example(contract.controller_example, RcRole::Controller);
         let empty = summary_with(vec![(Stage::PhotonMs, HistogramStats { p50: 0, p95: 0, max: 0, n: 0 })]);
         assert!(!empty.log_line().contains("photon_ms"), "an n = 0 stage is never rendered");
     }

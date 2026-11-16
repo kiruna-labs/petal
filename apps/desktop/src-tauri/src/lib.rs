@@ -113,7 +113,8 @@ mod hover_core;
 // on Windows (`std::os::unix` doesn't exist there).
 #[cfg(target_os = "macos")]
 mod instance_lock;
-#[cfg(target_os = "macos")]
+// Data-channel RTT probe: cockpit RTT plus the #371 host->controller and
+// #374 controller->host clock offsets. Both platform session joins start it.
 mod latency_probe;
 mod launch_location;
 // Shadow gutter + gutter click-through for transparent card panels (#406).
@@ -135,6 +136,9 @@ mod control_consent;
 mod analytics;
 mod rc_input_timing;
 mod rc_latency_telemetry;
+// #374: native controller receive-path stage timing (subscriber + compositor).
+mod rc_receiver_timing;
+mod sfu_edge;
 pub mod logging;
 mod main_window;
 mod meeting_core;
