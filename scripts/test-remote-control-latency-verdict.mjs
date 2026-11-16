@@ -682,6 +682,19 @@ test('attribution loss row: missing controller lines are insufficient; below 2% 
   assert.equal(attributionVerdict({ clean: LOSS_CLEAN, impaired, delayMs: 20, lossPct: 'two' }).ok, false);
 });
 
+test('attribution loss row: a loss-only impairment (0ms delay) asserts the loss row alone', () => {
+  const lossy = passJson({ controller: [controllerLine({ nacks: 37 })] });
+  const green = attributionVerdict({ clean: LOSS_CLEAN, impaired: lossy, delayMs: 0, lossPct: 2 });
+  assert.equal(green.ok, true, green.errors.join('\n'));
+  assert.equal(green.rows.length, 0);
+  assert.ok(green.notes.some((n) => /delay rows: not asserted/.test(n)));
+  const red = attributionVerdict({ clean: LOSS_CLEAN, impaired: LOSS_CLEAN, delayMs: 0, lossPct: 2 });
+  assert.equal(red.ok, false);
+  assert.ok(red.errors.some((e) => /controller nack_count \(must-increase\): FAIL/.test(e)));
+  // 0ms without a loss % is still a bad call, never a vacuous pass.
+  assert.equal(attributionVerdict({ clean: LOSS_CLEAN, impaired: lossy, delayMs: 0 }).ok, false);
+});
+
 const REPLAY_BASELINE = passJson({ host: [hostLine({ leg: 4 })], controller: [controllerLine({ present: 48 })] });
 const REPLAY_RED_P50S = { sendToReceive: 3, hostReceiveToInject: 152, pressToPhoton: 337 };
 
@@ -711,6 +724,7 @@ test('attribution replay row: replay delay showing up on the network, capture or
     [{ host: [hostLine({ inject: 151, complete: 160, excess: 150, leg: 5 })], controller, p50s: REPLAY_RED_P50S }, 'host input_excess_delay_ms'],
     [{ host: [hostLine({ inject: 151, complete: 160, leg: 150 })], controller, p50s: REPLAY_RED_P50S }, 'host input_leg_ms'],
     [{ host, controller: [controllerLine({ subRtt: 150, present: 50 })], p50s: REPLAY_RED_P50S }, 'controller sub_rtt_ms'],
+    [{ host, controller: [controllerLine({ pubRtt: 150, present: 50 })], p50s: REPLAY_RED_P50S }, 'controller pub_rtt_ms'],
     [{ host, controller: [controllerLine({ present: 200 })], p50s: REPLAY_RED_P50S }, 'controller capture_to_present_ms'],
   ];
   for (const [red, name] of leaks) {
@@ -759,4 +773,5 @@ test('e2e-gate-verdict.mjs attribution-replay and --loss-pct exit 0 on a correct
 test('the workflow hands the impaired loss % to the attribution verdict', () => {
   const workflow = readFileSync(path.join(repoRoot, '.github/workflows/nightly-loopback.yml'), 'utf8');
   assert.match(workflow, /node "\$VERDICT" attribution [^\n]*\n[^\n]*--delay-ms "\$NET_DELAY_MS" --loss-pct "\$NET_LOSS_PCT"/);
+  assert.match(workflow, /if \[ "\$NET_DELAY_MS" -gt 0 \] \|\| awk -v l="\$NET_LOSS_PCT"/, 'a loss-only red-proof still runs attribution');
 });

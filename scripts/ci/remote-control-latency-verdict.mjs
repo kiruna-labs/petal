@@ -541,14 +541,21 @@ export function attributionVerdict({ clean, impaired, delayMs, lossPct }) {
   const errors = [];
   const notes = [];
   const delay = Number(delayMs);
-  if (!Number.isFinite(delay) || delay <= 0) {
-    errors.push(`attribution: impairment delay must be a positive number of ms, got ${JSON.stringify(delayMs)}`);
+  const hasLoss = lossPct !== undefined && lossPct !== null && `${lossPct}`.trim() !== '';
+  // A loss-only red-proof (net_delay_ms=0) asserts the loss row alone.
+  if (!Number.isFinite(delay) || delay < 0 || (delay === 0 && !hasLoss) || `${delayMs ?? ''}`.trim() === '') {
+    errors.push(`attribution: impairment delay must be a positive number of ms (0 only with --loss-pct), got ${JSON.stringify(delayMs)}`);
     return { ok: false, errors, warnings: [], notes, rows: [] };
   }
-  const rows = ATTRIBUTION_ROWS.map((row) => evaluateAttributionRow(row, rowValue(clean, row), rowValue(impaired, row), row.traversals * delay));
-  pushRows(rows, '', notes, errors);
+  let rows = [];
+  if (delay > 0) {
+    rows = ATTRIBUTION_ROWS.map((row) => evaluateAttributionRow(row, rowValue(clean, row), rowValue(impaired, row), row.traversals * delay));
+    pushRows(rows, '', notes, errors);
+  } else {
+    notes.push('attribution delay rows: not asserted (loss-only impairment, 0ms delay)');
+  }
   let lossRows = [];
-  if (lossPct !== undefined && lossPct !== null && `${lossPct}`.trim() !== '') {
+  if (hasLoss) {
     const loss = Number(lossPct);
     if (!Number.isFinite(loss) || loss < 0) {
       errors.push(`attribution: impairment loss must be a non-negative number of %, got ${JSON.stringify(lossPct)}`);
