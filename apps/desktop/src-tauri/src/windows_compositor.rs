@@ -1441,7 +1441,8 @@ pub(crate) fn remote_control_target_metadata(
 }
 
 /// Start a native window drag from the header strip. The surface route's
-/// header mousedown calls this (macOS: same `start_dragging`).
+/// header mousedown calls this. macOS starts its drag through
+/// `window_drag::drag_window_on_main` instead (#585).
 #[tauri::command]
 pub fn compositor_start_drag(
     app: tauri::AppHandle,

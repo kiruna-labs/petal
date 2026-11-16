@@ -92,8 +92,14 @@ test('compositor_start_drag restores-then-drags in one main-thread hop instead o
   );
   assert.match(
     body,
+    /crate::window_drag::drag_window_on_main\(window\)/,
+    'the drag must actually start inside that closure, through the macOS ' +
+      'mouse-down drag start (#585), not tao start_dragging'
+  );
+  assert.doesNotMatch(
+    body,
     /window\.start_dragging\(\)/,
-    'the drag must actually start inside that closure'
+    'tao start_dragging drags from a stale NSApp.currentEvent on macOS and jumps the window (#585)'
   );
   // The old racy shape must be gone, not just supplemented. Matched against
   // whitespace-collapsed source: the single-line form of this regex silently

@@ -6,6 +6,7 @@ import test from 'node:test';
 import { COMMANDS } from '../src/lib/ipc.ts';
 import {
   installWindowDragWorkaround,
+  startCurrentWindowDrag,
   isDragRegion,
   type DragMouseDown,
   type DragRegionElement,
@@ -150,4 +151,25 @@ test('the command is registered on both invoke handlers and installed from the r
   assert.ok(mountStart > -1 && cleanupStart > mountStart && cleanupEnd > cleanupStart);
   assert.match(layout.slice(mountStart, cleanupStart), /const uninstallWindowDrag\s*=\s*installWindowDragWorkaround\(\)/);
   assert.match(layout.slice(cleanupStart, cleanupEnd), /uninstallWindowDrag\(\)/);
+});
+
+test('a programmatic drag uses start_window_drag on macOS and startDragging elsewhere (#585)', async () => {
+  const calls: string[] = [];
+  const deps = {
+    startWindowDrag: async () => void calls.push('start_window_drag'),
+    startDragging: async () => void calls.push('startDragging')
+  };
+  await startCurrentWindowDrag({ ...deps, platform: 'macos' });
+  await startCurrentWindowDrag({ ...deps, platform: 'windows' });
+  await startCurrentWindowDrag({ ...deps, platform: 'other' });
+  assert.deepEqual(calls, ['start_window_drag', 'startDragging', 'startDragging']);
+});
+
+test('the meeting pill drag goes through startCurrentWindowDrag, wired from the meeting page (#585)', () => {
+  const pill = readFileSync(new URL('../src/lib/meeting/pillWindow.svelte.ts', import.meta.url), 'utf8');
+  const body = pill.slice(pill.indexOf('function handlePillDrag()'), pill.indexOf('function handlePillResize('));
+  assert.match(body, /startCurrentWindowDrag\(\)/);
+  assert.doesNotMatch(body, /startDragging\(\)/, 'tao startDragging jumps the pill on macOS');
+  const page = readFileSync(new URL('../src/routes/meeting/[room]/+page.svelte', import.meta.url), 'utf8');
+  assert.match(page, /onDrag: pill\.handlePillDrag/);
 });

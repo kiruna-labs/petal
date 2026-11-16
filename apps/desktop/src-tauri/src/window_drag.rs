@@ -107,11 +107,25 @@ pub fn start_window_drag(window: tauri::WebviewWindow) -> Result<(), String> {
         let target = window.clone();
         window
             .run_on_main_thread(move || {
-                if let Err(e) = macos::drag_from_mouse_down(&target) {
+                if let Err(e) = drag_window_on_main(&target) {
                     log::warn!("window_drag: drag for {} failed: {e}", target.label());
                 }
             })
             .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        drag_window_on_main(&window)
+    }
+}
+
+/// PETAL-WORKAROUND(tao-drag-window): the drag start for callers already on
+/// the main thread, such as the remote-window header (`compositor_start_drag`,
+/// #585). macOS must be on the main thread; elsewhere this is `start_dragging`.
+pub(crate) fn drag_window_on_main(window: &tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::drag_from_mouse_down(window)
     }
     #[cfg(not(target_os = "macos"))]
     {

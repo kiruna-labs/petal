@@ -6122,8 +6122,11 @@ pub fn compositor_start_drag(app: AppHandle, window_id: u32, owner_identity: Opt
         window_id,
         owner_identity.as_deref(),
         move |_app, window| {
-            if let Err(e) = window.start_dragging() {
-                log::warn!("compositor: start_dragging failed for window {window_id}: {e}");
+            // PETAL-WORKAROUND(tao-drag-window): tao's start_dragging drags from a
+            // stale NSApp.currentEvent and can jump the window's corner to the
+            // pointer (#585). This closure is already on the main thread.
+            if let Err(e) = crate::window_drag::drag_window_on_main(window) {
+                log::warn!("compositor: drag failed for window {window_id}: {e}");
             }
         },
     );
