@@ -1220,6 +1220,7 @@ async function joinWebHarness(cdp, pageUrl, credential, livekitRoom) {
       return true;
     })()`
   );
+  bankedControllerSummaryLines.push(...(await readControllerSummaryLines(cdp)));
   await cdp.call('Page.navigate', { url: joinUrl });
   await waitUntil(
     // The DOM alone is not readiness: on a cold vite start the harness module
@@ -1633,10 +1634,11 @@ async function collectControllerPublishes(ctx, caseId) {
 
 // #378: the web controller's `remote-control-latency-summary:` lines (#375
 // receive stages, nack_count) from the harness session log, for the
-// attribution verdict. Waits one reconcile tick so a final partial lands.
-// Best-effort: the verdict scores missing lines insufficient, never a pass.
-async function collectControllerLatencySummaries(cdp) {
-  await sleep(1500);
+// attribution verdict. The log dies with the page, so joinWebHarness banks
+// it before every navigation (a rejoin reloads). Best-effort: the verdict
+// scores missing lines insufficient, never a pass.
+const bankedControllerSummaryLines = [];
+async function readControllerSummaryLines(cdp) {
   try {
     const lines = await evaluate(
       cdp,
@@ -1646,6 +1648,12 @@ async function collectControllerLatencySummaries(cdp) {
   } catch {
     return [];
   }
+}
+
+// Waits one reconcile tick first so a final partial lands.
+async function collectControllerLatencySummaries(cdp) {
+  await sleep(1500);
+  return [...bankedControllerSummaryLines, ...(await readControllerSummaryLines(cdp))];
 }
 
 async function published(ctx, predicateSource, timeoutMs = acquisitionTimeoutMs) {

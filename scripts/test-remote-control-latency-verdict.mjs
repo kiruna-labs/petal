@@ -18,6 +18,7 @@ import {
   ATTRIBUTION_ROWS,
   LATENCY_CHECKS,
   LOSS_ATTRIBUTION_ROWS,
+  LOSS_ROW_MIN_PCT,
   REPLAY_ATTRIBUTION_ROWS,
   SUMMARY_COUNTERS,
   attributionVerdict,
@@ -693,6 +694,7 @@ test('attribution loss row: a loss-only impairment (0ms delay) asserts the loss 
   assert.ok(red.errors.some((e) => /controller nack_count \(must-increase\): FAIL/.test(e)));
   // 0ms without a loss % is still a bad call, never a vacuous pass.
   assert.equal(attributionVerdict({ clean: LOSS_CLEAN, impaired: lossy, delayMs: 0 }).ok, false);
+  assert.equal(attributionVerdict({ clean: LOSS_CLEAN, impaired: lossy, delayMs: 0, lossPct: 1 }).ok, false, '0ms at 1% asserts nothing');
 });
 
 const REPLAY_BASELINE = passJson({ host: [hostLine({ leg: 4 })], controller: [controllerLine({ present: 48 })] });
@@ -773,5 +775,6 @@ test('e2e-gate-verdict.mjs attribution-replay and --loss-pct exit 0 on a correct
 test('the workflow hands the impaired loss % to the attribution verdict', () => {
   const workflow = readFileSync(path.join(repoRoot, '.github/workflows/nightly-loopback.yml'), 'utf8');
   assert.match(workflow, /node "\$VERDICT" attribution [^\n]*\n[^\n]*--delay-ms "\$NET_DELAY_MS" --loss-pct "\$NET_LOSS_PCT"/);
-  assert.match(workflow, /if \[ "\$NET_DELAY_MS" -gt 0 \] \|\| awk -v l="\$NET_LOSS_PCT"/, 'a loss-only red-proof still runs attribution');
+  assert.match(workflow, /if \[ "\$NET_DELAY_MS" -gt 0 \] \|\| awk -v l="\$NET_LOSS_PCT" 'BEGIN \{ exit !\(l \+ 0 >= 2\) \}'/, 'a loss-only red-proof (>= LOSS_ROW_MIN_PCT) still runs attribution');
+  assert.equal(LOSS_ROW_MIN_PCT, 2, 'the workflow gate above hard-codes 2');
 });

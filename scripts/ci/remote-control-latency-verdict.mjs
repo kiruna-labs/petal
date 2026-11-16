@@ -543,8 +543,9 @@ export function attributionVerdict({ clean, impaired, delayMs, lossPct }) {
   const delay = Number(delayMs);
   const hasLoss = lossPct !== undefined && lossPct !== null && `${lossPct}`.trim() !== '';
   // A loss-only red-proof (net_delay_ms=0) asserts the loss row alone.
-  if (!Number.isFinite(delay) || delay < 0 || (delay === 0 && !hasLoss) || `${delayMs ?? ''}`.trim() === '') {
-    errors.push(`attribution: impairment delay must be a positive number of ms (0 only with --loss-pct), got ${JSON.stringify(delayMs)}`);
+  const lossOnly = hasLoss && Number(lossPct) >= LOSS_ROW_MIN_PCT;
+  if (!Number.isFinite(delay) || delay < 0 || (delay === 0 && !lossOnly) || `${delayMs ?? ''}`.trim() === '') {
+    errors.push(`attribution: impairment delay must be a positive number of ms (0 only with --loss-pct >= ${LOSS_ROW_MIN_PCT}), got ${JSON.stringify(delayMs)}`);
     return { ok: false, errors, warnings: [], notes, rows: [] };
   }
   let rows = [];
