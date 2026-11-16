@@ -1,6 +1,6 @@
 // Closed PostHog product-event pipe (browser client).
 //
-// Sentry stays the crash tool. These twelve events answer “are users having
+// Sentry stays the crash tool. These thirteen events answer “are users having
 // a bad time?” as rates. The allowlist lives in
 // `docs/POSTHOG_EVENT_ALLOWLIST.md` — no new event without an
 // explicit add there. Local/CI builds are keyless and no-op; a production
@@ -12,6 +12,7 @@
 // window titles, device names, key codes, clipboard, coordinates, or tokens.
 
 import { usageStatsEnabled } from '@petal/shared/logic/usageStats';
+import { rcLatencySummaryProperties, type RcLatencySummary } from '@petal/shared/logic/rcLatencyAggregator';
 
 declare const __PETAL_BUILD_INFO__: { version: string } | undefined;
 
@@ -39,6 +40,9 @@ export const EVENT_NAMES = [
   'permission_denied',
   'remote_control_input',
   'device_changed',
+  // #375: one per 60 s of active control; integer-ms percentiles are the
+  // allowlist's scoped exception to "buckets, never raw ms".
+  'remote_control_latency_summary',
 ] as const;
 
 export type EventName = (typeof EVENT_NAMES)[number];
@@ -55,9 +59,11 @@ export type RemoteControlInputKind = 'click' | 'type' | 'paste' | 'scroll';
 export type DeviceKind = 'display' | 'camera' | 'mic';
 export type DeviceChange = 'switched' | 'failed' | 'reconfigured' | 'sleep' | 'wake';
 
+export type PropertyValue = string | number | boolean;
+
 export type CapturedEvent = {
   name: EventName;
-  properties: Record<string, string>;
+  properties: Record<string, PropertyValue>;
 };
 
 type ViteImportMeta = ImportMeta & {
@@ -92,7 +98,7 @@ export type RemoteControlLike = {
 
 type EventSpec = {
   name: EventName;
-  extras: Record<string, string>;
+  extras: Record<string, PropertyValue>;
 };
 
 const COMMON_KEYS = ['build_version', 'os', 'os_version', 'arch', 'client'] as const;
@@ -277,7 +283,7 @@ export function inMeeting(): boolean {
   return meeting !== null;
 }
 
-function extrasFor(spec: EventSpec): Record<string, string> {
+function extrasFor(spec: EventSpec): Record<string, PropertyValue> {
   return { ...commonProperties(), ...spec.extras };
 }
 
@@ -326,10 +332,12 @@ function capture(spec: EventSpec): void {
   });
 }
 
-export function meetingJoined(): void {
+/** #372: `lkRegion` is the SFU edge's region token (`lkRegionToken`), never
+ * the user's location; omitted when the room reported no server info. */
+export function meetingJoined(lkRegion?: string): void {
   meeting = { joinedAt: Date.now(), reconnects: 0 };
   leaveRequested = false;
-  capture({ name: 'meeting_joined', extras: {} });
+  capture({ name: 'meeting_joined', extras: lkRegion ? { lk_region: lkRegion } : {} });
 }
 
 export function noteLeaveRequested(): void {
@@ -411,6 +419,11 @@ export function reconnectFailed(): void {
 
 export function permissionDenied(kind: PermissionKind): void {
   capture({ name: 'permission_denied', extras: { kind } });
+}
+
+/** #375: one per-interval controller latency summary; typed numbers, never per input. */
+export function remoteControlLatencySummary(summary: RcLatencySummary): void {
+  capture({ name: 'remote_control_latency_summary', extras: rcLatencySummaryProperties(summary) });
 }
 
 export function deviceChanged(kind: DeviceKind, change: DeviceChange): void {

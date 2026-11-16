@@ -755,6 +755,8 @@ interface RemoteControlBase {
 export type RemoteControlMessage =
   | (RemoteControlBase & {
       kind: 'request' | 'release';
+      /** #372: the controller's `lkNodeHash`, on `request` only. Additive. */
+      lkNodeHash?: string;
     })
   | (RemoteControlBase & {
       kind: 'status';
@@ -798,6 +800,8 @@ export type RemoteControlMessage =
       /** #371: true only on a host's `active` status; hot-path frames may
        * then be v2, which appends `sentAtMs`. */
       supportsBinaryHotPathV2?: boolean;
+      /** #372: the host's `lkNodeHash`, on an `active` status. Additive. */
+      lkNodeHash?: string;
     })
   | (RemoteControlBase & {
       kind: 'pointer';

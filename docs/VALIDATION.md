@@ -247,6 +247,56 @@ it than the name says.
 - Whether `--text-primary`'s placeholder token and other Known-deviations
   items affect any visual check — see CLAUDE.md.
 
+## Remote-control latency dashboard (#379)
+
+Field data for option (a) P2P input vs option (b) window-path video tuning
+comes from `remote_control_latency_summary` (#369). The insights live in
+`docs/telemetry/remote-control-latency-dashboard.sql`. The decision tile
+returns one row per threshold: `FIRES`, `CLEAR` or `INSUFFICIENT`.
+`scripts/ci/rc-latency-decision-tile.mjs` evaluates the same rules on an
+exported events JSON file. Both are dry-run tooling: nothing in the repo
+writes to PostHog.
+
+How to read it:
+
+- `INSUFFICIENT` means the rule's own data covers fewer than 50 sessions or
+  fewer than 14 calendar days, or a stage it needs has no data. A missing
+  stage is never read as 0. A rule over several stages (photon residual,
+  stage share) clears only when every stage it needs has data.
+- Host and controller each mint their own `rc_session_id`, so the two sides
+  cannot be joined. Cross-side views compare fleet medians of per-minute p50s,
+  not per-session sums.
+- Every query leaves out `self_hosted_sfu = true`, except data health.
+
+| Stage | Measured on | Measured or estimated |
+|---|---|---|
+| `input_leg_ms` | host | measured, error <= `offset_err_ms` |
+| `input_rtt_ms` | controller | RTT measured; the one-way half is estimated |
+| `input_excess_delay_ms`, `input_stall_count` | host | measured, clock-free head-of-line proxy |
+| `replay_inject_ms`, `replay_complete_ms` | host | measured |
+| `inject_to_capture_ms` | host | measured (Windows: next frame, `content_change=unknown`) |
+| `capture_to_encoded_ms`, `encoded_to_packetized_ms` | host | measured |
+| `pub_rtt_ms`, `sub_rtt_ms` | both | measured RTT to the SFU edge |
+| `video_net_ms` | receiver | measured, error <= `offset_err_ms` |
+| `jb_delay_ms`, `jb_target_ms`, `decode_ms`, `receive_to_present_ms` | receiver | measured; native present is estimated (+1 refresh) |
+| `photon_ms` | controller | measured on web; estimated within one refresh on native |
+
+Known biases:
+
+- `offset_err_ms` bounds every one-way number (`input_leg_ms`,
+  `video_net_ms`, `capture_to_*`). Read the offset column next to them.
+- Native photon is +-1 display refresh.
+- Windows reports `content_change=unknown`, which undercounts
+  `inject_to_capture_ms`.
+- `jb_min_ms` is a bucket. The target-vs-min rule divides by the bucket's
+  upper bound, so it fires late rather than early, and it leaves out `0` and
+  `200_plus`.
+- PostHog buckets days in the project timezone (`America/Los_Angeles`); the
+  JS evaluator uses UTC. The 14-day span guard can differ by one day at the
+  edge.
+- The stage-share insight does not filter on `content_change = detected`:
+  no producer sets that dimension yet, and the filter would hide all data.
+
 ## Update 2026-08-14 -- what the RC suite now proves, and the residue
 
 The suite (30 cases then; 32 since the consent cases landed 2026-08-22) was
