@@ -74,7 +74,7 @@ jobs:
           token: ${{ inputs.dry_run && github.token || secrets.RELEASE_PUSH_TOKEN }}
           persist-credentials: true
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
 
