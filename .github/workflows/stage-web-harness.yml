@@ -39,7 +39,7 @@ jobs:
       VERCEL_PROJECT_ID: prj_OwXNV8ZFq9moT4jWcNVa1bxlz1lk
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 

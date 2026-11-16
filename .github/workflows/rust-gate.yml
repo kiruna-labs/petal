@@ -42,7 +42,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.changed }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           sparse-checkout: scripts
           sparse-checkout-cone-mode: true
@@ -89,7 +89,7 @@ jobs:
         if: env.RUN != 'true'
         run: echo "No Rust-relevant paths changed in this PR; the Rust gate is not applicable."
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         if: env.RUN == 'true'
 
       - uses: dtolnay/rust-toolchain@stable
@@ -179,7 +179,7 @@ jobs:
         if: env.RUN != 'true'
         run: echo "No Rust-relevant paths changed in this PR; the Windows gate is not applicable."
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         if: env.RUN == 'true'
 
       - uses: dtolnay/rust-toolchain@stable
