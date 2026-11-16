@@ -2994,7 +2994,8 @@ async fn poll_share_loss(
 /// Many apps "close" to the tray by hiding their window, not destroying it, so
 /// WGC never reports it closed. A window that is gone or no longer visible
 /// counts as closed. Minimized windows and windows on another virtual desktop
-/// (cloaked) keep `WS_VISIBLE`, so they stay shared.
+/// (cloaked) keep `WS_VISIBLE`, so they stay shared. A hidden window that is
+/// still iconic was minimized to the tray, not closed: keep it shared too.
 fn shared_window_hidden(token: u32) -> bool {
     let Ok(target) = crate::windows_capture_target::resolve(token) else {
         // Already retired: the share is stopping anyway.
@@ -3004,7 +3005,10 @@ fn shared_window_hidden(token: u32) -> bool {
         return false;
     }
     let hwnd = HWND(target.raw_handle() as *mut core::ffi::c_void);
-    !unsafe { IsWindow(Some(hwnd)) }.as_bool() || !unsafe { IsWindowVisible(hwnd) }.as_bool()
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return true;
+    }
+    !unsafe { IsWindowVisible(hwnd) }.as_bool() && !unsafe { IsIconic(hwnd) }.as_bool()
 }
 
 async fn stop_share(
