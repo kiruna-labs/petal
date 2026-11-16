@@ -3325,6 +3325,20 @@ pub async fn join_room_command(
         identity.clone(),
         generation.clone(),
     );
+    // #371, Windows parity with session/room.rs: the data-channel RTT probe
+    // pings granted controllers, so a Windows host gets the clock offset that
+    // turns `sentAtMs` into `input_leg_ms`. Stops on the generation bump.
+    if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
+        crate::latency_probe::start_receiver_for_room(
+            &app,
+            room_connection.room(),
+            identity.clone(),
+            generation.clone(),
+            diagnostics.inner().clone(),
+        );
+    } else {
+        log::warn!("windows session: DiagnosticsState not managed -- latency probe disabled");
+    }
     // AI chat (#657, Windows parity): start/stop requests, push-to-talk floor
     // claims, and remote session state over `petal.ai-chat`. Same seam as the
     // macOS session/room.rs wiring; the receiver stops when the room

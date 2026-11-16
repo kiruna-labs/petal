@@ -27,18 +27,15 @@ const SHARED_EVENTS = [
   'reconnect',
   'permission_denied',
   'remote_control_input',
-  'device_changed'
+  'device_changed',
+  // #375: the web controller feeds it from its receive-path producer.
+  'remote_control_latency_summary'
 ];
 
 // #872: native-only — the sharer-side drawing overlay that captures the
 // cursor exists only in the desktop app, so the web client never emits it.
-// #370: the latency summary is native-only until the web producer lands (#375).
 // #411: the VideoToolbox encoder recovery lives in the native publisher.
-const NATIVE_ONLY_EVENTS = [
-  'annotation_toggled',
-  'remote_control_latency_summary',
-  'video_encoder_recovery'
-];
+const NATIVE_ONLY_EVENTS = ['annotation_toggled', 'video_encoder_recovery'];
 
 test('allowlist and analytics.rs lock the same fifteen event names', () => {
   for (const name of [...SHARED_EVENTS, ...NATIVE_ONLY_EVENTS]) {

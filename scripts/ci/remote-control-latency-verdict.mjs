@@ -166,12 +166,21 @@ export function summarizeLatencySummaries(intervals, role = 'host') {
       p50MaxMs: withData.length ? Math.max(...withData.map((fields) => fields[`${name}_p50`])) : null,
     };
   };
+  // #372: the edge dimensions of the latest interval that has them,
+  // reported only (local livekit-server: self_hosted_sfu=true, lk_region=
+  // unknown, same_edge=true, ice host/udp).
+  const edgeKeys = ['lk_region', 'same_edge', 'self_hosted_sfu', 'ice_candidate_type', 'ice_protocol'];
+  const withEdge = mine.filter((fields) => edgeKeys.some((key) => fields[key] !== undefined)).at(-1);
+  const edge = withEdge
+    ? Object.fromEntries(edgeKeys.map((key) => [key, withEdge[key] === undefined ? null : String(withEdge[key])]))
+    : null;
   return {
     role,
     intervals: mine.length,
     finals: mine.filter((fields) => fields.final === true).length,
     replayInject: stage('replay_inject_ms'),
     replayComplete: stage('replay_complete_ms'),
+    edge,
   };
 }
 

@@ -1184,6 +1184,10 @@ struct PendingDisplaySample {
     source_height: u32,
     /// #360: room generation of the feed that decoded this frame.
     feed_generation: u64,
+    /// #374: decode stamp of a frame from a window we control; recorded as
+    /// `receive_to_present_ms` at its enqueue. A frame superseded in the queue
+    /// was never shown, so it records nothing.
+    present_stamp: Option<crate::rc_receiver_timing::PresentStamp>,
 }
 
 #[derive(Debug)]
@@ -4012,6 +4016,7 @@ pub fn push_frame(
     source_width: u32,
     source_height: u32,
     feed_generation: u64,
+    present_stamp: Option<crate::rc_receiver_timing::PresentStamp>,
 ) {
     let key = RemoteWindowKey::new(owner_identity, window_id);
 
@@ -4150,6 +4155,7 @@ pub fn push_frame(
                         source_width,
                         source_height,
                         feed_generation,
+                        present_stamp,
                     })
                 })
                 .unwrap_or(false);
@@ -4253,9 +4259,9 @@ fn clear_hold_for_displayed_frame(
 
 fn drain_pending_display_samples_on_main(app: &AppHandle, key: &RemoteWindowKey) {
     let mut cleared_hold = false;
-    let geometry = app
-        .get_webview_window(&panel_label_for_key(key))
-        .and_then(|window| content_geometry(&window));
+    let panel = app.get_webview_window(&panel_label_for_key(key));
+    let geometry = panel.as_ref().and_then(content_geometry);
+    let mut presented = Vec::new();
     let should_reveal = with_state(|s| {
         let rejoin_held = rejoin_hold_unclaimed(s, key);
         let Some(win) = s.windows.get_mut(key) else {
@@ -4285,6 +4291,9 @@ fn drain_pending_display_samples_on_main(app: &AppHandle, key: &RemoteWindowKey)
             }
             display.enqueue_prepared(&pending.sample);
             record_display_enqueue(win, now_ms());
+            if let Some(stamp) = pending.present_stamp {
+                presented.push((stamp, crate::time_util::now_us()));
+            }
             win.layer_has_content = true;
         }
         // A frame reached the layer, so this window is live again. Clearing the
@@ -4319,6 +4328,24 @@ fn drain_pending_display_samples_on_main(app: &AppHandle, key: &RemoteWindowKey)
             ),
         );
         set_window_media_paused(app, &key.owner_identity, key.window_id, false);
+    }
+    if !presented.is_empty() {
+        // #374: estimated (enqueue + one refresh of the panel's screen); the
+        // layer has no present callback. Outside the state lock on purpose.
+        let refresh_ms = panel
+            .as_ref()
+            .and_then(crate::platform::appkit::screen_refresh_interval_ms);
+        for (stamp, enqueued_at_us) in presented {
+            if let Some(refresh_ms) = refresh_ms {
+                crate::rc_receiver_timing::record_present(
+                    stamp,
+                    &key.owner_identity,
+                    key.window_id,
+                    enqueued_at_us,
+                    refresh_ms,
+                );
+            }
+        }
     }
     if should_reveal {
         reveal_remote_window_after_first_frame_on_main(app, key);
