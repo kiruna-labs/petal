@@ -7618,8 +7618,6 @@ fn spawn_pump_failure_recovery(
             if let Some(url_refresh) = new_url_refresh.take() {
                 url_refresh.stop();
             }
-            let ended_seq = Some(started_seq);
-            clear_region_warning_after_share_end(&app, state.inner(), window_id, ended_seq);
             if let Some(capture) = new_capture {
                 if let Err(error) = stop_capture_with_timeout(
                     Arc::new(capture),
@@ -7630,6 +7628,10 @@ fn spawn_pump_failure_recovery(
                     log::warn!("session: failed to stop stale replacement capture: {error}");
                 }
             }
+            // After the awaited capture stop, like the stop wrapper: the aborted
+            // pump may still be finishing a tick on another worker (#586).
+            let ended_seq = Some(started_seq);
+            clear_region_warning_after_share_end(&app, state.inner(), window_id, ended_seq);
             return;
         }
 
