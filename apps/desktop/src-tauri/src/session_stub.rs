@@ -2216,6 +2216,9 @@ pub(crate) async fn start_share_token(
         loss_monitor.abort();
         drop_share_capture(capture).await;
         crate::region_window::release_selector_capture_exclusion(selector_capture_exclusion);
+        if is_region_share {
+            clear_region_warning(&app, token);
+        }
         let published = shared.published.lock_unpoisoned().clone();
         let _ = published.unpublish().await;
         crate::windows_share_overlay::close_share_overlay(&app, token);
@@ -2800,6 +2803,15 @@ fn start_share_frame_pump(
     })
 }
 
+/// #586: a region share's pump is gone, so lower its off-display banner.
+fn clear_region_warning(app: &tauri::AppHandle, token: u32) {
+    if let Some(payload) = crate::region_window::end_share_outside_display(token) {
+        if let Err(error) = tauri::Emitter::emit(app, "region-warning", payload) {
+            log::debug!("windows session: region warning clear failed for {token}: {error}");
+        }
+    }
+}
+
 fn sync_region_warning(app: &tauri::AppHandle, token: u32, last: &mut Option<bool>) {
     let Some(source) = crate::region_window::resolve(token) else {
         return;
@@ -2979,11 +2991,7 @@ async fn stop_share(
     crate::region_window::release_selector_capture_exclusion(selector_capture_exclusion);
     // #586: after the capture drop, so the capture thread cannot re-raise it.
     if kind == SharedSourceKind::DisplayRegion {
-        if let Some(payload) = crate::region_window::end_share_outside_display(token) {
-            if let Err(error) = tauri::Emitter::emit(app, "region-warning", payload) {
-                log::debug!("windows session: region warning clear failed for {token}: {error}");
-            }
-        }
+        clear_region_warning(app, token);
     }
     log::info!(
         "windows session: share {} capture dropped ({:?})",

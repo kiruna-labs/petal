@@ -1699,10 +1699,22 @@ mod tests {
             .find("drop_share_capture(capture).await;")
             .expect("Windows stop_share drops the capture");
         let clear = stop
-            .find("crate::region_window::end_share_outside_display(token)")
+            .find("clear_region_warning(app, token);")
             .expect("Windows stop_share must clear the region warning");
         assert!(drop < clear);
-        assert!(stop[clear..].contains("\"region-warning\", payload"));
+        let lost_commit = source
+            .split_once("share start lost the room commit race")
+            .map(|(before, _)| before.rsplit_once("drop_share_capture(capture).await;"))
+            .flatten()
+            .map(|(_, after)| after)
+            .expect("Windows lost-commit cleanup drops the capture");
+        assert!(lost_commit.contains("clear_region_warning(&app, token);"));
+        let helper = source
+            .split_once("fn clear_region_warning(")
+            .map(|(_, body)| body)
+            .expect("Windows clear helper");
+        assert!(helper.contains("crate::region_window::end_share_outside_display(token)"));
+        assert!(helper.contains("\"region-warning\", payload"));
     }
 
     #[test]

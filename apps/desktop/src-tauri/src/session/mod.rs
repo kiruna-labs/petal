@@ -270,10 +270,10 @@ struct SessionInner {
     /// may apply UI/control effects only when their generation remains this
     /// window's most recently stopped share.
     last_stopped_share_seq: HashMap<u32, u64>,
-    /// Most recent `started_seq` allocated per window id, set before that
-    /// share's pump spawns. A teardown effect compares it with
-    /// `last_stopped_share_seq` to skip a re-share not yet in `shares` (#586).
-    last_started_share_seq: HashMap<u32, u64>,
+    /// Generation of the newest share pump spawned per window id. Only that
+    /// generation's teardown may lower the region off-display banner, since
+    /// a pump can raise it before its share is in `shares` (#586).
+    region_warning_pump_seq: HashMap<u32, u64>,
     /// Passive receiver demand keyed by shared source window and viewer
     /// identity. A receiver owns one entry while it has that remote
     /// compositor window open and visible; stale entries are expired by the
