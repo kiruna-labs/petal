@@ -1631,6 +1631,23 @@ async function collectControllerPublishes(ctx, caseId) {
   }
 }
 
+// #378: the web controller's `remote-control-latency-summary:` lines (#375
+// receive stages, nack_count) from the harness session log, for the
+// attribution verdict. Waits one reconcile tick so a final partial lands.
+// Best-effort: the verdict scores missing lines insufficient, never a pass.
+async function collectControllerLatencySummaries(cdp) {
+  await sleep(1500);
+  try {
+    const lines = await evaluate(
+      cdp,
+      `Array.from(document.querySelectorAll('#session-log .log-line')).map((line) => line.lastElementChild?.textContent ?? '').filter((text) => text.startsWith('remote-control-latency-summary: role=controller ')).reverse()`
+    );
+    return Array.isArray(lines) ? lines : [];
+  } catch {
+    return [];
+  }
+}
+
 async function published(ctx, predicateSource, timeoutMs = acquisitionTimeoutMs) {
   return waitUntil(
     'remote-control publish metric',
@@ -3907,6 +3924,9 @@ try {
       );
       try {
         const report = await runPressToPhotonSuite(ctx);
+        // Release first so the controller's final partial summary is emitted.
+        try { await send(ctx, 'api.release(target); return true;'); } catch {}
+        report.controllerLatencySummaryLines = await collectControllerLatencySummaries(cdp);
         writePhotonReport(report);
         process.exitCode = suiteExitCode(report.summary);
       } finally {
@@ -4068,9 +4088,10 @@ try {
       );
     }
     if (jsonOutputPath) {
+      const controllerLatencySummaryLines = await collectControllerLatencySummaries(ctx.cdp);
       fs.writeFileSync(
         jsonOutputPath,
-        `${JSON.stringify({ summary, recoveries, results, terminalDeliveries, terminalRecovery: ctx.terminalRecovery, controllerPublishes }, null, 2)}\n`,
+        `${JSON.stringify({ summary, recoveries, results, terminalDeliveries, terminalRecovery: ctx.terminalRecovery, controllerPublishes, controllerLatencySummaryLines }, null, 2)}\n`,
         'utf8'
       );
     }
