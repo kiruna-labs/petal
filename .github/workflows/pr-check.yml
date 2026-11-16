@@ -1,0 +1,40 @@
+# The fast check branch protection requires on main (KIR-1058, SOC 2 "Automated checks enabled").
+# Backend typecheck + tests (ci.yml backend job, which is manual-only); the PR gates (frontend-gate.yml, rust-gate.yml) already report on every PR and can be required alongside.
+# Heavier workflows stay as they are; this one runs on every pull request, with no path filter, so the required
+# status check always reports.
+name: pr-check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-check:
+    name: pr-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: install
+        working-directory: backend
+        run: npm ci --no-audit --no-fund
+      - name: typecheck
+        working-directory: backend
+        run: npm run typecheck
+      - name: tests
+        working-directory: backend
+        run: npm test
