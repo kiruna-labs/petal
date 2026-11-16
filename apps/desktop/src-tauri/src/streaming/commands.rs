@@ -277,6 +277,175 @@ pub async fn region_stream_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    type CloseHandler = Box<dyn Fn() -> bool + Send>;
+
+    /// A dialog window that records what the lifecycle does to it and keeps
+    /// the close handler production registers on it.
+    #[derive(Default)]
+    struct FakeWindow {
+        calls: Mutex<Vec<String>>,
+        visible: Mutex<bool>,
+        close_handlers: Mutex<Vec<CloseHandler>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeDialog(Arc<FakeWindow>);
+
+    impl GoLiveDialog for FakeDialog {
+        fn retarget(&self, window_id: u32) {
+            self.0.calls.lock().unwrap().push(format!("retarget {window_id}"));
+        }
+        fn bring_forward(&self) {
+            self.0.calls.lock().unwrap().push("bring_forward".into());
+            *self.0.visible.lock().unwrap() = true;
+        }
+        fn hide(&self) {
+            self.0.calls.lock().unwrap().push("hide".into());
+            *self.0.visible.lock().unwrap() = false;
+        }
+        fn on_close_request(&self, prevent: impl Fn() -> bool + Send + 'static) {
+            self.0.close_handlers.lock().unwrap().push(Box::new(prevent));
+        }
+    }
+
+    impl FakeDialog {
+        fn visible(&self) -> bool {
+            *self.0.visible.lock().unwrap()
+        }
+        fn calls(&self) -> Vec<String> {
+            self.0.calls.lock().unwrap().clone()
+        }
+        fn handlers(&self) -> usize {
+            self.0.close_handlers.lock().unwrap().len()
+        }
+    }
+
+    /// The app's window registry, and the platform: a close request runs
+    /// every handler registered on the window, and a close none of them
+    /// prevented destroys it.
+    #[derive(Default)]
+    struct FakeHost {
+        window: Mutex<Option<FakeDialog>>,
+        builds: Mutex<u32>,
+    }
+
+    impl GoLiveDialogHost for FakeHost {
+        type Dialog = FakeDialog;
+        fn existing(&self) -> Option<FakeDialog> {
+            self.window.lock().unwrap().clone()
+        }
+        fn create(&self) -> Result<FakeDialog, String> {
+            *self.builds.lock().unwrap() += 1;
+            // Shown once its page loads (`on_page_load`).
+            let dialog = FakeDialog::default();
+            *dialog.0.visible.lock().unwrap() = true;
+            *self.window.lock().unwrap() = Some(dialog.clone());
+            Ok(dialog)
+        }
+    }
+
+    impl FakeHost {
+        fn builds(&self) -> u32 {
+            *self.builds.lock().unwrap()
+        }
+        fn window(&self) -> Option<FakeDialog> {
+            self.window.lock().unwrap().clone()
+        }
+        /// The page's own close() (Cancel, or after `stream_go_live`
+        /// answers) or the title bar: the platform's close request.
+        fn request_close(&self) {
+            let window = self.window().expect("a dialog to close");
+            let handlers = window.0.close_handlers.lock().unwrap();
+            let prevented = handlers.iter().fold(false, |prevented, handler| handler() || prevented);
+            drop(handlers);
+            if !prevented {
+                *self.window.lock().unwrap() = None;
+            }
+        }
+    }
+
+    #[test]
+    fn the_go_live_dialog_opens_closes_and_reopens_through_its_handlers() {
+        for hide_on_close in [true, false] {
+            let platform = if hide_on_close { "macOS" } else { "Windows" };
+            let host = FakeHost::default();
+            // Open: one window, for share 7, with one close handler.
+            open_go_live(&host, 7, hide_on_close).unwrap();
+            assert_eq!(host.builds(), 1, "{platform}: built once");
+            assert_eq!(go_live_target(), 7, "{platform}: the page reads its share on load");
+            let first = host.window().unwrap();
+            assert_eq!(first.handlers(), 1, "{platform}: one close handler");
+            // Opened again from another share while open: the same window,
+            // re-targeted and brought forward, never a second one or handler.
+            open_go_live(&host, 9, hide_on_close).unwrap();
+            assert_eq!(host.builds(), 1, "{platform}: still one window");
+            assert_eq!(first.calls(), ["retarget 9", "bring_forward"], "{platform}");
+            assert_eq!(first.handlers(), 1, "{platform}: still one handler");
+            assert_eq!(go_live_target(), 9);
+            // Cancel (or the title bar): the platform's close request.
+            host.request_close();
+            if hide_on_close {
+                assert!(!first.visible(), "macOS: hidden");
+                assert!(host.window().is_some(), "macOS: not destroyed");
+            } else {
+                assert!(host.window().is_none(), "Windows: destroyed");
+                assert!(!first.calls().contains(&"hide".to_string()), "Windows: never hidden instead");
+            }
+            // Reopened for share 11: no stale window. macOS brings the hidden
+            // one back re-targeted (the page resets on that event); Windows
+            // builds a fresh one, which reads its share on load.
+            open_go_live(&host, 11, hide_on_close).unwrap();
+            assert_eq!(go_live_target(), 11);
+            let reopened = host.window().unwrap();
+            assert!(reopened.visible(), "{platform}: shown again");
+            assert_eq!(reopened.handlers(), 1, "{platform}: one close handler");
+            if hide_on_close {
+                assert_eq!(host.builds(), 1, "macOS: the hidden dialog is reused");
+                assert!(Arc::ptr_eq(&reopened.0, &first.0));
+                assert_eq!(first.calls().last().map(String::as_str), Some("bring_forward"));
+                assert!(first.calls().contains(&"retarget 11".to_string()));
+            } else {
+                assert_eq!(host.builds(), 2, "Windows: a fresh window");
+                assert!(!Arc::ptr_eq(&reopened.0, &first.0));
+            }
+            // Going live: the page closes itself once `stream_go_live`
+            // answers (tests/goLiveDialogLifecycle.test.ts), the same close
+            // request, so the dialog retires the same way.
+            host.request_close();
+            assert_eq!(host.window().is_some(), hide_on_close, "{platform}: retired after going live");
+            if hide_on_close {
+                assert!(!reopened.visible(), "macOS: hidden again");
+            }
+        }
+    }
+
+    /// The `tauri::WebviewWindow` glue can't run in a unit test, so pin it to
+    /// what the lifecycle test drives: the command is `open_go_live` with the
+    /// real host and platform flag, and the real window's close handler runs
+    /// on its `CloseRequested` event, prevented only when the handler says so.
+    #[test]
+    fn the_go_live_command_and_window_go_through_the_tested_path() {
+        let source = include_str!("commands.rs");
+        let command_at = source.find("pub async fn open_go_live_window(").expect("the command exists");
+        let command = &source[command_at..command_at + source[command_at..].find("\n}\n").expect("its end")];
+        assert!(
+            command.contains("open_go_live(&TauriDialogHost { app: &app }, window_id, HIDE_ON_CLOSE)"),
+            "the command is open_go_live with the real host: {command}"
+        );
+        assert_eq!(command.lines().count(), 2, "and nothing else: {command}");
+        let impl_at = source.find("impl GoLiveDialog for tauri::WebviewWindow {").expect("the real window");
+        let window = &source[impl_at..impl_at + source[impl_at..].find("\n}\n").expect("its end")];
+        let close = &window[window.find("fn on_close_request(").expect("registers the close handler")..];
+        let registered = close.find("self.on_window_event(").expect("on the window's events");
+        let event = close.find("WindowEvent::CloseRequested").expect("on the close request");
+        let asked = close.find("if prevent()").expect("asks the handler");
+        let prevented = close.find("api.prevent_close()").expect("prevents the close");
+        assert!(registered < event && event < asked && asked < prevented, "prevented only when the handler says so: {close}");
+        assert!(HIDE_ON_CLOSE == cfg!(target_os = "macos"));
+    }
+
 
     #[test]
     fn menu_shows_the_one_action_that_fits() {
