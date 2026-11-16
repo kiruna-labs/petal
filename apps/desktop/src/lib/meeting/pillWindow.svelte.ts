@@ -20,6 +20,7 @@
 // gallery, which lays itself out as a column or a bar of faces.
 
 import { tick } from 'svelte';
+import { startCurrentWindowDrag } from '#lib/windowDrag.js';
 import { invoke } from '@tauri-apps/api/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import {
@@ -604,11 +605,13 @@ export function createPillWindow(): PillWindow {
     }
   }
 
-  /** Pill-body drag (explicit start_dragging on mousedown, same idiom as
-   * the compositor header — buttons are excluded in MeetingChrome). */
+  /** Pill-body drag, started on mousedown like the compositor header (buttons
+   * are excluded in MeetingChrome). PETAL-WORKAROUND(tao-drag-window): macOS
+   * goes through `start_window_drag`, so the pill can't jump its corner to the
+   * pointer (#585). */
   function handlePillDrag() {
     try {
-      void getCurrentWindow().startDragging();
+      void startCurrentWindowDrag().catch((err) => console.warn('pill: drag failed', err));
     } catch {
       // No Tauri bridge (plain browser preview).
     }

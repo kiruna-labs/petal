@@ -15,6 +15,7 @@
  * (`detail === 2`) still reach Tauri, which toggles maximize on mouseup.
  */
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { COMMANDS, hasTauriBridge } from '#lib/ipc.js';
 import { platformKey, type PlatformKey } from '#lib/platform.js';
 
@@ -120,4 +121,24 @@ export function installWindowDragWorkaround(deps: WindowDragDeps = {}): () => vo
   };
   target.addEventListener('mousedown', onMouseDown);
   return () => target.removeEventListener('mousedown', onMouseDown);
+}
+
+export interface ProgrammaticDragDeps {
+  platform?: PlatformKey;
+  startWindowDrag?: () => Promise<unknown>;
+  startDragging?: () => Promise<unknown>;
+}
+
+/**
+ * Start a drag from code, for surfaces that call `startDragging()` on
+ * mousedown instead of using a drag region (the meeting pill, #585). macOS goes
+ * through `start_window_drag` for the same reason drag regions do; every other
+ * platform keeps Tauri's `startDragging`.
+ */
+export function startCurrentWindowDrag(deps: ProgrammaticDragDeps = {}): Promise<unknown> {
+  const platform = deps.platform ?? platformKey();
+  if (platform === 'macos') {
+    return (deps.startWindowDrag ?? (() => invoke(COMMANDS.startWindowDrag)))();
+  }
+  return (deps.startDragging ?? (() => getCurrentWindow().startDragging()))();
 }
