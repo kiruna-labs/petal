@@ -1354,6 +1354,26 @@ async function main() {
     });
   });
 
+  await test('honours GEMINI_API_VERSION over the pinned v1beta default', async () => {
+    process.env.GEMINI_API_VERSION = 'v1alpha';
+    try {
+      const calls = await withStubbedFetch(
+        () => jsonResponse({ name: 'authTokens/x' }),
+        async () => {
+          await mintGeminiEphemeralToken(loadGeminiEnv(), {
+            uses: 1,
+            expireTime: EXPECTED_EXPIRE,
+            newSessionExpireTime: EXPECTED_NEW_SESSION,
+            responseModality: 'AUDIO',
+          });
+        }
+      );
+      assert.equal(calls[0]!.url, 'https://generativelanguage.googleapis.com/v1alpha/auth_tokens');
+    } finally {
+      delete process.env.GEMINI_API_VERSION;
+    }
+  });
+
   await test('honours GEMINI_LIVE_MODEL in the constraint it sends upstream', async () => {
     await withGeminiModel('models/gemini-9.9-flash-live-preview', async () => {
       const calls = await withStubbedFetch(
