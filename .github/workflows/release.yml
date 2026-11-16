@@ -294,7 +294,7 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -447,7 +447,7 @@ jobs:
           # verify-deploy-freshness.sh needs origin/main + full ancestry.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
 
@@ -647,7 +647,7 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
           cache: npm
