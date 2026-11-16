@@ -29,6 +29,7 @@ type Steps = {
   cancel: { calls: string[]; key: string | null };
   typedBeforeClose: string | null;
   closedByTitleBar: { key: string | null };
+  typedBeforeReopen: string | null;
   reopened: { calls: Call[]; error: string | null; key: string | null };
   goLive: { calls: Call[]; key: string | null; error: string | null };
 };
@@ -96,7 +97,8 @@ test('the go-live dialog closes, reopens clean and retires after going live (#48
     // Reopened for share 9: the old error is gone, no key, and the page
     // reloads destinations and previews the new share.
     assert.equal(steps.reopened.error, null, 'the last open\'s error does not linger');
-    assert.equal(steps.reopened.key, '', 'no key from the last open');
+    assert.equal(steps.typedBeforeReopen, 'left-before-reopen', 'a key was in the field before the reopen');
+    assert.equal(steps.reopened.key, '', 'the reopen clears the key as well');
     const reopened = steps.reopened.calls.map((c) => c.command);
     assert.ok(reopened.includes('stream_destinations_list'), `reopened: ${reopened}`);
     assert.ok(steps.reopened.calls.some((c) => c.command === 'stream_preview' && c.windowId === 9), 'previews share 9');

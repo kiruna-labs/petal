@@ -97,6 +97,11 @@ async function run() {
   await settle();
   steps.closedByTitleBar = { key: keyInput()?.value ?? null };
 
+  // A key left in the field (no close event seen): the reopen clears it too.
+  setValue(keyInput(), 'left-before-reopen');
+  await settle();
+  steps.typedBeforeReopen = keyInput()?.value ?? null;
+
   // Reopened for share 9 (macOS reuses the hidden window): the native side
   // emits `go-live-target`; nothing from the last open may linger.
   mark = calls.length;

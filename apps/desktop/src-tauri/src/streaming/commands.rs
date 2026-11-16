@@ -460,6 +460,18 @@ mod tests {
         let asked = close.find("if prevent()").expect("asks the handler");
         let prevented = close.find("api.prevent_close()").expect("prevents the close");
         assert!(registered < event && event < asked && asked < prevented, "prevented only when the handler says so: {close}");
+        // The events the page listens for, by the names it listens for them.
+        let ipc = include_str!("../../../src/lib/ipc.ts");
+        for (method, ipc_name, wire) in [
+            ("fn retarget(", "goLiveTarget: ", "go-live-target"),
+            ("fn closing(", "goLiveClosed: ", "go-live-closed"),
+        ] {
+            let at = window.find(method).unwrap_or_else(|| panic!("the real window has {method}"));
+            let emit = format!("tauri::Emitter::emit(self, \"{wire}\"");
+            assert!(window[at..].split("
+    }").next().unwrap().contains(&emit), "{method} emits {wire}");
+            assert!(ipc.contains(&format!("{ipc_name}'{wire}'")), "ipc.ts EVENTS.{ipc_name} is {wire}");
+        }
         assert!(HIDE_ON_CLOSE == cfg!(target_os = "macos"));
     }
 
