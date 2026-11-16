@@ -383,6 +383,9 @@ fn open_window_picker_window_on_main(app: &AppHandle) -> Result<(), String> {
     .min_inner_size(560.0, 460.0)
     .decorations(false)
     .transparent(true)
+    // A real window whose page fills it: keep the native shadow (#406
+    // lint: transparent builders state their shadow explicitly).
+    .shadow(true)
     .visible(false)
     .focused(false)
     .focusable(false)

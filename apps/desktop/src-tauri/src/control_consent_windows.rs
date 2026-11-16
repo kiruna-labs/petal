@@ -37,6 +37,9 @@ pub fn create_control_consent_panel(app: &AppHandle) {
     .title("Petal")
     .decorations(false)
     .transparent(true)
+    // Windows: unchanged default (DWM shadow/border); the #406 outline is a
+    // macOS alpha-shadow artifact. Stated explicitly for the shadow lint.
+    .shadow(true)
     .background_color(tauri::window::Color(0, 0, 0, 0))
     .resizable(false)
     .skip_taskbar(true)
