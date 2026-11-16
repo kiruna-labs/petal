@@ -39,6 +39,8 @@
   import { displayBuildVersion } from '#lib/buildInfo.js';
   import { platformKey } from '#lib/platform.js';
   import { stripNativeTooltipTitles } from '#lib/data/suppressNativeTooltips.js';
+  // PETAL-WORKAROUND(tao-drag-window)
+  import { installWindowDragWorkaround } from '#lib/windowDrag.js';
   import { noteCustomServer } from '#lib/data/customServer.svelte.js';
   import { applyInviteOrigin } from '#lib/data/inviteLinks.js';
   import {
@@ -106,6 +108,10 @@
         true
       );
     }
+    // PETAL-WORKAROUND(tao-drag-window): macOS drag-region clicks must not
+    // move the window (src/lib/windowDrag.ts). Every window mounts this root
+    // layout, so one install covers every webview.
+    const uninstallWindowDrag = installWindowDragWorkaround();
     // #842: device seeding is an app-global side effect (it can stop/restart
     // the live camera and hot-swap audio devices) and must run only in the
     // main window, exactly like the update check's guard seven lines below.
@@ -178,6 +184,7 @@
 
     return () => {
       if (petalWindow.__petalNavigate === navigate) delete petalWindow.__petalNavigate;
+      uninstallWindowDrag(); // PETAL-WORKAROUND(tao-drag-window)
       stopUpdateScheduler?.();
       unlistenServerSettings?.();
     };

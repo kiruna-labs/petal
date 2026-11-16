@@ -175,6 +175,8 @@ mod presence;
 mod region_window;
 #[cfg(target_os = "macos")]
 mod window_fixtures;
+// PETAL-WORKAROUND(tao-drag-window): drag-region drags that don't trust tao's current event.
+mod window_drag;
 mod window_registry;
 // Wall-clock helpers (now_ms/now_us), consolidated (#143).
 mod time_util;
@@ -1035,6 +1037,8 @@ pub fn run() {
             launch_location::launch_location_class,
             launch_location::open_applications_folder,
             launch_location::reveal_running_bundle,
+            // PETAL-WORKAROUND(tao-drag-window)
+            window_drag::start_window_drag,
             list_shareable_windows,
             has_screen_recording_access,
             permissions::check_screen_recording,
@@ -1735,6 +1739,8 @@ pub fn run() {
             launch_location::launch_location_class,
             launch_location::open_applications_folder,
             launch_location::reveal_running_bundle,
+            // PETAL-WORKAROUND(tao-drag-window)
+            window_drag::start_window_drag,
             frontend_ready,
             get_build_info,
             list_shareable_windows,
