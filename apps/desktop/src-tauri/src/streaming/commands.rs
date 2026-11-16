@@ -77,53 +77,120 @@ pub fn go_live_target() -> u32 {
 /// hide-and-reuse rule as the compositor and border panels.
 #[tauri::command]
 pub async fn open_go_live_window(app: AppHandle, window_id: u32) -> Result<(), String> {
-    use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
-    use crate::streaming::streamer_mode::BuildPetalWindow;
+    open_go_live(&TauriDialogHost { app: &app }, window_id, HIDE_ON_CLOSE)
+}
+
+/// macOS hides the dialog on close and reuses it; elsewhere it is destroyed
+/// and the next open builds a fresh one.
+const HIDE_ON_CLOSE: bool = cfg!(target_os = "macos");
+
+/// The go-live dialog's window, as opening and closing it uses it. The
+/// lifecycle test drives [`open_go_live`] through this seam with a fake that
+/// records every call and keeps the close handler production registers, the
+/// same pattern as hover_tab's `HoverTabPanelHandle`: tauri's `MockRuntime`
+/// show/hide are no-ops that record nothing. `tauri::WebviewWindow`
+/// implements it as passthroughs.
+pub(crate) trait GoLiveDialog: Clone + Send + 'static {
+    /// Tell the page which share it is for now (`go-live-target`).
+    fn retarget(&self, window_id: u32);
+    fn bring_forward(&self);
+    fn hide(&self);
+    /// Call `prevent` on every close request (the page's own close() and the
+    /// title bar's close button); the close is prevented when it returns true.
+    fn on_close_request(&self, prevent: impl Fn() -> bool + Send + 'static);
+}
+
+/// Where the go-live dialog's window comes from: the one already open (a
+/// hidden one included), or a new one.
+pub(crate) trait GoLiveDialogHost {
+    type Dialog: GoLiveDialog;
+    fn existing(&self) -> Option<Self::Dialog>;
+    fn create(&self) -> Result<Self::Dialog, String>;
+}
+
+/// Open the dialog for share `window_id`: the one that exists (on macOS a
+/// closed dialog is only hidden) is re-targeted and brought forward, else a
+/// new one is built, with its close handler.
+fn open_go_live<H: GoLiveDialogHost>(host: &H, window_id: u32, hide_on_close: bool) -> Result<(), String> {
     go_live_target_slot().store(window_id, std::sync::atomic::Ordering::Relaxed);
-    if let Some(window) = app.get_webview_window(GO_LIVE_WINDOW_LABEL) {
-        let _ = window.emit("go-live-target", window_id);
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+    if let Some(dialog) = host.existing() {
+        dialog.retarget(window_id);
+        dialog.bring_forward();
         return Ok(());
     }
-    let builder =
-        WebviewWindowBuilder::new(&app, GO_LIVE_WINDOW_LABEL, WebviewUrl::App("go-live.html".into()))
-            .title("Go live")
-            .inner_size(460.0, 660.0)
-            .min_inner_size(400.0, 520.0)
-            // Opened from a share's menu, so Petal is usually inactive (sharing
-            // hands focus back to the source app): without this macOS spends
-            // the first click on activating Petal, like the meeting window.
-            .accept_first_mouse(true)
-            // Hidden until loaded: a visible HWND paints white before WebView2.
-            .visible(false)
-            .on_page_load(|window, payload| {
-                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            });
-    #[cfg(target_os = "windows")]
-    let builder = builder.additional_browser_args(crate::webview2_args::WEBVIEW2_ACCEL_ARGS);
-    let window = builder
-        .build_petal()
-        .map_err(|error| format!("couldn't open the go-live window: {error}"))?;
-    // The page's own close() and the title bar's close button both arrive
-    // here as a close request.
-    #[cfg(target_os = "macos")]
-    {
-        let dialog = window.clone();
-        window.on_window_event(move |event| {
+    let dialog = host.create()?;
+    let closing = dialog.clone();
+    dialog.on_close_request(move || on_close_requested(&closing, hide_on_close));
+    Ok(())
+}
+
+/// A close request on the dialog: with `hide_instead` (macOS) it is hidden
+/// and the close is prevented, so the window is reused. True when prevented.
+fn on_close_requested<D: GoLiveDialog>(dialog: &D, hide_instead: bool) -> bool {
+    if hide_instead {
+        dialog.hide();
+    }
+    hide_instead
+}
+
+impl GoLiveDialog for tauri::WebviewWindow {
+    fn retarget(&self, window_id: u32) {
+        let _ = tauri::Emitter::emit(self, "go-live-target", window_id);
+    }
+    fn bring_forward(&self) {
+        let _ = self.show();
+        let _ = self.unminimize();
+        let _ = self.set_focus();
+    }
+    fn hide(&self) {
+        let _ = tauri::WebviewWindow::hide(self);
+    }
+    fn on_close_request(&self, prevent: impl Fn() -> bool + Send + 'static) {
+        self.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = dialog.hide();
+                if prevent() {
+                    api.prevent_close();
+                }
             }
         });
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = window;
-    Ok(())
+}
+
+struct TauriDialogHost<'a> {
+    app: &'a AppHandle,
+}
+
+impl GoLiveDialogHost for TauriDialogHost<'_> {
+    type Dialog = tauri::WebviewWindow;
+
+    fn existing(&self) -> Option<tauri::WebviewWindow> {
+        tauri::Manager::get_webview_window(self.app, GO_LIVE_WINDOW_LABEL)
+    }
+
+    fn create(&self) -> Result<tauri::WebviewWindow, String> {
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+        use crate::streaming::streamer_mode::BuildPetalWindow;
+        let builder =
+            WebviewWindowBuilder::new(self.app, GO_LIVE_WINDOW_LABEL, WebviewUrl::App("go-live.html".into()))
+                .title("Go live")
+                .inner_size(460.0, 660.0)
+                .min_inner_size(400.0, 520.0)
+                // Opened from a share's menu, so Petal is usually inactive (sharing
+                // hands focus back to the source app): without this macOS spends
+                // the first click on activating Petal, like the meeting window.
+                .accept_first_mouse(true)
+                // Hidden until loaded: a visible HWND paints white before WebView2.
+                .visible(false)
+                .on_page_load(|window, payload| {
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                });
+        #[cfg(target_os = "windows")]
+        let builder = builder.additional_browser_args(crate::webview2_args::WEBVIEW2_ACCEL_ARGS);
+        builder.build_petal().map_err(|error| format!("couldn't open the go-live window: {error}"))
+    }
 }
 
 /// The live-stream entry a share's options menu shows.
