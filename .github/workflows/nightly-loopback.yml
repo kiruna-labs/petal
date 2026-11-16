@@ -88,7 +88,7 @@ on:
         default: ""
         type: string
       net_loss_pct:
-        description: "RED-PROOF ONLY (#378): override the impaired pass's loss % each way (default PETAL_NET_IMPAIR_LOSS_PCT). Leave empty."
+        description: "RED-PROOF ONLY (#378): override the impaired pass's loss % each way (default PETAL_NET_IMPAIR_LOSS_PCT). 2 or more also asserts the attribution loss row (web NACKs up, host replay still). Leave empty."
         required: false
         default: ""
         type: string
@@ -1043,12 +1043,11 @@ jobs:
                 node "$VERDICT" latency --pass impaired --results "$IMPAIRED_RESULTS_JSON" --photon "$IMPAIRED_PHOTON_JSON" \
                 --host-log "$IMPAIRED_PETAL_LOG" --json "$IMPAIRED_LATENCY_JSON" 2>&1 | tee -a "$HARNESS_LOG"
               [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
-              if [ "$NET_DELAY_MS" -gt 0 ]; then
-                echo "==> Post-suite: stage attribution (clean vs impaired)" | tee -a "$HARNESS_LOG"
-                node "$VERDICT" attribution --pass impaired --clean "$LATENCY_JSON" --impaired "$IMPAIRED_LATENCY_JSON" \
-                  --delay-ms "$NET_DELAY_MS" 2>&1 | tee -a "$HARNESS_LOG"
-                [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
-              fi
+              # Every impaired pass gets a verdict; 0ms at < 2% loss fails it (nothing assertable).
+              echo "==> Post-suite: stage attribution (clean vs impaired)" | tee -a "$HARNESS_LOG"
+              node "$VERDICT" attribution --pass impaired --clean "$LATENCY_JSON" --impaired "$IMPAIRED_LATENCY_JSON" \
+                --delay-ms "$NET_DELAY_MS" --loss-pct "$NET_LOSS_PCT" 2>&1 | tee -a "$HARNESS_LOG"
+              [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
               set -e
             fi
           fi
