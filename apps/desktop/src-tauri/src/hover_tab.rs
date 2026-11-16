@@ -350,46 +350,130 @@ fn invalidate_all_share_focus_attempts() {
 /// follow-up once the new pill-webview architecture's window-id story is
 /// understood.
 pub(crate) fn drag_nudge(app: &AppHandle, window_id: u32, frame: crate::platform::cg::WindowFrame) {
-    let _drag_guard = MAC_DRAG_COMMAND_LOCK.lock_unpoisoned();
-    if platform::drag_is_active() {
+    drag_nudge_with(
+        &MacDragNudgeEnv { app },
+        &MAC_DRAG_COMMAND_LOCK,
+        window_id,
+        frame,
+    );
+}
+
+/// What `drag_nudge_with` needs from the app, so a test can drive its real
+/// lock order and rechecks with a fake.
+#[cfg(target_os = "macos")]
+trait DragNudgeEnv {
+    fn drag_active(&self) -> bool;
+    fn hover_update(&self) -> Option<HoverTabUpdate>;
+    /// May wait on the main thread: called with the drag lock FREE.
+    fn work_area(&self) -> Option<crate::hover_core::MonitorBounds>;
+    fn current_position(&self) -> HoverTabPosition;
+    /// Called with the drag lock HELD.
+    fn hide(&self);
+    /// Called with the drag lock HELD.
+    fn place(&self, presentation: HoverTabPresentation, update: HoverTabUpdate);
+}
+
+#[cfg(target_os = "macos")]
+struct MacDragNudgeEnv<'a> {
+    app: &'a AppHandle,
+}
+
+#[cfg(target_os = "macos")]
+impl DragNudgeEnv for MacDragNudgeEnv<'_> {
+    fn drag_active(&self) -> bool {
+        platform::drag_is_active()
+    }
+
+    fn hover_update(&self) -> Option<HoverTabUpdate> {
+        last_hover_update()
+    }
+
+    fn work_area(&self) -> Option<crate::hover_core::MonitorBounds> {
+        platform::tab_work_area(self.app)
+    }
+
+    fn current_position(&self) -> HoverTabPosition {
+        crate::share_priority::current_hover_tab_position()
+    }
+
+    fn hide(&self) {
+        platform::hide_tab_with_drag_lock_held(self.app);
+    }
+
+    fn place(&self, presentation: HoverTabPresentation, mut update: HoverTabUpdate) {
+        platform::note_drag_nudge();
+        let generation = position_tab(self.app, presentation);
+        update.tab_x = presentation.rect.x;
+        update.tab_y = presentation.rect.y;
+        update.perimeter_position = presentation.position;
+        update.side = presentation.side;
+        update.attachment = presentation.attachment;
+        update.presentation_generation = generation;
+        if !crate::hover_core::set_last_hover_update_if_generation(Some(update.clone()), generation)
+        {
+            return;
+        }
+        // The webview's inner UI does not need ~120Hz updates; emit at most
+        // every 50ms (the panel FRAME moves every event regardless).
+        if platform::emit_throttle_ok(50) {
+            let _ = tauri::Emitter::emit(self.app, "hover-tab-update", update);
+        }
+    }
+}
+
+/// The CGEventTap thread's per-drag-event tab move.
+///
+/// The monitor read happens BEFORE `drag_lock` is taken: off the main thread
+/// it waits on the main thread, while `hover_tab_drag`, a sync command, takes
+/// the same lock ON the main thread. Holding the lock across that wait can
+/// deadlock both threads and freeze the app. Everything a command can change
+/// while we wait (an active drag, the hovered window, the committed perimeter
+/// position) is read again under the lock, and the placement is computed
+/// there from the current position, so a command that finished meanwhile is
+/// never undone or cancelled by this older event.
+#[cfg(target_os = "macos")]
+fn drag_nudge_with(
+    env: &impl DragNudgeEnv,
+    drag_lock: &Mutex<()>,
+    window_id: u32,
+    frame: crate::platform::cg::WindowFrame,
+) {
+    if env.drag_active() {
         return;
     }
     if !crate::hover_core::valid_hover_tab_frame(frame) {
         log::debug!("hover_tab: ignoring invalid source frame during drag nudge");
         return;
     }
-    let Some(mut update) = last_hover_update() else {
+    if env
+        .hover_update()
+        .is_none_or(|update| update.window_id != window_id)
+    {
+        return;
+    }
+    let work_area = env.work_area();
+    let _drag_guard = drag_lock.lock_unpoisoned();
+    if env.drag_active() {
+        return;
+    }
+    let Some(mut update) = env.hover_update() else {
         return;
     };
     if update.window_id != window_id {
         return;
     }
-    let Some(presentation) = platform::tab_position(app, &frame, window_id) else {
-        // `hide_tab` re-takes MAC_DRAG_COMMAND_LOCK (a non-reentrant std
-        // Mutex) through `reset_mac_drag_state_serialized`; holding our guard
-        // across that call self-deadlocked the CGEventTap thread and wedged
-        // every later drag/hide/leave. Release first -- we return either way.
-        drop(_drag_guard);
-        platform::hide_tab(app);
+    let Some(work_area) = work_area else {
+        env.hide();
         return;
     };
-    platform::note_drag_nudge();
-    let generation = position_tab(app, presentation);
+    let presentation = crate::hover_core::hover_tab_presentation_with_position(
+        window_id,
+        frame,
+        work_area,
+        env.current_position(),
+    );
     update.frame = frame;
-    update.tab_x = presentation.rect.x;
-    update.tab_y = presentation.rect.y;
-    update.perimeter_position = presentation.position;
-    update.side = presentation.side;
-    update.attachment = presentation.attachment;
-    update.presentation_generation = generation;
-    if !crate::hover_core::set_last_hover_update_if_generation(Some(update.clone()), generation) {
-        return;
-    }
-    // The webview's inner UI does not need ~120Hz updates; emit at most every
-    // 50ms (the panel FRAME moves every event regardless).
-    if platform::emit_throttle_ok(50) {
-        let _ = tauri::Emitter::emit(app, "hover-tab-update", update);
-    }
+    env.place(presentation, update);
 }
 
 /// Toggle share state for `window_id`. Returns the NEW shared state (true =
@@ -2420,6 +2504,18 @@ pub(crate) mod platform {
         // previewed position after the target has disappeared. Serialize it
         // with command phases so an older AppKit move cannot win afterward.
         super::reset_mac_drag_state_serialized(true);
+        hide_tab_after_drag_reset(app);
+    }
+
+    /// `hide_tab` for a caller that already holds `MAC_DRAG_COMMAND_LOCK`
+    /// (a non-reentrant std Mutex): resets the drag state without re-taking
+    /// it. Nothing here waits on the main thread.
+    pub(super) fn hide_tab_with_drag_lock_held(app: &tauri::AppHandle) {
+        reset_drag_state(true);
+        hide_tab_after_drag_reset(app);
+    }
+
+    fn hide_tab_after_drag_reset(app: &tauri::AppHandle) {
         super::set_last_hover_update(None);
         crate::hover_tab::hide_tab_window(app);
         // Global `emit` -- same issue-#22 root cause as `hover-tab-update`
@@ -2453,6 +2549,17 @@ pub(crate) mod platform {
         if !crate::hover_core::valid_hover_tab_frame(*frame) {
             return None;
         }
+        let bounds = tab_work_area(app)?;
+        Some(super::hover_tab_presentation_with_position(
+            window_id, *frame, bounds, position,
+        ))
+    }
+
+    /// The usable rectangle (logical points) of the monitor under the cursor.
+    /// Off the main thread this WAITS on the main thread (Tauri's monitor
+    /// getters dispatch there), so never call it while holding a lock a
+    /// main-thread command also takes (`MAC_DRAG_COMMAND_LOCK`).
+    pub(super) fn tab_work_area(app: &tauri::AppHandle) -> Option<MonitorBounds> {
         let monitor = get_monitor_with_cursor(app)?;
         let scale = monitor.scale_factor();
         if !scale.is_finite() || scale <= 0.0 {
@@ -2483,9 +2590,7 @@ pub(crate) mod platform {
         {
             return None;
         }
-        Some(super::hover_tab_presentation_with_position(
-            window_id, *frame, bounds, position,
-        ))
+        Some(bounds)
     }
 
     /// Find the Tauri `Monitor` containing the cursor's current position.
@@ -4117,5 +4222,221 @@ mod tests {
         super::show_hover_tab_panel_if_hidden(&panel);
 
         assert_eq!(panel.show_calls.get(), 1);
+    }
+
+    /// `drag_nudge` runs on the CGEventTap thread while `hover_tab_drag`
+    /// runs on the main thread. These drive `drag_nudge_with`, the function
+    /// `drag_nudge` calls, with a fake environment and a test-owned lock.
+    mod drag_nudge_lock_order {
+        use super::super::{drag_nudge_with, DragNudgeEnv};
+        use crate::hover_core::{
+            hover_tab_presentation_with_position, HoverTabAttachment, HoverTabPosition,
+            HoverTabPresentation, HoverTabSide, HoverTabUpdate, MonitorBounds,
+        };
+        use crate::platform::cg::WindowFrame;
+        use std::cell::{Cell, RefCell};
+        use std::sync::Mutex;
+
+        const WID: u32 = 42;
+        const OTHER_WID: u32 = 43;
+        const MONITOR: MonitorBounds = MonitorBounds::new(0.0, 25.0, 1440.0, 900.0);
+        const FRAME: WindowFrame = WindowFrame {
+            x: 300,
+            y: 200,
+            width: 800,
+            height: 600,
+        };
+        /// The frame the cached hover update starts with, so a test can tell
+        /// whether the nudge replaced it.
+        const CACHED_FRAME: WindowFrame = WindowFrame {
+            x: 280,
+            y: 190,
+            width: 800,
+            height: 600,
+        };
+
+        /// What a main-thread command does while the nudge waits for the
+        /// monitor read.
+        #[derive(Clone, Copy)]
+        enum DuringLookup {
+            Nothing,
+            DragBegins,
+            PositionCommitted(HoverTabPosition),
+            HoverMovesToAnotherWindow,
+        }
+
+        struct Fake<'a> {
+            lock: &'a Mutex<()>,
+            drag_active: Cell<bool>,
+            hover: RefCell<Option<HoverTabUpdate>>,
+            position: Cell<HoverTabPosition>,
+            work_area: Option<MonitorBounds>,
+            during_lookup: DuringLookup,
+            lookup_saw_lock_free: Cell<Option<bool>>,
+            hides: Cell<u32>,
+            placed: RefCell<Vec<HoverTabPresentation>>,
+        }
+
+        fn update(window_id: u32) -> HoverTabUpdate {
+            HoverTabUpdate {
+                window_id,
+                frame: CACHED_FRAME,
+                source_owner_pid: None,
+                tab_x: 0.0,
+                tab_y: 0.0,
+                perimeter_position: HoverTabPosition::new(0.25),
+                side: HoverTabSide::Top,
+                attachment: HoverTabAttachment::Outside,
+                vertical_offset: 0.5,
+                shared: false,
+                display_like: false,
+                presentation_generation: 1,
+            }
+        }
+
+        impl<'a> Fake<'a> {
+            fn new(
+                lock: &'a Mutex<()>,
+                work_area: Option<MonitorBounds>,
+                during: DuringLookup,
+            ) -> Self {
+                Self {
+                    lock,
+                    drag_active: Cell::new(false),
+                    hover: RefCell::new(Some(update(WID))),
+                    position: Cell::new(HoverTabPosition::new(0.25)),
+                    work_area,
+                    during_lookup: during,
+                    lookup_saw_lock_free: Cell::new(None),
+                    hides: Cell::new(0),
+                    placed: RefCell::new(Vec::new()),
+                }
+            }
+
+            fn lock_is_held(&self) -> bool {
+                self.lock.try_lock().is_err()
+            }
+        }
+
+        impl DragNudgeEnv for Fake<'_> {
+            fn drag_active(&self) -> bool {
+                self.drag_active.get()
+            }
+
+            fn hover_update(&self) -> Option<HoverTabUpdate> {
+                self.hover.borrow().clone()
+            }
+
+            fn work_area(&self) -> Option<MonitorBounds> {
+                self.lookup_saw_lock_free.set(Some(!self.lock_is_held()));
+                match self.during_lookup {
+                    DuringLookup::Nothing => {}
+                    DuringLookup::DragBegins => self.drag_active.set(true),
+                    DuringLookup::PositionCommitted(position) => self.position.set(position),
+                    DuringLookup::HoverMovesToAnotherWindow => {
+                        *self.hover.borrow_mut() = Some(update(OTHER_WID));
+                    }
+                }
+                self.work_area
+            }
+
+            fn current_position(&self) -> HoverTabPosition {
+                self.position.get()
+            }
+
+            fn hide(&self) {
+                assert!(self.lock_is_held(), "hide runs with the drag lock held");
+                self.hides.set(self.hides.get() + 1);
+            }
+
+            fn place(&self, presentation: HoverTabPresentation, update: HoverTabUpdate) {
+                assert!(self.lock_is_held(), "place runs with the drag lock held");
+                assert_eq!(
+                    update.frame, FRAME,
+                    "the published update carries the nudged frame, not the cached one"
+                );
+                self.placed.borrow_mut().push(presentation);
+            }
+        }
+
+        #[test]
+        fn monitor_read_runs_with_the_drag_lock_free() {
+            let lock = Mutex::new(());
+            let fake = Fake::new(&lock, Some(MONITOR), DuringLookup::Nothing);
+            drag_nudge_with(&fake, &lock, WID, FRAME);
+            assert_eq!(
+                fake.lookup_saw_lock_free.get(),
+                Some(true),
+                "the monitor read waits on the main thread, where hover_tab_drag takes the lock"
+            );
+            assert_eq!(fake.placed.borrow().len(), 1);
+            assert_eq!(fake.hides.get(), 0);
+        }
+
+        #[test]
+        fn failed_monitor_read_hides_the_tab_once() {
+            let lock = Mutex::new(());
+            let fake = Fake::new(&lock, None, DuringLookup::Nothing);
+            drag_nudge_with(&fake, &lock, WID, FRAME);
+            assert_eq!(fake.lookup_saw_lock_free.get(), Some(true));
+            assert_eq!(fake.hides.get(), 1);
+            assert!(fake.placed.borrow().is_empty());
+        }
+
+        #[test]
+        fn drag_that_begins_during_the_monitor_read_is_neither_moved_nor_cancelled() {
+            for work_area in [Some(MONITOR), None] {
+                let lock = Mutex::new(());
+                let fake = Fake::new(&lock, work_area, DuringLookup::DragBegins);
+                drag_nudge_with(&fake, &lock, WID, FRAME);
+                assert!(
+                    fake.placed.borrow().is_empty(),
+                    "work area {work_area:?}: no move"
+                );
+                assert_eq!(
+                    fake.hides.get(),
+                    0,
+                    "work area {work_area:?}: the new drag is not reset"
+                );
+            }
+        }
+
+        #[test]
+        fn position_committed_during_the_monitor_read_is_the_one_placed() {
+            let lock = Mutex::new(());
+            let committed = HoverTabPosition::new(0.75);
+            let fake = Fake::new(
+                &lock,
+                Some(MONITOR),
+                DuringLookup::PositionCommitted(committed),
+            );
+            drag_nudge_with(&fake, &lock, WID, FRAME);
+            let expected = hover_tab_presentation_with_position(WID, FRAME, MONITOR, committed);
+            assert_eq!(*fake.placed.borrow(), vec![expected]);
+        }
+
+        #[test]
+        fn hover_that_moves_to_another_window_during_the_monitor_read_is_left_alone() {
+            for work_area in [Some(MONITOR), None] {
+                let lock = Mutex::new(());
+                let fake = Fake::new(&lock, work_area, DuringLookup::HoverMovesToAnotherWindow);
+                drag_nudge_with(&fake, &lock, WID, FRAME);
+                assert!(
+                    fake.placed.borrow().is_empty(),
+                    "work area {work_area:?}: no move"
+                );
+                assert_eq!(fake.hides.get(), 0, "work area {work_area:?}: no hide");
+            }
+        }
+
+        #[test]
+        fn no_monitor_read_while_a_drag_is_active() {
+            let lock = Mutex::new(());
+            let fake = Fake::new(&lock, Some(MONITOR), DuringLookup::Nothing);
+            fake.drag_active.set(true);
+            drag_nudge_with(&fake, &lock, WID, FRAME);
+            assert_eq!(fake.lookup_saw_lock_free.get(), None);
+            assert!(fake.placed.borrow().is_empty());
+        }
     }
 }
