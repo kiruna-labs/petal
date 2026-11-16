@@ -1220,7 +1220,6 @@ async function joinWebHarness(cdp, pageUrl, credential, livekitRoom) {
       return true;
     })()`
   );
-  bankedControllerSummaryLines.push(...(await readControllerSummaryLines(cdp)));
   await cdp.call('Page.navigate', { url: joinUrl });
   await waitUntil(
     // The DOM alone is not readiness: on a cold vite start the harness module
@@ -1634,8 +1633,9 @@ async function collectControllerPublishes(ctx, caseId) {
 
 // #378: the web controller's `remote-control-latency-summary:` lines (#375
 // receive stages, nack_count) from the harness session log, for the
-// attribution verdict. The log dies with the page, so joinWebHarness banks
-// it before every navigation (a rejoin reloads). Best-effort: the verdict
+// attribution verdict. The log dies with the page, so a mid-suite rejoin
+// banks it first. Only rejoins: the initial join's page still holds an
+// earlier invocation's lines (one browser serves every suite). The verdict
 // scores missing lines insufficient, never a pass.
 const bankedControllerSummaryLines = [];
 async function readControllerSummaryLines(cdp) {
@@ -3996,6 +3996,8 @@ try {
         terminalDeliveries: [],
       },
       rejoinWebHarness: async () => {
+        // #378: bank this suite's controller summaries before the reload.
+        bankedControllerSummaryLines.push(...(await readControllerSummaryLines(cdp)));
         const rejoined = await joinWebHarness(cdp, pageUrl, room.accessCode, room.livekitRoom);
         console.log(`# controller rejoined after disconnect room=${rejoined.name}`);
         return rejoined;

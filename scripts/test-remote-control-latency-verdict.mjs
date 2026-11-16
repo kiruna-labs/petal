@@ -18,7 +18,6 @@ import {
   ATTRIBUTION_ROWS,
   LATENCY_CHECKS,
   LOSS_ATTRIBUTION_ROWS,
-  LOSS_ROW_MIN_PCT,
   REPLAY_ATTRIBUTION_ROWS,
   SUMMARY_COUNTERS,
   attributionVerdict,
@@ -775,6 +774,11 @@ test('e2e-gate-verdict.mjs attribution-replay and --loss-pct exit 0 on a correct
 test('the workflow hands the impaired loss % to the attribution verdict', () => {
   const workflow = readFileSync(path.join(repoRoot, '.github/workflows/nightly-loopback.yml'), 'utf8');
   assert.match(workflow, /node "\$VERDICT" attribution [^\n]*\n[^\n]*--delay-ms "\$NET_DELAY_MS" --loss-pct "\$NET_LOSS_PCT"/);
-  assert.match(workflow, /if \[ "\$NET_DELAY_MS" -gt 0 \] \|\| awk -v l="\$NET_LOSS_PCT" 'BEGIN \{ exit !\(l \+ 0 >= 2\) \}'/, 'a loss-only red-proof (>= LOSS_ROW_MIN_PCT) still runs attribution');
-  assert.equal(LOSS_ROW_MIN_PCT, 2, 'the workflow gate above hard-codes 2');
+  assert.match(workflow, /if \[ "\$NET_DELAY_MS" -gt 0 \] \|\| awk -v l="\$NET_LOSS_PCT" 'BEGIN \{ exit !\(l \+ 0 > 0\) \}'/, 'any loss-only impairment runs attribution (and fails it below LOSS_ROW_MIN_PCT)');
+  // The harness banks web controller summaries only before a mid-suite rejoin,
+  // never on the initial join (that page holds an earlier suite's lines).
+  const scenario = readFileSync(path.join(rcScripts, 'remote-control-scenario.mjs'), 'utf8');
+  const join = scenario.slice(scenario.indexOf('async function joinWebHarness('), scenario.indexOf('async function waitForMatchingWindow('));
+  assert.ok(!join.includes('bankedControllerSummaryLines'), 'joinWebHarness must not bank');
+  assert.match(scenario, /rejoinWebHarness: async \(\) => \{[^}]*bankedControllerSummaryLines\.push\(\.\.\.\(await readControllerSummaryLines\(cdp\)\)\);\s*const rejoined = await joinWebHarness/);
 });
