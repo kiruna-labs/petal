@@ -5431,6 +5431,23 @@ mod tests {
         );
     }
 
+    /// Display and region shares never stop for a hidden window: a region
+    /// share's target is Petal's own selector window, registered as a window.
+    #[tokio::test(start_paused = true)]
+    async fn share_loss_monitor_ignores_hidden_windows_for_display_and_region_shares() {
+        let generation = RoomGeneration::new(Arc::new(AtomicU64::new(1)), 1);
+        for kind in [SharedSourceKind::Display, SharedSourceKind::DisplayRegion] {
+            let mut interval = share_loss_interval();
+            let watch = poll_share_loss(&mut interval, &generation, kind, || true, || None);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(10), watch)
+                    .await
+                    .is_err(),
+                "{kind:?} share stopped for a hidden window"
+            );
+        }
+    }
+
     /// A late poll doesn't move the schedule: tokio's `Delay` restarts it
     /// from the late wakeup, so polls 20 ms late each time drift 20 ms per
     /// poll and add up to a stop past 2 s.
@@ -5532,7 +5549,13 @@ mod tests {
         show(SW_SHOWMINNOACTIVE);
         assert!(unsafe { IsIconic(window.0) }.as_bool());
         assert!(stays_shared(SharedSourceKind::Window).await, "minimized window");
+        // Minimize-to-tray apps hide the window after it minimizes; it stays
+        // iconic, so it is not a close.
+        show(SW_HIDE);
+        assert!(unsafe { IsIconic(window.0) }.as_bool());
+        assert!(stays_shared(SharedSourceKind::Window).await, "minimized to the tray");
         show(SW_SHOWNOACTIVATE);
+        assert!(!unsafe { IsIconic(window.0) }.as_bool(), "fixture restored");
         // Another virtual desktop cloaks a window without clearing WS_VISIBLE.
         cloak(true);
         assert!(stays_shared(SharedSourceKind::Window).await, "cloaked window");
