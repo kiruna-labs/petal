@@ -174,7 +174,8 @@ const expectedRemoteControl = [
   ['pointer-click-v2-sent-at', true],
   ['result-applied-v2-host-hold', true],
   ['request-lk-node-hash', true],
-  ['status-active-lk-node-hash', true]
+  ['status-active-lk-node-hash', true],
+  ['input-frame', true]
 ];
 assertDeepEqual(
   fixture.remoteControlMessages.map((entry) => [entry.name, entry.reliable]),

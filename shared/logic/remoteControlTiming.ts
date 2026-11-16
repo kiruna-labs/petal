@@ -38,3 +38,26 @@ export function remoteControlInputRttMs(
   const rtt = Math.floor(resultRecvMs) - sent - hold;
   return rtt >= 0 ? rtt : undefined;
 }
+
+/**
+ * #376: the native host replays at most this many Unicode scalar values per
+ * `text` packet (Rust `MAX_REPLAY_TEXT_CHARS`); `remote_control_send` splits a
+ * longer one into chunks numbered `seq, seq+1, ...`.
+ */
+export const REMOTE_TEXT_CHUNK_CHARS = 1000;
+
+/** How many seqs `remote_control_send` uses for `text` (an empty text is one packet). */
+export function remoteTextChunkCount(text: string): number {
+  return Math.max(1, Math.ceil(Array.from(text).length / REMOTE_TEXT_CHUNK_CHARS));
+}
+
+/**
+ * Reserve `count` consecutive seqs after `last` so no later input reuses a
+ * chunk's seq (a reused seq would let the host's `inputFrame` for a chunk
+ * resolve that input). Wraps to 1 like the per-input counter.
+ */
+export function reserveSeqs(last: number, count: number): { first: number; last: number } {
+  const n = Math.max(1, Math.floor(count));
+  const first = last + n > Number.MAX_SAFE_INTEGER ? 1 : last + 1;
+  return { first, last: first + n - 1 };
+}

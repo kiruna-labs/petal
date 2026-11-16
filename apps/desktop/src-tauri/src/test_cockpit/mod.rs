@@ -8494,6 +8494,7 @@ fn wire_kind_label(kind: crate::remote_control_core::RemoteControlType) -> &'sta
         T::Key => "key",
         T::Text => "text",
         T::Result => "result",
+        T::InputFrame => "inputFrame",
         T::Unknown => "unknown",
     }
 }

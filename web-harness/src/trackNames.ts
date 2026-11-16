@@ -881,6 +881,16 @@ export type RemoteControlMessage =
         | 'superseded'
         | 'malformed'
         | 'admissionOverloaded';
+    })
+  | (RemoteControlBase & {
+      /** #376: host -> controller. `seq` is the controller's input; `frameId`
+       * the trailer frame id of the first published frame that shows it. */
+      kind: 'inputFrame';
+      frameId: number;
+      /** `unknown`: the host had no dirty rects, so "the next frame". */
+      contentChange: 'detected' | 'unknown';
+      /** The publication `frameId` belongs to (a republish restarts ids). */
+      trackSid?: string;
     });
 
 /**

@@ -796,6 +796,7 @@ fn classify_remote_control(message: &RemoteControlMessage) -> Option<ClassifiedI
         | RemoteControlType::Release
         | RemoteControlType::Status
         | RemoteControlType::Result
+        | RemoteControlType::InputFrame
         | RemoteControlType::Unknown => None,
     }
 }

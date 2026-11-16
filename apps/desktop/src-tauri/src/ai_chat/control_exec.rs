@@ -263,6 +263,9 @@ fn base_message(window_id: u32, kind: RemoteControlType) -> RemoteControlMessage
         sent_at_ms: None,
         host_hold_ms: None,
         lk_node_hash: None,
+        frame_id: None,
+        content_change: None,
+        track_sid: None,
         modifiers: RemoteControlModifiers::default(),
     }
 }

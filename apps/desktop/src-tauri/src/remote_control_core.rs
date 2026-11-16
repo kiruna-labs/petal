@@ -1060,6 +1060,9 @@ pub enum RemoteControlType {
     /// Additive v2 terminal outcome for a reliable discrete operation. Old
     /// peers ignore an unknown `kind`; it is never overloaded onto status.
     Result,
+    /// #376: host -> controller, the first published frame (`frameId`) that
+    /// shows a discrete input (`seq`). Additive; old controllers ignore it.
+    InputFrame,
     #[serde(other)]
     Unknown,
 }
@@ -1626,6 +1629,16 @@ pub struct RemoteControlMessage {
     /// ignore it; a missing or malformed value means `same_edge=unknown`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lk_node_hash: Option<String>,
+    /// #376: on `inputFrame` only -- the trailer `frame_id` of the first
+    /// published frame that shows input `seq`, and whether the capture saw
+    /// dirty rects (`detected`) or only "the next frame" (`unknown`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_change: Option<String>,
+    /// The publication `frame_id` belongs to (a republish restarts ids).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_sid: Option<String>,
     #[serde(default)]
     pub modifiers: RemoteControlModifiers,
 }
@@ -1692,6 +1705,9 @@ impl RemoteControlDraft {
             sent_at_ms: self.sent_at_ms,
             host_hold_ms: None,
             lk_node_hash: None,
+            frame_id: None,
+            content_change: None,
+            track_sid: None,
             modifiers: self.modifiers,
         }
     }
@@ -2069,6 +2085,7 @@ pub(crate) fn canonical_operation_fingerprint(
             RemoteControlType::Key => 6,
             RemoteControlType::Text => 7,
             RemoteControlType::Result => 8,
+            RemoteControlType::InputFrame => 9,
             RemoteControlType::Unknown => 255,
         }
     }

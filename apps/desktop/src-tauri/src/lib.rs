@@ -133,6 +133,8 @@ mod control_consent;
 mod analytics;
 mod rc_input_timing;
 mod rc_latency_telemetry;
+// #376: host inputFrame emission + controller press-to-photon correlation.
+mod rc_photon;
 // #374: native controller receive-path stage timing (subscriber + compositor).
 mod rc_receiver_timing;
 mod sfu_edge;
