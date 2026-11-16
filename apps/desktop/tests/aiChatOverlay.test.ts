@@ -299,7 +299,11 @@ test('order_chrome_above_panel and remove_window both cover the ai-chat overlay 
       'can end up behind the panel'
   );
 
-  const removeBody = extractFn(compositorRs, 'pub fn remove_window(');
+  // #360: remove_window's hide + park lives in finish_window_removal, which
+  // the rejoin-hold expiry shares.
+  const removeBody =
+    extractFn(compositorRs, 'pub fn remove_window(') +
+    extractFn(compositorRs, 'fn finish_window_removal(');
   assert.match(
     flat(removeBody),
     /for label in \[\s*control_label_for_key\(&key_for_main\),\s*pointer_label_for_key\(&key_for_main\),\s*ai_chat_label_for_key\(&key_for_main\),\s*panel_label_for_key\(&key_for_main\),\s*\]/,
@@ -432,7 +436,10 @@ test('show_retired_window_on_main and reveal_remote_window_after_first_frame_on_
 });
 
 test('remove_window detaches the ai-chat overlay before hiding it in the teardown loop', () => {
-  const body = flat(extractFn(compositorRs, 'pub fn remove_window('));
+  const body = flat(
+    extractFn(compositorRs, 'pub fn remove_window(') +
+      extractFn(compositorRs, 'fn finish_window_removal(')
+  );
   assert.match(
     body,
     /if label == ai_chat_label_for_key\(&key_for_main\) \{ detach_ai_chat_overlay\(&app_main, &key_for_main\); \} let _ = win\.hide\(\);/,
