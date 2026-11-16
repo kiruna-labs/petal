@@ -844,8 +844,13 @@ pub async fn stop(app: &AppHandle, reason: StopReason) {
         pipeline.stop.store(true, Ordering::Release);
         let _ = tokio::task::spawn_blocking(move || pipeline.thread.join()).await;
     }
-    if let Some(publisher) = session.publisher.take() {
-        let _ = tokio::time::timeout(Duration::from_secs(5), publisher).await;
+    if let Some(mut publisher) = session.publisher.take() {
+        // Never leave it running past Stop: whatever it still holds must not
+        // go out after the stream is reported ended.
+        if tokio::time::timeout(Duration::from_secs(5), &mut publisher).await.is_err() {
+            log::warn!("streaming: RTMP publisher did not stop within 5 s; aborting it");
+            publisher.abort();
+        }
     }
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     if let Some(mic) = session.mic.take() {

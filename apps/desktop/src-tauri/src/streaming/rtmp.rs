@@ -26,6 +26,7 @@ pub const RTMP_KEY_MAX_LEN: usize = 256;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Where to publish. The server URL is `rtmp[s]://host[:port]/app`; the key
 /// is the stream name.
@@ -217,6 +218,21 @@ async fn flush(
         .map_err(|_| RtmpError::Closed)
 }
 
+/// [`flush`], abandoned as soon as `cancel` fires: after Stop nothing more
+/// goes out, however slowly the link drains. False when cancelled.
+async fn flush_unless_cancelled(
+    connection: &mut RtmpPublishClientConnection,
+    writer: &mut (impl AsyncWrite + Unpin),
+    bytes_sent: &AtomicU64,
+    cancel: &CancellationToken,
+) -> Result<bool, RtmpError> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Ok(false),
+        flushed = flush(connection, writer, bytes_sent) => flushed.map(|()| true),
+    }
+}
+
 /// One connected, publishing session.
 struct Session {
     reader: tokio::io::ReadHalf<Box<dyn Io>>,
@@ -315,7 +331,9 @@ async fn pump(
     let mut buf = vec![0u8; 16 * 1024];
     let mut stall_check = tokio::time::interval(Duration::from_millis(500));
     loop {
-        flush(&mut session.connection, &mut session.writer, bytes_sent).await?;
+        if !flush_unless_cancelled(&mut session.connection, &mut session.writer, bytes_sent, cancel).await? {
+            return Ok(());
+        }
         if session.connection.state() != RtmpConnectionState::Publishing {
             let reason = peer_disconnect_reason(&mut session.connection, destination);
             return Err(reason.map_or(RtmpError::Closed, RtmpError::Dropped));
@@ -400,7 +418,9 @@ pub async fn run_publisher(
                     pump(&mut session, &queue, &mut headers, &destination, &stats.bytes_sent, &cancel)
                         .await;
                 stats.connected.store(false, Ordering::Relaxed);
-                let _ = session.writer.shutdown().await;
+                // Bounded: a link too slow to take the close must not keep
+                // the publisher alive after Stop.
+                let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, session.writer.shutdown()).await;
                 match result {
                     Ok(()) => return finish(PublisherState::Stopped),
                     Err(error) => (error, Some(up_since.elapsed())),
@@ -767,6 +787,28 @@ mod tests {
         cancel.cancel();
         assert_eq!(publisher.await.unwrap(), PublisherState::Stopped);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn stop_ends_a_flush_stuck_on_a_slow_link() {
+        let destination = RtmpDestination::new("rtmp://127.0.0.1:1935/live", "k").unwrap();
+        let mut connection = RtmpPublishClientConnection::new(destination.rtmp_url().unwrap());
+        assert!(!connection.send_buf().is_empty(), "the handshake is waiting to go out");
+        // A peer that never reads: the write blocks once one byte is buffered.
+        let (mut writer, _peer) = tokio::io::duplex(1);
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            stop.cancel();
+        });
+        let flushed = tokio::time::timeout(
+            Duration::from_secs(2),
+            flush_unless_cancelled(&mut connection, &mut writer, &AtomicU64::new(0), &cancel),
+        )
+        .await
+        .expect("Stop must end the flush, not wait for the write timeout");
+        assert!(!flushed.unwrap(), "reported as cancelled");
     }
 
     #[tokio::test]
