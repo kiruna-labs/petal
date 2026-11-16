@@ -325,7 +325,7 @@ jobs:
       # To quarantine one, remove it from this list first.
       E2E_REQUIRED_RC_CASES: "37,38,39,40,41,42"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.ref || github.ref }}
 
@@ -1167,7 +1167,7 @@ jobs:
       PETAL_DISABLE_AUDIO: 1
       E2E_FREEZE_SOAK_BLOCKING: "true"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.ref || github.ref }}
           # Same runner as live-loopback: keep its target/ so only the
@@ -1337,13 +1337,13 @@ jobs:
       PETAL_DISABLE_AUDIO: 1
     steps:
       - name: Check out the ref under test
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.camera_soak_ref }}
           clean: false
 
       - name: Check out the soak harness (this workflow's ref)
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.sha }}
           path: .camsoak-harness

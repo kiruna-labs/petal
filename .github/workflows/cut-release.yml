@@ -67,7 +67,7 @@ jobs:
 
       # The PAT is used for checkout so the later push carries admin bypass and
       # the tag push triggers release.yml. Dry runs use the default token.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: main
           fetch-depth: 0

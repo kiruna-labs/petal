@@ -56,7 +56,7 @@ jobs:
     outputs:
       frontend: ${{ steps.filter.outputs.changed }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           sparse-checkout: scripts
           sparse-checkout-cone-mode: true
@@ -108,7 +108,7 @@ jobs:
         working-directory: .
         run: echo "No frontend-relevant paths changed in this PR; the desktop frontend gate is not applicable."
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         if: env.RUN == 'true'
       - uses: actions/setup-node@v7
         if: env.RUN == 'true'
@@ -218,7 +218,7 @@ jobs:
         working-directory: .
         run: echo "No frontend-relevant paths changed in this PR; the web-harness gate is not applicable."
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         if: env.RUN == 'true'
       - uses: actions/setup-node@v7
         if: env.RUN == 'true'
@@ -290,7 +290,7 @@ jobs:
         working-directory: .
         run: echo "No frontend-relevant paths changed in this PR; the plugins gate is not applicable."
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         if: env.RUN == 'true'
       - uses: actions/setup-node@v7
         if: env.RUN == 'true'
