@@ -9,11 +9,15 @@
 //! hears a duplicate. A muted track delivers silence (or nothing), which the
 //! mixer treats the same.
 //!
-//! A participant who keeps their audio off live streams (`petal.stream-optout`
-//! = `"1"`) still feeds the echo reference -- the mic still hears them -- but
-//! never the stream mix: their sources leave the mix the moment they opt
-//! out and rejoin when they opt back in. Only remote participants can opt
-//! out; the streamer's own setting doesn't apply to their own stream.
+//! A remote participant is on the stream only while Petal knows their
+//! `petal.stream-optout` value and it isn't `"1"`. Until a value arrives
+//! (never written by Petal 0.9.38 and older, or lost to a rejoin or full
+//! reconnect) they are off the stream, the same as when they keep their
+//! audio off (`"1"`). Someone off the stream still feeds the echo reference
+//! -- the mic still hears them -- but never the stream mix: their sources
+//! leave the mix the moment their value goes and rejoin when an opt-in
+//! (`"0"`) arrives. Only remote participants are gated; the streamer's own
+//! setting doesn't apply to their own stream.
 //!
 //! Consent comes before audio: no remote participant is heard on the stream
 //! until the room has been told it is live (our `petal.live` accepted by the
@@ -36,7 +40,7 @@ use livekit::webrtc::prelude::RtcAudioTrack;
 use tokio_util::sync::CancellationToken;
 
 use super::mixer::{AudioMixer, MIX_CHANNELS, MIX_SAMPLE_RATE};
-use super::wire::{is_opted_out, STREAM_OPTOUT_ATTRIBUTE};
+use super::wire::{is_included, is_opted_out, STREAM_OPTOUT_ATTRIBUTE};
 use crate::sync_ext::MutexExt;
 
 /// How long remote audio stays off a stream after the room learns it is live
@@ -122,8 +126,8 @@ struct Tap {
 struct Taps {
     mixes: Mixes,
     taps: HashMap<String, Tap>,
-    /// Remote participants who keep their audio off live streams.
-    opted_out: HashSet<String>,
+    /// Remote participants whose known `petal.stream-optout` lets them in.
+    opted_in: HashSet<String>,
     consent: Consent,
     /// The room is reconnecting: whatever was announced may be gone.
     reconnecting: bool,
@@ -131,13 +135,13 @@ struct Taps {
 
 impl Taps {
     fn new(mixes: Mixes) -> Self {
-        Self { mixes, taps: HashMap::new(), opted_out: HashSet::new(), consent: Consent::default(), reconnecting: false }
+        Self { mixes, taps: HashMap::new(), opted_in: HashSet::new(), consent: Consent::default(), reconnecting: false }
     }
 
     /// Whether `owner`'s audio belongs in the stream now. Our own (`None`)
     /// always does.
     fn includes(&self, owner: Option<&str>, now: Instant) -> bool {
-        owner.is_none_or(|owner| !self.opted_out.contains(owner) && self.consent.admits(owner, now))
+        owner.is_none_or(|owner| self.opted_in.contains(owner) && self.consent.admits(owner, now))
     }
 
     /// Bring every tap in line with the opt-outs and the consent gate.
@@ -209,30 +213,28 @@ impl Taps {
         }
     }
 
-    /// A remote participant's `petal.stream-optout` reads `value`. `"1"` opts
-    /// them out; another present value (`"0"`) opts them back in; absent
-    /// changes nothing: a participant seen opted out who reappears without
-    /// the attribute (a rejoin or full reconnect lost it) stays out.
+    /// A remote participant's `petal.stream-optout` reads `value`. Only a
+    /// known value other than `"1"` lets them in (after the grace); `"1"` or
+    /// a missing value (unknown: never written, or lost to a rejoin or full
+    /// reconnect) keeps them off the stream until an opt-in arrives.
     fn observe_opt_out(&mut self, identity: &str, value: Option<&str>) {
-        match value {
-            None => {}
-            value => self.set_opted_out(identity, is_opted_out(value)),
-        }
-    }
-
-    /// A remote participant's `petal.stream-optout` is now `opted_out`.
-    fn set_opted_out(&mut self, identity: &str, opted_out: bool) {
-        let changed = if opted_out {
-            self.opted_out.insert(identity.to_string())
+        let changed = if is_included(value) {
+            self.opted_in.insert(identity.to_string())
         } else {
-            self.opted_out.remove(identity)
+            self.opted_in.remove(identity)
         };
         if !changed {
             return;
         }
         log::info!(
-            "streaming: {identity} {} live streams",
-            if opted_out { "keeps their audio off" } else { "is included in" }
+            "streaming: {identity} {}",
+            if is_included(value) {
+                "is included in live streams"
+            } else if is_opted_out(value) {
+                "keeps their audio off live streams"
+            } else {
+                "has no live stream setting: off the stream until one arrives"
+            }
         );
         self.reevaluate(Instant::now());
     }
@@ -283,11 +285,9 @@ pub fn start(
     // `attach` ignores duplicates.
     let mut events = room.subscribe();
     tokio::spawn(async move {
-        // Opt-outs first, so no opted-out track is ever fed in.
+        // Known settings first, so every track is fed in on the right side.
         for (identity, participant) in room.remote_participants() {
-            if is_opted_out(participant.attributes().get(STREAM_OPTOUT_ATTRIBUTE).map(String::as_str)) {
-                taps.set_opted_out(&identity.to_string(), true);
-            }
+            taps.observe_opt_out(&identity.to_string(), remote_opt_out(&participant).as_deref());
         }
         for (sid, publication) in room.local_participant().track_publications() {
             if !taps_local(publication.source()) {
@@ -318,7 +318,8 @@ pub fn start(
                 RoomEvent::ParticipantConnected(participant) => {
                     let identity = participant.identity().to_string();
                     taps.consent.arrived(&identity, Instant::now());
-                    // A (re)joining participant may arrive already opted out.
+                    // A (re)joining participant arrives with their setting, or
+                    // none yet (off the stream until it is written).
                     taps.observe_opt_out(&identity, remote_opt_out(&participant).as_deref());
                     taps.reevaluate(Instant::now());
                 }
@@ -419,6 +420,7 @@ mod tests {
         let mixes = mixes();
         let mut taps = Taps::new(mixes.clone());
         let bob = insert_tap(&mut taps, "TR_bob", Some("bob"));
+        taps.observe_opt_out("bob", Some("0"));
         let ours = insert_tap(&mut taps, "TR_ours", None);
         let t0 = Instant::now();
         // Live, but petal.live not accepted yet: Bob is only in the echo reference.
@@ -445,7 +447,7 @@ mod tests {
     fn an_opted_out_participant_is_never_mixed_even_after_the_grace() {
         let mut taps = Taps::new(mixes());
         let bob = insert_tap(&mut taps, "TR_bob", Some("bob"));
-        taps.set_opted_out("bob", true);
+        taps.observe_opt_out("bob", Some("1"));
         let t0 = Instant::now();
         taps.tick(true, t0);
         taps.tick(true, t0 + REMOTE_AUDIO_GRACE * 10);
@@ -460,6 +462,7 @@ mod tests {
         let arrival = t0 + REMOTE_AUDIO_GRACE * 3;
         taps.consent.arrived("carol", arrival);
         let carol = insert_tap(&mut taps, "TR_carol", Some("carol"));
+        taps.observe_opt_out("carol", Some("0"));
         taps.tick(true, arrival + Duration::from_secs(1));
         assert!(!carol.load(Ordering::Relaxed), "Carol hasn't had time to see LIVE");
         taps.tick(true, arrival + REMOTE_AUDIO_GRACE);
@@ -470,6 +473,7 @@ mod tests {
     fn a_lost_announcement_takes_remote_audio_off_until_it_is_back_and_the_grace_passes() {
         let mut taps = Taps::new(mixes());
         let bob = insert_tap(&mut taps, "TR_bob", Some("bob"));
+        taps.observe_opt_out("bob", Some("0"));
         let t0 = Instant::now();
         taps.tick(true, t0);
         taps.tick(true, t0 + REMOTE_AUDIO_GRACE);
@@ -491,6 +495,7 @@ mod tests {
         let mixes = mixes();
         let mut taps = announced_long_ago(mixes.clone());
         let bob = insert_tap(&mut taps, "TR_bob", Some("bob"));
+        taps.observe_opt_out("bob", Some("0"));
         let t0 = Instant::now();
         taps.tick(true, t0);
         assert!(bob.load(Ordering::Relaxed));
@@ -513,25 +518,84 @@ mod tests {
     }
 
     #[test]
-    fn an_opt_out_lost_to_a_rejoin_keeps_the_participant_out() {
+    fn a_participant_whose_setting_is_unknown_stays_off_past_the_grace() {
+        let mut taps = announced_long_ago(mixes());
+        let carol = insert_tap(&mut taps, "TR_carol", Some("carol"));
+        // Never written (Petal 0.9.38 and older), or written as "" (a delete).
+        taps.observe_opt_out("carol", None);
+        taps.tick(true, Instant::now() + REMOTE_AUDIO_GRACE * 10);
+        assert!(!carol.load(Ordering::Relaxed), "missing is not an opt-in");
+        taps.observe_opt_out("carol", Some(""));
+        taps.tick(true, Instant::now() + REMOTE_AUDIO_GRACE * 10);
+        assert!(!carol.load(Ordering::Relaxed), "empty is a deleted key, not an opt-in");
+    }
+
+    #[test]
+    fn an_opt_in_that_arrives_is_heard_only_once_the_grace_has_passed() {
+        let mut taps = Taps::new(mixes());
+        let t0 = Instant::now();
+        taps.tick(true, t0);
+        taps.consent.arrived("bob", t0);
+        let bob = insert_tap(&mut taps, "TR_bob", Some("bob"));
+        taps.tick(true, t0 + Duration::from_secs(1));
+        assert!(!bob.load(Ordering::Relaxed));
+        // Bob's "0" arrives during his grace: still off until it has passed.
+        taps.observe_opt_out("bob", Some("0"));
+        taps.tick(true, t0 + REMOTE_AUDIO_GRACE - Duration::from_millis(1));
+        assert!(!bob.load(Ordering::Relaxed));
+        taps.tick(true, t0 + REMOTE_AUDIO_GRACE);
+        assert!(bob.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn an_opt_out_keeps_the_participant_out_whatever_the_grace() {
         let mut taps = announced_long_ago(mixes());
         let bob = insert_tap(&mut taps, "TR_bob", Some("bob"));
         taps.observe_opt_out("bob", Some("1"));
+        taps.tick(true, Instant::now() + REMOTE_AUDIO_GRACE * 10);
         assert!(!bob.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn an_included_participant_whose_setting_disappears_is_off_until_it_is_written_again() {
+        let mut taps = announced_long_ago(mixes());
+        let bob = insert_tap(&mut taps, "TR_bob", Some("bob"));
+        taps.observe_opt_out("bob", Some("0"));
+        assert!(bob.load(Ordering::Relaxed));
+        // A full reconnect: Bob reappears with no attributes.
+        taps.observe_opt_out("bob", None);
+        assert!(!bob.load(Ordering::Relaxed), "off at once");
+        taps.tick(true, Instant::now() + REMOTE_AUDIO_GRACE * 10);
+        assert!(!bob.load(Ordering::Relaxed));
+        // Written again: back on.
+        taps.observe_opt_out("bob", Some("0"));
+        assert!(bob.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn an_opt_out_turned_off_without_a_reload_brings_the_participant_back() {
+        let mut taps = announced_long_ago(mixes());
+        let bob = insert_tap(&mut taps, "TR_bob", Some("bob"));
+        taps.observe_opt_out("bob", Some("0"));
+        taps.observe_opt_out("bob", Some("1"));
+        assert!(!bob.load(Ordering::Relaxed));
+        taps.observe_opt_out("bob", Some("0"));
+        assert!(bob.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn an_opt_out_lost_to_a_rejoin_keeps_the_participant_out_until_they_opt_in() {
+        let mut taps = announced_long_ago(mixes());
+        let bob = insert_tap(&mut taps, "TR_bob", Some("bob"));
+        taps.observe_opt_out("bob", Some("1"));
         // Bob's full reconnect: he reappears (and his mic republishes)
-        // before his opt-out is written again. Absent is not an opt-in.
+        // before his opt-out is written again.
         taps.observe_opt_out("bob", None);
         taps.tick(true, Instant::now() + REMOTE_AUDIO_GRACE * 10);
         assert!(!bob.load(Ordering::Relaxed));
-        // Only an explicit "0" brings him back.
+        // He opts back in with "0".
         taps.observe_opt_out("bob", Some("0"));
-        taps.reevaluate(Instant::now());
         assert!(bob.load(Ordering::Relaxed));
-        // Someone never seen opted out is included while absent.
-        let carol = insert_tap(&mut taps, "TR_carol", Some("carol"));
-        taps.observe_opt_out("carol", None);
-        taps.reevaluate(Instant::now());
-        assert!(carol.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -539,7 +603,7 @@ mod tests {
         let mixes = mixes();
         let mut taps = announced_long_ago(mixes.clone());
         let bob = insert_tap(&mut taps, "TR_bob", Some("bob"));
-        taps.reevaluate(Instant::now());
+        taps.observe_opt_out("bob", Some("0"));
         mixes.route("TR_bob", &block(1000), MIX_CHANNELS, &bob);
         assert_eq!(mixes.stream.lock_unpoisoned().source_count(), 1);
         taps.detach("TR_bob");
@@ -558,12 +622,13 @@ mod tests {
             "TR_bob".into(),
             Tap { cancel: CancellationToken::new(), owner: Some("bob".into()), in_stream: in_stream.clone() },
         );
+        taps.observe_opt_out("bob", Some("0"));
         // Included: both mixes hear Bob.
         mixes.route("TR_bob", &block(1000), MIX_CHANNELS, &in_stream);
         assert_eq!(mixes.stream.lock_unpoisoned().source_count(), 1);
         // Bob opts out: his queued audio leaves the stream at once, and new
         // frames only reach the echo reference.
-        taps.set_opted_out("bob", true);
+        taps.observe_opt_out("bob", Some("1"));
         assert_eq!(mixes.stream.lock_unpoisoned().source_count(), 0);
         mixes.route("TR_bob", &block(1000), MIX_CHANNELS, &in_stream);
         assert_eq!(mixes.stream.lock_unpoisoned().source_count(), 0);
@@ -590,11 +655,12 @@ mod tests {
                 Tap { cancel: CancellationToken::new(), owner: owner.map(Into::into), in_stream: flag.clone() },
             );
         }
-        taps.set_opted_out("bob", true);
+        taps.observe_opt_out("bob", Some("0"));
+        taps.observe_opt_out("bob", Some("1"));
         assert!(!flags[0].load(Ordering::Relaxed) && !flags[1].load(Ordering::Relaxed));
         assert!(flags[2].load(Ordering::Relaxed), "our own audio is never opted out");
         // Someone who isn't in the room opting out changes nothing here.
-        taps.set_opted_out("carol", true);
+        taps.observe_opt_out("carol", Some("1"));
         assert!(flags[2].load(Ordering::Relaxed));
     }
 }

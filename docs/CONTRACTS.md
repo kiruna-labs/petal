@@ -245,11 +245,14 @@ first", so two simultaneous starts leave exactly one. Fixture:
 `streamLiveDerivation`.
 
 **Opting out of streams.** A participant who keeps their audio off live
-streams sets the **`petal.stream-optout`** attribute to `"1"`; absent or any
-other value means included. Clients opt back in with **`"0"`**, not by
-deleting the key: a streamer that has seen a participant opted out keeps them
-out of that stream until it sees a present value other than `"1"`, so an
-attribute lost to a rejoin or full reconnect never lets their audio in.
+streams sets the **`petal.stream-optout`** attribute to `"1"`, and one who is
+included sets it to **`"0"`** (any other present value also includes them). A
+missing or empty value is unknown: a streamer hears a remote participant only
+while it knows their value and it isn't `"1"`, so an attribute lost to a
+rejoin or full reconnect takes their audio off the stream until it is written
+again. Clients that never write the attribute (Petal 0.9.38 and older) are
+never heard on a stream. The grace period below still applies once the value
+is known.
 Desktop and browser clients write `"1"` or `"0"` on join, before they publish a
 microphone, on every change, and again after every reconnect (a full
 reconnect rejoins with no attributes); a failed write is retried until it

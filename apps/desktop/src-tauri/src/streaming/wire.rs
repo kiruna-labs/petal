@@ -5,7 +5,9 @@
 //! * `petal.live`, the sharer's own participant attribute. The room is LIVE
 //!   when anyone has it.
 //! * `petal.stream-optout`, set to `"1"` by a participant who keeps their
-//!   audio off live streams.
+//!   audio off live streams and `"0"` by one who is included. A streamer
+//!   hears a remote participant only while it knows their value and it
+//!   isn't `"1"`.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,15 +15,24 @@ pub const STREAM_LIVE_ATTRIBUTE: &str = "petal.live";
 pub const STREAM_OPTOUT_ATTRIBUTE: &str = "petal.stream-optout";
 /// The only value that opts a participant out.
 pub const STREAM_OPTOUT_VALUE: &str = "1";
-/// What a client writes to be included. Absent also means included, but a
-/// streamer that has seen someone opted out keeps them out until it sees a
-/// value like this: an attribute lost to a rejoin is not an opt-in.
+/// What a client writes to be included. A missing attribute is not an
+/// opt-in: it is unknown, so that participant stays off the stream until a
+/// value arrives (an attribute lost to a rejoin, or a client too old to
+/// write one).
 pub const STREAM_OPTIN_VALUE: &str = "0";
 
-/// Whether a `petal.stream-optout` value keeps that participant's audio off
-/// live streams. Absent or anything but `"1"` means included.
+/// Whether a `petal.stream-optout` value says that participant keeps their
+/// audio off live streams: only `"1"`. A missing value is unknown, not an
+/// opt-out, but it doesn't include them either ([`is_included`]).
 pub fn is_opted_out(value: Option<&str>) -> bool {
     value == Some(STREAM_OPTOUT_VALUE)
+}
+
+/// Whether a `petal.stream-optout` value lets that participant's audio into
+/// a live stream: a value is known (present and not empty, since a key
+/// written as `""` is deleted) and isn't `"1"`.
+pub fn is_included(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.is_empty() && value != STREAM_OPTOUT_VALUE)
 }
 
 /// The attribute value for this computer's own setting.
@@ -155,6 +166,8 @@ mod tests {
         opted_out: String,
         opted_in: String,
         included: Vec<String>,
+        /// Present values that still say nothing: a key written as "" is deleted.
+        unknown: Vec<String>,
     }
 
     #[derive(Deserialize)]
@@ -243,5 +256,19 @@ mod tests {
         assert_eq!(opt_out_value(true), "1");
         assert_eq!(opt_out_value(false), fixture.opted_in);
         assert!(!is_opted_out(Some(fixture.opted_in.as_str())));
+    }
+
+    #[test]
+    fn only_a_known_value_other_than_the_opt_out_includes() {
+        let fixture = contracts().stream_opt_out_attribute;
+        assert!(!is_included(Some(&fixture.opted_out)));
+        assert!(!is_included(None), "never written: unknown");
+        for unknown in fixture.unknown {
+            assert!(!is_included(Some(&unknown)), "{unknown:?}");
+        }
+        for included in fixture.included {
+            assert!(is_included(Some(&included)), "{included:?}");
+        }
+        assert!(is_included(Some(fixture.opted_in.as_str())));
     }
 }

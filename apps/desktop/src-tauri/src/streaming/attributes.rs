@@ -475,7 +475,7 @@ mod tests {
         keeper.set("petal.live", "");
         assert!(keeper.wait_confirmed("petal.live", "", Duration::from_secs(2)).await);
         assert_eq!(room.get("petal.live"), None);
-        // Opting back in on a fresh join writes nothing: absent is included.
+        // Clearing a key that a fresh join never had writes nothing.
         let writes = room.writes.load(Ordering::SeqCst);
         keeper.set("petal.stream-optout", "");
         tokio::time::sleep(Duration::from_secs(1)).await;

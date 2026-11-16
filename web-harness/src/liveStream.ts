@@ -21,9 +21,9 @@ export const STREAM_OPTOUT_ATTRIBUTE = 'petal.stream-optout';
 /** The only value that opts a participant out. */
 export const STREAM_OPTOUT_VALUE = '1';
 /**
- * What a client writes to be included. A streamer that has seen someone
- * opted out keeps them out until it sees a value like this: an attribute lost
- * to a rejoin is not an opt-in.
+ * What a client writes to be included. A streamer hears someone only while it
+ * knows their value and it isn't "1": a missing attribute (never written, or
+ * lost to a rejoin) keeps them off the stream until a value like this arrives.
  */
 export const STREAM_OPTIN_VALUE = '0';
 /** Per room: `petal.keepOffLiveStreams:<room name>`. */
