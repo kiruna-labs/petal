@@ -989,7 +989,7 @@ fn setup_capture(
         region_paused: false,
         closed_token,
         arrival_token,
-        gpu_tap: crate::streaming::gpu_tap::Producer::for_target(target.kind() == TargetKind::Window),
+        gpu_tap: crate::streaming::gpu_tap::Producer::for_capture(target.kind() == TargetKind::Window, region.is_some()),
     })
 }
 

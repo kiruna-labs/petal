@@ -246,8 +246,12 @@ pub struct Producer {
 }
 
 impl Producer {
-    pub fn for_target(window_target: bool) -> Self {
-        Self { window_target, ..Self::default() }
+    /// The producer for a capture of a `window`-kind target, cropped to a
+    /// Petal View `region` or not. A region's target is its selector window,
+    /// but it captures a crop of the monitor, so it waits for the exclusion
+    /// like a display capture.
+    pub fn for_capture(window: bool, region: bool) -> Self {
+        Self { window_target: window && !region, ..Self::default() }
     }
 
     /// Offer the frame in `source` (`size`, at its top-left) to the live tap,
@@ -472,6 +476,43 @@ mod tests {
         super::super::tap::stop();
         producer.release_if_idle(7);
         assert!(!producer.holds_pool());
+    }
+
+    /// #487 P0-1: a Petal View share's target is its selector window, but it
+    /// captures a crop of the monitor, which can show Petal's other windows.
+    /// Its GPU frames wait for the exclusion like a display's; only a real
+    /// window capture is exempt.
+    #[test]
+    fn a_region_capture_streams_no_frame_taken_before_petal_was_excluded() {
+        let _guard = super::super::tap::test_lock();
+        super::super::tap::stop();
+        let Some((device, context)) = warp_device() else {
+            eprintln!("skipped: no WARP device");
+            return;
+        };
+        if let Err(error) = SharedPool::new(&device, (64, 32)) {
+            eprintln!("skipped: WARP can't share textures here: {error}");
+            return;
+        }
+        let luid = adapter_luid(&device).expect("the WARP adapter's LUID");
+        let source = source_texture(&device);
+        let offer = |producer: &mut Producer, excludes_petal: bool| {
+            let tap = super::super::tap::start(7);
+            tap.accept_gpu(luid);
+            producer.offer(7, &device, &context, &source, (64, 32), excludes_petal);
+            let streamed = tap.mailbox.latest().is_some();
+            super::super::tap::stop();
+            streamed
+        };
+
+        let mut region = Producer::for_capture(true, true);
+        assert!(!offer(&mut region, false), "a region frame taken before the exclusion streamed");
+        assert!(offer(&mut region, true));
+
+        let mut window = Producer::for_capture(true, false);
+        assert!(offer(&mut window, false), "a window capture never contains Petal's other windows");
+        let mut display = Producer::for_capture(false, false);
+        assert!(!offer(&mut display, false));
     }
 
     /// The lease side, on a real GPU: a frame holds its slot until the last
