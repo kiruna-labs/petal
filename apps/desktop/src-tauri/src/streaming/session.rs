@@ -850,6 +850,7 @@ pub async fn stop(app: &AppHandle, reason: StopReason) {
         if tokio::time::timeout(Duration::from_secs(5), &mut publisher).await.is_err() {
             log::warn!("streaming: RTMP publisher did not stop within 5 s; aborting it");
             publisher.abort();
+            let _ = publisher.await;
         }
     }
     #[cfg(any(target_os = "windows", target_os = "macos"))]
