@@ -88,6 +88,15 @@ async function run() {
   await settle();
   steps.cancel = { calls: since(mark), key: keyInput()?.value ?? null };
 
+  // Typed a key again, then closed by the title bar, not Cancel: macOS only
+  // hides the window, and the native close handler tells the page first.
+  setValue(keyInput(), 'typed-then-closed');
+  await settle();
+  steps.typedBeforeClose = keyInput()?.value ?? null;
+  await emit('go-live-closed');
+  await settle();
+  steps.closedByTitleBar = { key: keyInput()?.value ?? null };
+
   // Reopened for share 9 (macOS reuses the hidden window): the native side
   // emits `go-live-target`; nothing from the last open may linger.
   mark = calls.length;

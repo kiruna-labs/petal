@@ -93,6 +93,9 @@ const HIDE_ON_CLOSE: bool = cfg!(target_os = "macos");
 pub(crate) trait GoLiveDialog: Clone + Send + 'static {
     /// Tell the page which share it is for now (`go-live-target`).
     fn retarget(&self, window_id: u32);
+    /// Tell the page it is closing (`go-live-closed`), so it drops the typed
+    /// stream key before the window is hidden or destroyed.
+    fn closing(&self);
     fn bring_forward(&self);
     fn hide(&self);
     /// Call `prevent` on every close request (the page's own close() and the
@@ -124,9 +127,12 @@ fn open_go_live<H: GoLiveDialogHost>(host: &H, window_id: u32, hide_on_close: bo
     Ok(())
 }
 
-/// A close request on the dialog: with `hide_instead` (macOS) it is hidden
-/// and the close is prevented, so the window is reused. True when prevented.
+/// A close request on the dialog (every way it closes: Cancel, after going
+/// live, the title bar): the page drops the typed key first, then with
+/// `hide_instead` (macOS) it is hidden and the close is prevented, so the
+/// window is reused. True when prevented.
 fn on_close_requested<D: GoLiveDialog>(dialog: &D, hide_instead: bool) -> bool {
+    dialog.closing();
     if hide_instead {
         dialog.hide();
     }
@@ -136,6 +142,9 @@ fn on_close_requested<D: GoLiveDialog>(dialog: &D, hide_instead: bool) -> bool {
 impl GoLiveDialog for tauri::WebviewWindow {
     fn retarget(&self, window_id: u32) {
         let _ = tauri::Emitter::emit(self, "go-live-target", window_id);
+    }
+    fn closing(&self) {
+        let _ = tauri::Emitter::emit(self, "go-live-closed", ());
     }
     fn bring_forward(&self) {
         let _ = self.show();
@@ -297,6 +306,9 @@ mod tests {
         fn retarget(&self, window_id: u32) {
             self.0.calls.lock().unwrap().push(format!("retarget {window_id}"));
         }
+        fn closing(&self) {
+            self.0.calls.lock().unwrap().push("closing".into());
+        }
         fn bring_forward(&self) {
             self.0.calls.lock().unwrap().push("bring_forward".into());
             *self.0.visible.lock().unwrap() = true;
@@ -386,6 +398,11 @@ mod tests {
             assert_eq!(go_live_target(), 9);
             // Cancel (or the title bar): the platform's close request.
             host.request_close();
+            assert_eq!(
+                first.calls().iter().find(|call| *call == "closing" || *call == "hide").map(String::as_str),
+                Some("closing"),
+                "{platform}: the page drops the key before the window is hidden or destroyed"
+            );
             if hide_on_close {
                 assert!(!first.visible(), "macOS: hidden");
                 assert!(host.window().is_some(), "macOS: not destroyed");

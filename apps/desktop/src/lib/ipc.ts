@@ -360,6 +360,8 @@ export const EVENTS = {
   streamerModeChanged: 'streamer-mode-changed',
   /** The go-live dialog was re-targeted at another share. */
   goLiveTarget: 'go-live-target',
+  /** The go-live dialog is closing (hidden on macOS): drop the typed stream key. */
+  goLiveClosed: 'go-live-closed',
   shareAudioStateChanged: 'share-audio-state-changed',
   shareControlModeChanged: 'share-control-mode-changed',
   sharePickerChanged: 'share-picker-changed',
@@ -2194,6 +2196,7 @@ export interface EventPayloads {
   [EVENTS.streamSessionEnded]: StreamSessionEnded;
   [EVENTS.streamDestinationSaveFailed]: string;
   [EVENTS.goLiveTarget]: number;
+  [EVENTS.goLiveClosed]: null;
   [EVENTS.aiChatControlRequest]: AiChatControlRequestEvent;
   [EVENTS.aiChatControlResolved]: AiChatControlResolvedEvent;
   [EVENTS.aiChatRemoteState]: AiChatRemoteSessionState;

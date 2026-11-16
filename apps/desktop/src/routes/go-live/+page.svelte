@@ -201,6 +201,19 @@
     });
     void loadDestinations();
     let unlisten: (() => void) | undefined;
+    let unlistenClosed: (() => void) | undefined;
+    // Every close (Cancel, after going live, the title bar) arrives first:
+    // macOS only hides this window, and a hidden page must not hold the key.
+    listenUntilDestroy<null>(
+      EVENTS.goLiveClosed,
+      () => {
+        streamKey = '';
+      },
+      (fn) => {
+        unlistenClosed = fn;
+      },
+      () => destroyed
+    );
     listenUntilDestroy<number>(
       EVENTS.goLiveTarget,
       (event) => {
@@ -208,6 +221,7 @@
         // have saved a destination, and the share may have changed size.
         windowId = event.payload;
         error = null;
+        streamKey = '';
         void loadDestinations();
         void refreshPreview();
       },
@@ -219,6 +233,7 @@
     return () => {
       destroyed = true;
       unlisten?.();
+      unlistenClosed?.();
     };
   });
 </script>

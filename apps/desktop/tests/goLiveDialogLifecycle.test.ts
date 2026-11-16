@@ -2,7 +2,8 @@
 // drives the real event path": the go-live dialog's page half. Mounts the
 // real page (`src/routes/go-live/+page.svelte`) with Tauri's IPC and events
 // mocked and drives its own handlers: a refused go-live keeps the dialog
-// open, Cancel closes the window, the `go-live-target` event a reused
+// open, Cancel closes the window, a title-bar close (`go-live-closed`) drops
+// the typed key, the `go-live-target` event a reused
 // (macOS) dialog gets on reopen leaves nothing of the last open behind, and
 // a go-live that succeeds retires the dialog. The native half (the command
 // and its close-request handler) is
@@ -26,6 +27,8 @@ type Steps = {
   opened: { calls: Call[] };
   failedGoLive: { calls: string[]; error: string | null; key: string | null };
   cancel: { calls: string[]; key: string | null };
+  typedBeforeClose: string | null;
+  closedByTitleBar: { key: string | null };
   reopened: { calls: Call[]; error: string | null; key: string | null };
   goLive: { calls: Call[]; key: string | null; error: string | null };
 };
@@ -83,6 +86,12 @@ test('the go-live dialog closes, reopens clean and retires after going live (#48
     // Cancel: the page closes its own window and drops the key first.
     assert.deepEqual(steps.cancel.calls, [CLOSE], 'Cancel closes the window, nothing else');
     assert.equal(steps.cancel.key, '', 'the key is dropped before the window goes');
+
+    // Closed without Cancel (the title bar; macOS only hides the window): the
+    // close request's `go-live-closed` drops the key at once, so a hidden
+    // page never holds it.
+    assert.equal(steps.typedBeforeClose, 'typed-then-closed', 'a key was typed before the close');
+    assert.equal(steps.closedByTitleBar.key, '', 'a hidden dialog holds no stream key');
 
     // Reopened for share 9: the old error is gone, no key, and the page
     // reloads destinations and previews the new share.
