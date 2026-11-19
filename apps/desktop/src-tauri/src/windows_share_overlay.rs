@@ -336,6 +336,13 @@ pub(crate) fn set_region_draw_active(
     set_draw_active(app, window_id, active)
 }
 
+/// Whether a share's overlay is built excluded from capture and stays so for
+/// its whole life, rather than being excluded only while this computer is
+/// live.
+fn overlay_always_excluded(target_kind: TargetKind, region_share: bool) -> bool {
+    target_kind == TargetKind::Display || region_share
+}
+
 fn overlay_frame_is_visible(frame: OverlayFrame, minimized: bool) -> bool {
     !minimized && frame.width > 1 && frame.height > 1
 }
@@ -1347,7 +1354,7 @@ pub(crate) fn create_share_overlay(
     // Display and region overlays stay out of every capture for their whole
     // life (#487: excluded before first shown, and kept so when a stream
     // stops); a window share's overlay only while this computer is live.
-    let always_excluded = target.kind() == TargetKind::Display || region_share;
+    let always_excluded = overlay_always_excluded(target.kind(), region_share);
     let overlay = if always_excluded { builder.build_petal_excluded() } else { builder.build_petal() }
         .map_err(|error| format!("failed to build overlay for window {window_id}: {error}"))?;
     if let Err(error) = overlay.set_ignore_cursor_events(true) {
