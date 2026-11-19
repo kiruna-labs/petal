@@ -819,6 +819,8 @@ fn save_destination(app: &AppHandle, pending: PendingSave) {
     }
 }
 
+const PUBLISHER_GONE_ERROR: &str = "The stream connection stopped unexpectedly";
+
 /// What ends a client stream session, from one monitor pass.
 #[derive(Debug, PartialEq, Eq)]
 enum SessionEnd {
@@ -829,14 +831,17 @@ enum SessionEnd {
 }
 
 /// Outside Stop (the caller checks that first), the publisher only stops
-/// or goes away because the encoder closed its queue, possibly before the
-/// encoder thread has exited: that ends the session with the encoder's
-/// reason too.
+/// because the encoder closed its queue, possibly before the encoder thread
+/// has exited: that ends the session with the encoder's reason too. A
+/// publisher gone without stopping (a panic) is a failure.
 fn session_end(publisher: &PublisherState, publisher_gone: bool, encoder_finished: bool) -> Option<SessionEnd> {
     if let PublisherState::Failed(error) = publisher {
         return Some(SessionEnd::PublisherFailed(error.clone()));
     }
-    (encoder_finished || publisher_gone || *publisher == PublisherState::Stopped).then_some(SessionEnd::Encoder)
+    if encoder_finished || *publisher == PublisherState::Stopped {
+        return Some(SessionEnd::Encoder);
+    }
+    publisher_gone.then(|| SessionEnd::PublisherFailed(PUBLISHER_GONE_ERROR.into()))
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -853,6 +858,9 @@ fn pipeline_finished() -> bool {
 fn pipeline_exit_reason() -> StopReason {
     let handle = slot().lock_unpoisoned().as_mut().and_then(|session| session.pipeline.take());
     let Some(handle) = handle else { return StopReason::User };
+    // Normally the encoder has already returned and this changes nothing,
+    // but the join must never wait on an encoder that is still running.
+    handle.stop.store(true, Ordering::Release);
     match handle.thread.join() {
         Ok(super::pipeline::PipelineExit::SlateTimeout) => StopReason::SlateTimeout,
         Ok(super::pipeline::PipelineExit::Failed(error)) => {
@@ -1003,7 +1011,13 @@ mod tests {
         // encoder thread had exited. That has to end the session too, or
         // it stays paused for the guests until the sharer leaves.
         assert_eq!(session_end(&PublisherState::Stopped, false, false), Some(SessionEnd::Encoder));
-        assert_eq!(session_end(&PublisherState::Live, true, false), Some(SessionEnd::Encoder));
+        assert_eq!(session_end(&PublisherState::Stopped, true, false), Some(SessionEnd::Encoder));
+        // A publisher gone without saying so (a panic) is a failure, not
+        // the encoder's end: the encoder may still be running.
+        assert_eq!(
+            session_end(&PublisherState::Live, true, false),
+            Some(SessionEnd::PublisherFailed(PUBLISHER_GONE_ERROR.into()))
+        );
         for state in [
             PublisherState::Connecting,
             PublisherState::Live,
