@@ -162,7 +162,7 @@ test('Windows ordinary capture uses an explicit indicator policy instead of an u
   );
 });
 
-test('the existing sharer overlay is the single local Petal indicator and is fail-safe for displays', () => {
+test('the existing sharer overlay is the single local Petal indicator and is fail-safe for every share', () => {
   assert.match(overlaySource, /ShareOverlayReadiness/);
   assert.match(overlaySource, /PageLoadEvent::Finished/);
   assert.match(overlaySource, /OVERLAY_PAGE_LOAD_TIMEOUT/);
@@ -175,7 +175,8 @@ test('the existing sharer overlay is the single local Petal indicator and is fai
   assert.match(overlaySource, /GW_OWNER/);
   assert.match(overlaySource, /SWP_NOZORDER/);
   assert.match(overlaySource, /map_err\(\|error\|/);
-  assert.match(overlaySource, /target\.kind\(\) == TargetKind::Display \|\| region_share/);
+  // An overlay capture can't skip is closed whatever the share kind (#487).
+  assert.match(overlaySource, /if !capture_excluded \{\s*let _ = overlay\.close\(\);/);
   assert.match(pointerSource, /sharer-share-border/);
   assert.match(pointerSource, /border:\s*4px solid var\(--sharer-share-border-color\)/);
   assert.match(pointerSource, /border-radius:\s*var\(--radius-input\)/);

@@ -336,16 +336,6 @@ pub(crate) fn set_region_draw_active(
     set_draw_active(app, window_id, active)
 }
 
-/// Whether a share's overlay is built excluded from capture and stays so for
-/// its whole life, rather than being excluded only while this computer is
-/// live. Every share's is: excluding a window share's overlay at go-live
-/// made Windows keep a surface the size of the share in Petal's process
-/// until the share ended, even after Stop restored capture (#487). A window
-/// capture never includes the overlay, so Petal's own shares don't change.
-fn overlay_always_excluded(_target_kind: TargetKind, _region_share: bool) -> bool {
-    true
-}
-
 fn overlay_frame_is_visible(frame: OverlayFrame, minimized: bool) -> bool {
     !minimized && frame.width > 1 && frame.height > 1
 }
@@ -1354,10 +1344,14 @@ pub(crate) fn create_share_overlay(
                 page_loaded_callback.store(true, Ordering::Release);
             }
         });
-    // Every share overlay stays out of every capture for its whole life
-    // (#487: excluded before first shown, and kept so when a stream stops).
-    let always_excluded = overlay_always_excluded(target.kind(), region_share);
-    let overlay = if always_excluded { builder.build_petal_excluded() } else { builder.build_petal() }
+    // Every share overlay stays out of every capture for its whole life:
+    // excluded before it is first shown, and kept so when a stream stops
+    // (#487). Excluding a window share's overlay only while live made
+    // Windows keep a surface the size of the share in Petal's process until
+    // the share ended, even after Stop restored capture. Other capture tools
+    // (OBS, a screen share in another app) don't see the overlay either.
+    let overlay = builder
+        .build_petal_excluded()
         .map_err(|error| format!("failed to build overlay for window {window_id}: {error}"))?;
     if let Err(error) = overlay.set_ignore_cursor_events(true) {
         let _ = overlay.close();
@@ -1380,7 +1374,7 @@ pub(crate) fn create_share_overlay(
         ));
     }
 
-    let capture_excluded = if always_excluded {
+    let capture_excluded = {
         let hwnd = windows::Win32::Foundation::HWND(overlay_hwnd as *mut core::ffi::c_void);
         let excluded = crate::platform::windows::set_capture_exclusion(hwnd);
         if !excluded {
@@ -1389,14 +1383,14 @@ pub(crate) fn create_share_overlay(
             );
         }
         excluded
-    } else {
-        true
     };
-    // A display capture includes every visible pixel on that monitor. If
+    // A display capture includes every visible pixel on that monitor, and a
+    // live display or region stream would include a capturable window
+    // share's overlay too (it is built without the stream's build gate). If
     // affinity cannot exclude this process-owned overlay, do not show even
     // the pointer/draw layer: the system WGC border remains the only trusted
     // indicator and no local Petal chrome can leak into outgoing pixels.
-    if (target.kind() == TargetKind::Display || region_share) && !capture_excluded {
+    if !capture_excluded {
         let _ = overlay.close();
         return Ok(ShareOverlayReadiness {
             shown: false,
@@ -1608,17 +1602,21 @@ mod tests {
     }
 
     #[test]
-    fn every_share_overlay_is_excluded_from_capture_for_its_whole_life() {
+    fn every_share_overlay_is_built_excluded_and_hidden_when_exclusion_fails() {
         // Excluding a window share's overlay only while live left Windows
-        // holding a surface the size of the share after Stop (#487).
-        for kind in [TargetKind::Window, TargetKind::Display] {
-            for region_share in [false, true] {
-                assert!(
-                    overlay_always_excluded(kind, region_share),
-                    "{kind:?} share, region={region_share}: the overlay must be built excluded"
-                );
-            }
-        }
+        // holding a surface the size of the share after Stop, and an overlay
+        // that capture can't skip must never be shown, whatever the share
+        // kind (#487). Checked on the source of `create_share_overlay`.
+        let source = include_str!("windows_share_overlay.rs");
+        let start = source.find("pub(crate) fn create_share_overlay(").expect("create_share_overlay");
+        let end = source[start..].find("pub(crate) fn close_share_overlay(").expect("close_share_overlay") + start;
+        let body = &source[start..end];
+        assert!(body.contains(".build_petal_excluded()"), "the overlay must be built excluded from capture");
+        assert!(!body.contains(".build_petal()"), "no share overlay may be built capturable");
+        assert!(
+            body.contains("if !capture_excluded {"),
+            "an overlay whose exclusion failed must be closed for every share kind"
+        );
     }
 
     #[test]
