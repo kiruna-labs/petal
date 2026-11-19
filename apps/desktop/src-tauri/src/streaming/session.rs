@@ -705,14 +705,15 @@ async fn monitor(
     let mut output_checked = Instant::now();
     let identity = room.local_participant().identity().to_string();
     loop {
-        tokio::select! {
+        let publisher_gone = tokio::select! {
             () = cancel.cancelled() => return,
-            changed = state_rx.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-            }
-            _ = ticker.tick() => {}
+            changed = state_rx.changed() => changed.is_err(),
+            _ = ticker.tick() => false,
+        };
+        // Stop cancels before it stops the publisher, so a publisher that
+        // stopped for Stop ends nothing here.
+        if cancel.is_cancelled() {
+            return;
         }
         let publisher_state = state_rx.borrow().clone();
         if publisher_state == PublisherState::Live {
@@ -720,17 +721,25 @@ async fn monitor(
                 save_destination(&app, pending);
             }
         }
-        if let PublisherState::Failed(error) = &publisher_state {
-            let error = error.clone();
-            let app = app.clone();
-            tokio::spawn(async move { stop(&app, StopReason::Failed(error)).await });
-            return;
-        }
-        if pipeline_finished() {
-            let reason = pipeline_exit_reason();
-            let app = app.clone();
-            tokio::spawn(async move { stop(&app, reason).await });
-            return;
+        match session_end(&publisher_state, publisher_gone, pipeline_finished()) {
+            Some(SessionEnd::PublisherFailed(error)) => {
+                let app = app.clone();
+                tokio::spawn(async move { stop(&app, StopReason::Failed(error)).await });
+                return;
+            }
+            Some(SessionEnd::Encoder) => {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    // Closing the queue is the encoder's last step, so this
+                    // join is short even when its thread hasn't exited yet.
+                    let reason = tokio::task::spawn_blocking(pipeline_exit_reason)
+                        .await
+                        .unwrap_or_else(|_| StopReason::Failed("The encoder stopped unexpectedly".into()));
+                    stop(&app, reason).await;
+                });
+                return;
+            }
+            None => {}
         }
         // One stream per room: if another participant went live first (two
         // clicks that crossed), this one gives way.
@@ -808,6 +817,26 @@ fn save_destination(app: &AppHandle, pending: PendingSave) {
             let _ = app.emit(STREAM_DESTINATION_SAVE_FAILED_EVENT, error);
         }
     }
+}
+
+/// What ends a client stream session, from one monitor pass.
+#[derive(Debug, PartialEq, Eq)]
+enum SessionEnd {
+    /// The publisher gave up: end with its error.
+    PublisherFailed(String),
+    /// The encoder ended (slate timeout, failure): end with its reason.
+    Encoder,
+}
+
+/// Outside Stop (the caller checks that first), the publisher only stops
+/// or goes away because the encoder closed its queue, possibly before the
+/// encoder thread has exited: that ends the session with the encoder's
+/// reason too.
+fn session_end(publisher: &PublisherState, publisher_gone: bool, encoder_finished: bool) -> Option<SessionEnd> {
+    if let PublisherState::Failed(error) = publisher {
+        return Some(SessionEnd::PublisherFailed(error.clone()));
+    }
+    (encoder_finished || publisher_gone || *publisher == PublisherState::Stopped).then_some(SessionEnd::Encoder)
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -961,6 +990,27 @@ mod tests {
         }
         let snapshot = serde_json::to_value(placeholder_snapshot(7)).unwrap();
         assert_eq!(snapshot["noAudioOutput"], false, "the banner's no-audio-output flag is on the wire");
+    }
+
+    #[test]
+    fn the_session_ends_when_the_encoder_closes_the_publisher() {
+        let failed = PublisherState::Failed("refused".into());
+        assert_eq!(session_end(&failed, false, false), Some(SessionEnd::PublisherFailed("refused".into())));
+        assert_eq!(session_end(&failed, false, true), Some(SessionEnd::PublisherFailed("refused".into())));
+        assert_eq!(session_end(&PublisherState::Live, false, true), Some(SessionEnd::Encoder));
+        // #487: the slate ran out, so the encoder closed the queue and the
+        // publisher stopped (then dropped its state channel) before the
+        // encoder thread had exited. That has to end the session too, or
+        // it stays paused for the guests until the sharer leaves.
+        assert_eq!(session_end(&PublisherState::Stopped, false, false), Some(SessionEnd::Encoder));
+        assert_eq!(session_end(&PublisherState::Live, true, false), Some(SessionEnd::Encoder));
+        for state in [
+            PublisherState::Connecting,
+            PublisherState::Live,
+            PublisherState::Reconnecting { attempt: 1 },
+        ] {
+            assert_eq!(session_end(&state, false, false), None, "{state:?}");
+        }
     }
 
     #[test]
