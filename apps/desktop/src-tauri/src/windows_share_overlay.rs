@@ -338,9 +338,12 @@ pub(crate) fn set_region_draw_active(
 
 /// Whether a share's overlay is built excluded from capture and stays so for
 /// its whole life, rather than being excluded only while this computer is
-/// live.
-fn overlay_always_excluded(target_kind: TargetKind, region_share: bool) -> bool {
-    target_kind == TargetKind::Display || region_share
+/// live. Every share's is: excluding a window share's overlay at go-live
+/// made Windows keep a surface the size of the share in Petal's process
+/// until the share ended, even after Stop restored capture (#487). A window
+/// capture never includes the overlay, so Petal's own shares don't change.
+fn overlay_always_excluded(_target_kind: TargetKind, _region_share: bool) -> bool {
+    true
 }
 
 fn overlay_frame_is_visible(frame: OverlayFrame, minimized: bool) -> bool {
@@ -1351,9 +1354,8 @@ pub(crate) fn create_share_overlay(
                 page_loaded_callback.store(true, Ordering::Release);
             }
         });
-    // Display and region overlays stay out of every capture for their whole
-    // life (#487: excluded before first shown, and kept so when a stream
-    // stops); a window share's overlay only while this computer is live.
+    // Every share overlay stays out of every capture for its whole life
+    // (#487: excluded before first shown, and kept so when a stream stops).
     let always_excluded = overlay_always_excluded(target.kind(), region_share);
     let overlay = if always_excluded { builder.build_petal_excluded() } else { builder.build_petal() }
         .map_err(|error| format!("failed to build overlay for window {window_id}: {error}"))?;
@@ -1603,6 +1605,20 @@ mod tests {
         OVERLAY_LABELS.lock_unpoisoned().clear();
         OVERLAY_DRAW_ACTIVE.lock_unpoisoned().clear();
         OVERLAY_READINESS.lock_unpoisoned().clear();
+    }
+
+    #[test]
+    fn every_share_overlay_is_excluded_from_capture_for_its_whole_life() {
+        // Excluding a window share's overlay only while live left Windows
+        // holding a surface the size of the share after Stop (#487).
+        for kind in [TargetKind::Window, TargetKind::Display] {
+            for region_share in [false, true] {
+                assert!(
+                    overlay_always_excluded(kind, region_share),
+                    "{kind:?} share, region={region_share}: the overlay must be built excluded"
+                );
+            }
+        }
     }
 
     #[test]
