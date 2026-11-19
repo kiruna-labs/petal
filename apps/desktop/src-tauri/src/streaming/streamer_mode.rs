@@ -6,7 +6,8 @@
 //! mask meeting names and codes (`streamer-mode-changed`).
 //!
 //! Capture exclusion follows only this computer's own stream, never the
-//! forced setting (OBS and similar tools still capture Petal normally):
+//! forced setting (OBS and similar tools still capture Petal normally,
+//! except the share overlays, which no capture shows on Windows):
 //!
 //! * Windows: every Petal top-level window except the Petal View selectors
 //!   (`region-window-*`, which keep their own lease) gets
