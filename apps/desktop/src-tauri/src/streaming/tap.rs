@@ -85,6 +85,10 @@ pub struct LiveTap {
     /// Frames of the bound share dropped because they may still show Petal:
     /// the share is sending, just not provably without Petal yet.
     unexcluded_drops: std::sync::atomic::AtomicU64,
+    /// Held to put a frame, and to end the bound share or move the tap: a
+    /// frame copied while its share stopped or lost the tap is then never
+    /// put (#487).
+    gate: Mutex<()>,
     pub mailbox: FrameMailbox<TapFrame>,
     #[cfg(target_os = "windows")]
     gpu: GpuTapState,
@@ -119,6 +123,7 @@ impl LiveTap {
     /// share delivers (a static window only re-pushes every couple of
     /// seconds), rather than flashing the slate.
     fn rebind(&self, window_id: u32) {
+        let _gate = self.gate.lock_unpoisoned();
         self.window_id.store(window_id, Ordering::Release);
         self.ended.store(false, Ordering::Release);
         #[cfg(target_os = "windows")]
@@ -257,6 +262,11 @@ pub fn offer_frame(window_id: u32, excludes_petal: bool, copy: impl FnOnce() -> 
         return;
     }
     let Some(frame) = copy() else { return };
+    // The copy takes time: the share may have stopped or lost the tap since.
+    let _gate = tap.gate.lock_unpoisoned();
+    if tap.window_id.load(Ordering::Acquire) != window_id || tap.share_ended() {
+        return;
+    }
     tap.mailbox.put(frame);
     tap.share_up.store(true, Ordering::Release);
 }
@@ -281,6 +291,10 @@ pub fn offer_gpu_frame(tap: &LiveTap, window_id: u32, excludes_petal: bool, fram
         return;
     }
     let (width, height) = frame.size();
+    let _gate = tap.gate.lock_unpoisoned();
+    if tap.window_id.load(Ordering::Acquire) != window_id || tap.share_ended() {
+        return;
+    }
     tap.mailbox.put(TapFrame { pixels: TapPixels::Gpu(frame), width, height });
     tap.gpu.window_id.store(window_id, Ordering::SeqCst);
     // The encoder may have declined GPU frames since this capture checked
@@ -302,6 +316,7 @@ fn note_unexcluded_drop(window_id: u32) {
 /// falls back to the slate until the sharer resumes on a share.
 pub fn share_ended(window_id: u32) {
     let Some(tap) = current() else { return };
+    let _gate = tap.gate.lock_unpoisoned();
     if tap.window_id.load(Ordering::Acquire) == window_id {
         tap.ended.store(true, Ordering::Release);
         tap.share_up.store(false, Ordering::Release);
@@ -386,6 +401,37 @@ mod tests {
         // A late pre-exclusion frame (a parked re-push) still can't replace it.
         offer_frame(7, false, || panic!("never copied"));
         assert_eq!(tap.mailbox.latest().unwrap().0.width, 4);
+        stop();
+    }
+
+    #[test]
+    fn a_frame_copied_while_its_share_stops_never_reaches_the_stream() {
+        let _guard = test_lock();
+        let tap = start(7);
+        offer_frame(7, true, || frame(4));
+        // #487 macOS M at 38c7b05: the share stopped while its last frame was
+        // being copied, that frame landed after the stop cleared the tap, and
+        // the stream showed it frozen instead of the slate.
+        offer_frame(7, true, || {
+            share_ended(7);
+            frame(8)
+        });
+        assert!(tap.share_ended());
+        assert!(!tap.share_available(), "the stream goes to the slate");
+        assert!(tap.mailbox.latest().is_none(), "the stopped share's frame is gone");
+        // The same for a switch: a frame of the old share copied while the
+        // tap moves on never replaces what the new share sends.
+        assert!(rebind(9));
+        offer_frame(9, true, || frame(16));
+        offer_frame(9, true, || {
+            assert!(rebind(7));
+            frame(32)
+        });
+        assert_eq!(
+            tap.mailbox.latest().map(|(f, _)| f.width),
+            Some(16),
+            "a frame of a share no longer bound is dropped, and the previous frame stays on screen"
+        );
         stop();
     }
 
