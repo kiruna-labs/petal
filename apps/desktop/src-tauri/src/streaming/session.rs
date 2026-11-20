@@ -705,37 +705,32 @@ async fn monitor(
     let mut output_checked = Instant::now();
     let identity = room.local_participant().identity().to_string();
     loop {
-        let publisher_gone = tokio::select! {
-            () = cancel.cancelled() => return,
-            changed = state_rx.changed() => changed.is_err(),
-            _ = ticker.tick() => false,
-        };
-        // Stop cancels before it stops the publisher, so a publisher that
-        // stopped for Stop ends nothing here.
-        if cancel.is_cancelled() {
+        let MonitorPass::Running { state: publisher_state, end } =
+            next_pass(&mut state_rx, &cancel, &mut ticker, pipeline_finished).await
+        else {
             return;
-        }
-        let publisher_state = state_rx.borrow().clone();
+        };
         if publisher_state == PublisherState::Live {
             if let Some(pending) = pending_save.take() {
                 save_destination(&app, pending);
             }
         }
-        match session_end(&publisher_state, publisher_gone, pipeline_finished()) {
+        match end {
             Some(SessionEnd::PublisherFailed(error)) => {
-                let app = app.clone();
-                tokio::spawn(async move { stop(&app, StopReason::Failed(error)).await });
+                let (app, cancel) = (app.clone(), cancel.clone());
+                tokio::spawn(async move { stop_session(&app, StopReason::Failed(error), Some(&cancel)).await });
                 return;
             }
             Some(SessionEnd::Encoder) => {
-                let app = app.clone();
+                let (app, cancel) = (app.clone(), cancel.clone());
                 tokio::spawn(async move {
                     // Closing the queue is the encoder's last step, so this
                     // join is short even when its thread hasn't exited yet.
-                    let reason = tokio::task::spawn_blocking(pipeline_exit_reason)
+                    let owner = cancel.clone();
+                    let reason = tokio::task::spawn_blocking(move || pipeline_exit_reason(&owner))
                         .await
                         .unwrap_or_else(|_| StopReason::Failed("The encoder stopped unexpectedly".into()));
-                    stop(&app, reason).await;
+                    stop_session(&app, reason, Some(&cancel)).await;
                 });
                 return;
             }
@@ -745,8 +740,10 @@ async fn monitor(
         // clicks that crossed), this one gives way.
         let streams = super::live_state::streams_in_room(&room);
         if super::wire::loses_arbitration(&identity, snapshot.started_at, &streams) {
-            let app = app.clone();
-            tokio::spawn(async move { stop(&app, StopReason::Failed(LOST_ARBITRATION_ERROR.into())).await });
+            let (app, cancel) = (app.clone(), cancel.clone());
+            tokio::spawn(async move {
+                stop_session(&app, StopReason::Failed(LOST_ARBITRATION_ERROR.into()), Some(&cancel)).await;
+            });
             return;
         }
         let bytes = stats.bytes_sent.load(Ordering::Relaxed);
@@ -844,6 +841,37 @@ fn session_end(publisher: &PublisherState, publisher_gone: bool, encoder_finishe
     publisher_gone.then(|| SessionEnd::PublisherFailed(PUBLISHER_GONE_ERROR.into()))
 }
 
+/// One monitor wake-up.
+#[derive(Debug, PartialEq, Eq)]
+enum MonitorPass {
+    /// Stop cancelled the session: it ends nothing itself.
+    Cancelled,
+    /// The publisher's state now, and whether that ends the session.
+    Running { state: PublisherState, end: Option<SessionEnd> },
+}
+
+/// Waits for the publisher to change state or the next tick, then decides.
+async fn next_pass(
+    state_rx: &mut tokio::sync::watch::Receiver<PublisherState>,
+    cancel: &CancellationToken,
+    ticker: &mut tokio::time::Interval,
+    encoder_finished: impl Fn() -> bool,
+) -> MonitorPass {
+    let publisher_gone = tokio::select! {
+        () = cancel.cancelled() => return MonitorPass::Cancelled,
+        changed = state_rx.changed() => changed.is_err(),
+        _ = ticker.tick() => false,
+    };
+    // Stop cancels before it stops the publisher, so a publisher that
+    // stopped for Stop ends nothing here.
+    if cancel.is_cancelled() {
+        return MonitorPass::Cancelled;
+    }
+    let state = state_rx.borrow().clone();
+    let end = session_end(&state, publisher_gone, encoder_finished());
+    MonitorPass::Running { state, end }
+}
+
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn pipeline_finished() -> bool {
     slot()
@@ -855,8 +883,11 @@ fn pipeline_finished() -> bool {
 
 /// Peeks at a finished encoder thread's exit without joining (stop joins).
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn pipeline_exit_reason() -> StopReason {
-    let handle = slot().lock_unpoisoned().as_mut().and_then(|session| session.pipeline.take());
+fn pipeline_exit_reason(owner: &CancellationToken) -> StopReason {
+    // Only the owner's session: Stop cancels a session's token before a
+    // new session can be installed.
+    let handle =
+        slot().lock_unpoisoned().as_mut().and_then(|session| take_if_owner(&mut session.pipeline, Some(owner)));
     let Some(handle) = handle else { return StopReason::User };
     // Normally the encoder has already returned and this changes nothing,
     // but the join must never wait on an encoder that is still running.
@@ -871,10 +902,28 @@ fn pipeline_exit_reason() -> StopReason {
     }
 }
 
+/// Takes `slot`'s value unless `owner` was cancelled: Stop cancels a
+/// session's token before a newer session can be installed, so a cancelled
+/// owner means what is there now belongs to someone else. No owner: take it.
+fn take_if_owner<T>(slot: &mut Option<T>, owner: Option<&CancellationToken>) -> Option<T> {
+    if owner.is_some_and(CancellationToken::is_cancelled) {
+        None
+    } else {
+        slot.take()
+    }
+}
+
 /// End the stream, whatever the reason. Idempotent.
 pub async fn stop(app: &AppHandle, reason: StopReason) {
+    stop_session(app, reason, None).await;
+}
+
+/// `stop`, but with `owner` only while that session is still the live one
+/// (a monitor's stop must never end a session started after its own).
+async fn stop_session(app: &AppHandle, reason: StopReason, owner: Option<&CancellationToken>) {
     let _transition = transition().lock().await;
-    let Some(mut session) = slot().lock_unpoisoned().take() else { return };
+    let taken = take_if_owner(&mut slot().lock_unpoisoned(), owner);
+    let Some(mut session) = taken else { return };
     session.cancel.cancel();
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     if let Some(pipeline) = session.pipeline.take() {
@@ -1025,6 +1074,81 @@ mod tests {
         ] {
             assert_eq!(session_end(&state, false, false), None, "{state:?}");
         }
+    }
+
+    /// A ticker that doesn't fire during a test (an interval's first tick is
+    /// immediate, so start it an hour out).
+    fn quiet_ticker() -> tokio::time::Interval {
+        let hour = Duration::from_secs(3600);
+        tokio::time::interval_at(tokio::time::Instant::now() + hour, hour)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_monitor_ends_the_session_when_the_publisher_stops_or_goes_away() {
+        let cancel = CancellationToken::new();
+        let mut ticker = quiet_ticker();
+        let encoder_running = || false;
+
+        // #487 W2: the slate ran out, so the encoder closed the queue and the
+        // publisher said Stopped and dropped its sender while the encoder
+        // thread was still exiting.
+        let (tx, mut rx) = tokio::sync::watch::channel(PublisherState::Live);
+        tx.send(PublisherState::Stopped).unwrap();
+        drop(tx);
+        assert_eq!(
+            next_pass(&mut rx, &cancel, &mut ticker, encoder_running).await,
+            MonitorPass::Running { state: PublisherState::Stopped, end: Some(SessionEnd::Encoder) }
+        );
+
+        // Stopped already seen on an earlier pass, then the sender goes: the
+        // closed channel must still end the session, not just the monitor.
+        let (tx, mut rx) = tokio::sync::watch::channel(PublisherState::Stopped);
+        rx.borrow_and_update();
+        drop(tx);
+        assert_eq!(
+            next_pass(&mut rx, &cancel, &mut ticker, encoder_running).await,
+            MonitorPass::Running { state: PublisherState::Stopped, end: Some(SessionEnd::Encoder) }
+        );
+
+        // A publisher gone without saying Stopped (a panic) is a failure.
+        let (tx, mut rx) = tokio::sync::watch::channel(PublisherState::Live);
+        rx.borrow_and_update();
+        drop(tx);
+        assert_eq!(
+            next_pass(&mut rx, &cancel, &mut ticker, encoder_running).await,
+            MonitorPass::Running {
+                state: PublisherState::Live,
+                end: Some(SessionEnd::PublisherFailed(PUBLISHER_GONE_ERROR.into()))
+            }
+        );
+
+        // A state change that ends nothing keeps the session.
+        let (tx, mut rx) = tokio::sync::watch::channel(PublisherState::Connecting);
+        tx.send(PublisherState::Live).unwrap();
+        assert_eq!(
+            next_pass(&mut rx, &cancel, &mut ticker, encoder_running).await,
+            MonitorPass::Running { state: PublisherState::Live, end: None }
+        );
+
+        // Stop cancels first, so the publisher stopping for Stop ends nothing.
+        tx.send(PublisherState::Stopped).unwrap();
+        drop(tx);
+        cancel.cancel();
+        assert_eq!(next_pass(&mut rx, &cancel, &mut ticker, encoder_running).await, MonitorPass::Cancelled);
+    }
+
+    #[test]
+    fn a_monitor_never_takes_a_session_started_after_its_own() {
+        let stopped = CancellationToken::new();
+        stopped.cancel();
+        let mut newer = Some("newer session");
+        assert_eq!(take_if_owner(&mut newer, Some(&stopped)), None);
+        assert_eq!(newer, Some("newer session"), "the newer session stays live");
+        let live = CancellationToken::new();
+        assert_eq!(take_if_owner(&mut newer, Some(&live)), Some("newer session"));
+        let mut any = Some("session");
+        assert_eq!(take_if_owner(&mut any, None), Some("session"), "plain Stop takes whatever is live");
+        assert_eq!(any, None);
     }
 
     #[test]
