@@ -39,7 +39,8 @@ safe fallback when the custom replacement is not proven.
    process, only when a real share starts. `Allowed` is necessary but not
    sufficient for a custom indicator.
 2. `IsBorderRequired(false)` is selected only after a local replacement is
-   shown. A full-display overlay must also pass capture exclusion; a Petal
+   shown. Every share overlay (window, display or region) must also pass
+   capture exclusion, or it is closed (#487); a Petal
    View selector acquires its own exclusion immediately before WGC starts and
    releases it after capture teardown. If the required exclusion fails, the
    custom path is not selected and WGC keeps its system border. Idle selectors
