@@ -845,6 +845,9 @@ fn show_share_border_optimistically(
     frame: WindowFrame,
     color: &str,
 ) {
+    if !crate::share_border::shows_sharer_border(source_kind) {
+        return;
+    }
     let result = with_share_state(|s| {
         s.ensure_border(window_id, || match source_kind {
             crate::transport::publisher::SharedSourceKind::Window => {
@@ -882,7 +885,10 @@ fn reconcile_share_border(
     frame: WindowFrame,
     color: Option<&str>,
 ) {
-    let active = state.is_share_active(window_id);
+    // A Petal View never gets a border, so an inactive check also hides any
+    // border left from before.
+    let active = state.is_share_active(window_id)
+        && crate::share_border::shows_sharer_border(source_kind);
     if active {
         let color = share_color_or_default(color);
         let result = with_share_state(|s| {
@@ -960,6 +966,7 @@ fn reconcile_share_overlay(
                     window_id,
                     frame,
                     source_kind == crate::transport::publisher::SharedSourceKind::Display,
+                    crate::share_overlay::overlay_inset_for(source_kind),
                 )
             })
         });

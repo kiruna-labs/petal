@@ -23,6 +23,10 @@
   page's own 100%-sized surface IS "using the real window's actual current
   size to map normalized coords to pixels" (task requirement) with no extra
   math needed here — the sizing work already happened on the Rust side.
+  One exception: a macOS Petal View sharer overlay is inset from the
+  selector's edges (`inset` query value, share_overlay.rs). The `.overlay`
+  element is then a stage the size of the shared region, shifted by minus
+  the inset, so the same 0-1 percentages still cover the region.
 -->
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
@@ -32,6 +36,7 @@
   import type { IdentityColor } from '#lib/components/Avatar.svelte';
   import { colorForIdentity, identityColorCss, identityColorFromPaletteIndex } from '#lib/data/identityColor.js';
   import { friendlyTelepointerName } from '#lib/data/telepointerDisplay.js';
+  import { overlayStage, parseOverlayInset } from '#lib/data/overlayInset.js';
   import { COMMANDS } from '#lib/ipc.js';
   import type { DrawDraft, DrawPoint, DrawUpdate, TelepointerUpdate } from '#lib/ipc.js';
   import { isStrokeExpired, strokeFadeOpacity } from '#lib/data/strokeExpiry.js';
@@ -53,6 +58,14 @@
   // hover targets.
   let sharerDrawToolbar = $state(page.url.searchParams.get('drawToolbar') === '1');
   const routeOwnerIdentity = $derived(page.url.searchParams.get('ownerIdentity') ?? '');
+  // macOS Petal View overlays are inset from the selector's edges (see
+  // overlayInset.ts). The stage below stays the size of the shared region.
+  let insetOverride = $state<number | null>(null);
+  const inset = $derived(insetOverride ?? parseOverlayInset(page.url.searchParams.get('inset')));
+
+  function currentStage() {
+    return overlayStage(inset, { width: window.innerWidth || 1, height: window.innerHeight || 1 });
+  }
   let windowIdOverride = $state<number | null>(null);
   let ownerIdentityOverride = $state<string | null>(null);
   const windowId = $derived(windowIdOverride ?? routeWindowId);
@@ -229,10 +242,8 @@
   }
 
   function drawPointMoved(a: DrawPoint, b: DrawPoint) {
-    return Math.hypot(
-      (a.x - b.x) * Math.max(1, window.innerWidth),
-      (a.y - b.y) * Math.max(1, window.innerHeight)
-    ) >= DRAW_REPOSITION_THRESHOLD_PX;
+    const stage = currentStage();
+    return Math.hypot((a.x - b.x) * stage.width, (a.y - b.y) * stage.height) >= DRAW_REPOSITION_THRESHOLD_PX;
   }
 
   function clearDrawTextDraft() {
@@ -425,8 +436,11 @@
     const AX = 4.583;
     const AY = 2.75;
     const dpr = window.devicePixelRatio || 1;
-    const w = window.innerWidth || 1;
-    const h = window.innerHeight || 1;
+    // Stage coordinates: the stage's offset is a whole number of points, so
+    // snapping inside it still lands on whole device pixels in the window.
+    const stage = currentStage();
+    const w = stage.width;
+    const h = stage.height;
     const cssX = update.x * w;
     const cssY = update.y * h;
     const snappedX = (Math.round((cssX - AX) * dpr) / dpr + AX) / w;
@@ -596,6 +610,10 @@
           clearDrawInput();
         }
       };
+    (window as typeof window & { __petalOverlaySetInset?: (value: number) => void }).__petalOverlaySetInset =
+      (value: number) => {
+        insetOverride = parseOverlayInset(String(value));
+      };
     (window as typeof window & { __petalOverlayClear?: () => void }).__petalOverlayClear =
       clearOverlayState;
     (window as typeof window & { __petalDrawClearWindow?: (targetWindowId: number) => void }).__petalDrawClearWindow =
@@ -685,6 +703,8 @@
   bind:this={overlayElement}
   class="overlay"
   class:sharer-input-active={sharerSurface && drawActive}
+  class:inset-stage={inset > 0}
+  style:--overlay-inset="{inset}px"
   style:--draw-cursor={drawCursor}
   role="application"
   aria-label="Draw on your shared window"
@@ -774,6 +794,15 @@
     width: 100%;
     height: 100%;
     pointer-events: none;
+  }
+
+  /* The stage covers the whole shared region; the inset window clips it. */
+  .overlay.inset-stage {
+    position: absolute;
+    left: calc(-1 * var(--overlay-inset));
+    top: calc(-1 * var(--overlay-inset));
+    width: calc(100% + 2 * var(--overlay-inset));
+    height: calc(100% + 2 * var(--overlay-inset));
   }
 
   .overlay.sharer-input-active {

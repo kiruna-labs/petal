@@ -448,6 +448,15 @@ fn register_macos_region_window(
             frame.height as f64,
         ),
     ));
+    // A shared selector's sharer overlay follows every move and resize
+    // (placement, snap, the live aspect lock, user drags); nothing else moves
+    // it for a region share.
+    let follow_app = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        crate::share_overlay::sync_frame_for_window_on_main(&follow_app, token, frame)
+    }) {
+        log::warn!("region window: overlay follow dispatch failed: {error}");
+    }
     log::info!(
         "region window: registered native identity label={title:?} CGWindowID={token} frame=({},{} {}x{})",
         frame.x,
