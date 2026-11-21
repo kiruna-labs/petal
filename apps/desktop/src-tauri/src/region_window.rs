@@ -14,6 +14,8 @@ use crate::sync_ext::MutexExt;
 pub const REGION_WINDOW_LABEL_PREFIX: &str = "region-window-";
 pub const REGION_WINDOW_TITLE_PREFIX: &str = "Petal View";
 pub const REGION_WINDOW_ROUTE: &str = "region-window.html";
+/// The selector's minimum size, logical pixels (points on macOS).
+pub(crate) const MIN_SIZE: (i32, i32) = (160, 120);
 
 static NEXT_REGION_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CAPTURE_EXCLUSION_LEASE_ID: AtomicU64 = AtomicU64::new(1);
@@ -122,7 +124,7 @@ pub async fn open_region_window(
         .always_on_top(true)
         .resizable(true)
         .inner_size(640.0, 400.0)
-        .min_inner_size(160.0, 120.0)
+        .min_inner_size(f64::from(MIN_SIZE.0), f64::from(MIN_SIZE.1))
         .position(
             120.0 + (id % 5) as f64 * 24.0,
             120.0 + (id % 5) as f64 * 24.0,
