@@ -471,7 +471,7 @@ test('only Windows fetches capture choices for the hover tab menu', () => {
     hoverTabSource,
     /if \(isWindows\(\)\) \{\s*windowsCapture = await invoke<ShareCaptureOptions>\(COMMANDS\.shareCaptureOptions,/
   );
-  assert.match(hoverTabSource, /shareAudio\.available,\s*windowsCapture\s*\)/);
+  assert.match(hoverTabSource, /shareAudio\.available,\s*windowsCapture,\s*liveAction,\s*liveSlateRemainingS\s*\)/);
   assert.match(hoverTabSource, /COMMANDS\.setShareFps/);
   assert.match(hoverTabSource, /COMMANDS\.setShareCursorInVideo/);
   assert.match(popupSource, /case 'fps':\s*case 'cursor-in-video':\s*return CheckMenuItem\.new/);

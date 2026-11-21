@@ -131,6 +131,7 @@
     type CockpitStatus,
     type DebugModeSettings,
     type ServerSettingsView,
+    type StreamSettings,
     type TestCockpitEvent,
     type TestCockpitRunDetail,
     type TestCockpitRunSummary,
@@ -326,6 +327,12 @@
   // component can only ever render "Key saved" — there is nothing to read back.
   let aiChat = $state<AiChatSettings>({ enabled: false, hasApiKey: false });
   let aiChatLoaded = $state(false);
+  // Live streaming: Rust (`streaming::settings`) is the store of record and
+  // `stream_settings_set` returns what it saved.
+  let streamSettings = $state<StreamSettings>({ alwaysStreamerMode: false, keepOffLiveStreams: false });
+  let streamSettingsLoaded = $state(false);
+  let streamSettingsBusy = $state(false);
+  let streamSettingsError = $state<string | null>(null);
   let aiChatKeyDraft = $state('');
   let aiChatBusy = $state(false);
   let aiChatNote = $state<string | null>(null);
@@ -673,6 +680,24 @@
   // optimistically flipping local state: Rust is the store of record, and
   // `ai_chat_set_enabled(false)` also stops any running session, so a local
   // guess could disagree with what actually happened.
+
+  async function handleStreamSettingChange(change: Partial<StreamSettings>) {
+    streamSettingsError = null;
+    const previous = streamSettings;
+    streamSettings = { ...streamSettings, ...change };
+    if (!hasTauri) return;
+    streamSettingsBusy = true;
+    try {
+      streamSettings = await invoke<StreamSettings>(COMMANDS.streamSettingsSet, {
+        settings: streamSettings
+      });
+    } catch (e) {
+      streamSettings = previous;
+      streamSettingsError = `Could not change the live streaming setting: ${e}`;
+    } finally {
+      streamSettingsBusy = false;
+    }
+  }
 
   async function handleAiChatEnabledChange(enabled: boolean) {
     aiChatNote = null;
@@ -1403,6 +1428,19 @@
   });
 
   $effect(() => {
+    if (!hasTauri || streamSettingsLoaded) return;
+    void (async () => {
+      try {
+        streamSettings = await invoke<StreamSettings>(COMMANDS.streamSettings);
+      } catch (e) {
+        streamSettingsError = `Could not load the live streaming settings: ${e}`;
+      } finally {
+        streamSettingsLoaded = true;
+      }
+    })();
+  });
+
+  $effect(() => {
     if (!hasTauri || debugSettingsLoaded) return;
     void (async () => {
       try {
@@ -1475,7 +1513,12 @@
   const sectionChips = $derived.by(() => {
     const chips = [{ label: 'Devices' }];
     if (isMac()) chips.push({ label: 'Permissions' });
-    chips.push({ label: 'Privacy' }, { label: 'AI chat' }, { label: 'Diagnostics' });
+    chips.push(
+      { label: 'Privacy' },
+      { label: 'AI chat' },
+      { label: 'Live streaming' },
+      { label: 'Diagnostics' }
+    );
     if (showTestCockpit) chips.push({ label: 'Cockpit' });
     chips.push({ label: 'Server' }, { label: 'Account' }, { label: 'About' });
     return chips;
@@ -1919,6 +1962,49 @@
               <span class="device-note error">{aiChatError}</span>
             {/if}
           </div>
+        {/if}
+      </div>
+    </section>
+
+    <!-- ============ Live streaming ============
+         Both settings live in stream-settings.json. "Keep me off" writes
+         this computer's `petal.stream-optout` attribute in the meeting, and
+         the LIVE notice offers the same switch while a meeting is streamed. -->
+    <section class="section">
+      <h2 class="section-title">Live streaming</h2>
+      <div class="group">
+        <label class="row switch-row">
+          <span class="row-copy">
+            <span class="row-title">Keep me off live streams</span>
+            <span class="row-description">
+              When someone in your meeting goes live, your voice and the audio of windows you share
+              stay out of their stream. You still hear each other in the meeting.
+            </span>
+          </span>
+          <Switch
+            checked={streamSettings.keepOffLiveStreams}
+            disabled={streamSettingsBusy}
+            onchange={(e) =>
+              void handleStreamSettingChange({ keepOffLiveStreams: e.currentTarget.checked })}
+          />
+        </label>
+        <label class="row switch-row">
+          <span class="row-copy">
+            <span class="row-title">Always use streamer mode</span>
+            <span class="row-description">
+              Hide meeting names, codes and invite links in Petal at all times, not only while you
+              stream. While you stream, Petal also keeps its own windows out of your shared screen.
+            </span>
+          </span>
+          <Switch
+            checked={streamSettings.alwaysStreamerMode}
+            disabled={streamSettingsBusy}
+            onchange={(e) =>
+              void handleStreamSettingChange({ alwaysStreamerMode: e.currentTarget.checked })}
+          />
+        </label>
+        {#if streamSettingsError}
+          <div class="row stack"><span class="device-note error">{streamSettingsError}</span></div>
         {/if}
       </div>
     </section>

@@ -199,6 +199,12 @@ fn options_for_geometry(
     }
 }
 
+/// The capture geometry a share of this window produces; the live-stream
+/// dialog previews its output plan from it.
+pub(crate) fn capture_geometry(window_id: u32) -> Option<(u32, u32)> {
+    unshared_geometry(window_id).ok()
+}
+
 /// The geometry a window's frame-rate feasibility is judged on BEFORE its share
 /// starts.
 ///

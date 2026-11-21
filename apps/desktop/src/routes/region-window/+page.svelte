@@ -7,11 +7,13 @@
     EVENTS,
     type AiChatEndReason,
     type AiChatStartOutcome,
+    type LiveMenuAction,
     type RegionControlStateChanged,
     type RegionViewOptionsChanged,
     type RegionViewOptionsState,
     type ShareCaptureOptions,
-    type SharePriority
+    type SharePriority,
+    type StreamSessionSnapshot
   } from '#lib/ipc.js';
   import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
   import { fly, fade } from 'svelte/transition';
@@ -60,6 +62,34 @@
   let windowTitle = $state('Petal View');
   let shareActive = $state(false);
   let sharePending = $state(false);
+  // This region is our live stream's share. Capture tokens never reach this
+  // route, so the native side answers by label.
+  let streamLive = $state(false);
+  let streamLiveVersion = 0;
+  let lastStreamWindowId: number | null = null;
+  const shareControlLabel = $derived(
+    shareActive
+      ? streamLive
+        ? 'Stop sharing Petal View (live streaming)'
+        : 'Stop sharing Petal View'
+      : 'Share Petal View'
+  );
+
+  async function refreshStreamLive() {
+    const version = ++streamLiveVersion;
+    const live =
+      shareActive && regionWindowLabel
+        ? (await invoke<LiveMenuAction | null>(COMMANDS.regionStreamMenuAction, {
+            windowLabel: regionWindowLabel
+          }).catch(() => null)) === 'stop'
+        : false;
+    if (version === streamLiveVersion) streamLive = live;
+  }
+
+  $effect(() => {
+    void shareActive;
+    void refreshStreamLive();
+  });
   let shareStateVersion = $state(0);
   let optionsStateVersion = $state(0);
   let optionsPending = $state(false);
@@ -281,6 +311,16 @@
           windowLabel: regionWindowLabel
         })
       : undefined;
+    const liveAction = shareActive
+      ? await invoke<LiveMenuAction | null>(COMMANDS.regionStreamMenuAction, {
+          windowLabel: regionWindowLabel
+        }).catch(() => null)
+      : null;
+    const liveSlateRemainingS =
+      liveAction === 'resume'
+        ? ((await invoke<StreamSessionSnapshot | null>(COMMANDS.streamSessionState).catch(() => null))
+            ?.slateRemainingS ?? null)
+        : null;
     const entries = buildShareOptionsMenuEntries(
       priority,
       shareActive,
@@ -295,7 +335,9 @@
       'right',
       shareAudioEnabled,
       shareAudioAvailable,
-      windowsCapture
+      windowsCapture,
+      liveAction,
+      liveSlateRemainingS
     );
     await popupShareOptionsMenu(entries, {
       onPriority: (value) => void setRegionPriority(value),
@@ -307,7 +349,13 @@
         void setRegionShareAudio(enabled);
       },
       onFps: (fps) => void setRegionShareFps(fps),
-      onCursorInVideo: (enabled) => void setRegionShareCursorInVideo(enabled)
+      onCursorInVideo: (enabled) => void setRegionShareCursorInVideo(enabled),
+      onLiveStream: (action) => {
+        if (!regionWindowLabel) return;
+        void invoke(COMMANDS.regionStreamAction, { windowLabel: regionWindowLabel, action }).catch(
+          (error) => console.error(`live stream ${action} failed`, error)
+        );
+      }
     });
   }
 
@@ -670,6 +718,20 @@
         }
       )
     );
+    trackUnlisten(
+      listen<StreamSessionSnapshot>(EVENTS.streamSessionChanged, (event) => {
+        // About once a second while live: only a move to another share matters.
+        if (event.payload.windowId === lastStreamWindowId) return;
+        lastStreamWindowId = event.payload.windowId;
+        void refreshStreamLive();
+      })
+    );
+    trackUnlisten(
+      listen(EVENTS.streamSessionEnded, () => {
+        lastStreamWindowId = null;
+        void refreshStreamLive();
+      })
+    );
     void seedRegionShareState();
     void seedRegionOptionsState();
     void initializeWindowTracking();
@@ -780,8 +842,8 @@
           class="region-share-control"
           data-region-share-control
           type="button"
-          aria-label={shareActive ? 'Stop sharing Petal View' : 'Share Petal View'}
-          title={shareActive ? 'Stop sharing Petal View' : 'Share Petal View'}
+          aria-label={shareControlLabel}
+          title={shareControlLabel}
           aria-pressed={shareActive}
           aria-busy={sharePending}
           disabled={sharePending || placementActive || placementSettlementPending}
@@ -795,6 +857,7 @@
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
               <rect x="7" y="7" width="10" height="10" rx="1.5" />
             </svg>
+            {#if streamLive}<span class="region-live-dot" aria-hidden="true"></span>{/if}
           {:else}
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
               <rect x="4" y="5" width="16" height="12" rx="2" />
@@ -981,6 +1044,30 @@
     cursor: default;
   }
 
+  /* Live streaming: the same red, ringed, pulsing dot as the hover tab. */
+  .region-share-control {
+    position: relative;
+  }
+
+  .region-live-dot {
+    position: absolute;
+    right: 7px;
+    bottom: 7px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--danger);
+    outline: 1.5px solid var(--text-primary);
+    animation: region-live-pulse 1.6s ease-in-out infinite;
+    pointer-events: none;
+  }
+
+  @keyframes region-live-pulse {
+    50% {
+      opacity: 0.45;
+    }
+  }
+
   .region-options-control svg,
   .region-share-control svg {
     width: 20px;
@@ -1047,7 +1134,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .warning-banner {
+    .warning-banner,
+    .region-live-dot {
       animation: none;
     }
   }

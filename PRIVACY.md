@@ -37,6 +37,36 @@ you self-host, it is you.
 - **Retention:** Petal does not record meetings. Room *metadata* (name, access
   code) persists in LiveKit so rooms can be rejoined.
 
+### Live streaming (only when someone goes live)
+
+- **When:** only after a participant chooses **Go live** on one of their own
+  shares, until the stream stops.
+- **Where:** the RTMP(S) server the person going live entered (YouTube,
+  Twitch, …), sent straight from the sharer's own computer by the desktop
+  app. Nothing goes through Petal's backend.
+- **What is sent:** the content of that one shared window or display, and the
+  meeting's mixed audio — **including the voices of everyone in the meeting**
+  who hasn't opted out (below). Other people's cameras and shares are never
+  streamed. Everyone in the meeting sees a LIVE indicator, and anyone joining
+  is told the meeting is being live streamed.
+- **Keeping yourself off a stream:** **Keep me off live streams** (Settings →
+  Live streaming in the desktop app, or the toggle on the LIVE notice in the
+  desktop app and the browser) keeps your voice and the audio of windows you
+  share out of every live stream's mix. Your choice is published to the
+  meeting as a participant attribute (`petal.stream-optout`) and stays on this
+  device. It is honored by Petal's own app on the streamer's computer; Petal
+  can't make a modified app honor it. If that matters to you, ask the person
+  streaming, or leave the meeting. Your audio still reaches the streamer's
+  echo cancellation, which runs on their computer and is not streamed.
+- **Streamer mode:** while you stream (or always, if you turn it on in
+  Settings), the desktop app hides meeting names, codes and invite links. While
+  you stream, it also keeps its own windows, including other people's shares,
+  out of a shared display.
+- **Stream keys:** never sent to Petal's backend. The desktop app keeps saved
+  keys in the operating system's keychain (Windows Credential Manager, macOS
+  Keychain); the server URL and the destination's name are stored in plain
+  text in the app's data folder.
+
 ## Only in builds configured for them
 
 These are inert unless a build supplies the corresponding value. A plain

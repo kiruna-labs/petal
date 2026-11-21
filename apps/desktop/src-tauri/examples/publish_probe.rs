@@ -524,6 +524,7 @@ fn synthetic_frame(width: u32, height: u32, sequence: u64) -> desktop_lib::captu
         },
         source_scale: 1.0,
         region_generation: None,
+        excludes_petal_windows: true,
         layout_validated: true,
         color_profile: desktop_lib::video_color::VideoColorProfile::BT601_VIDEO,
         sequence,

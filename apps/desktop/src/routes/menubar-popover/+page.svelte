@@ -53,6 +53,8 @@
     type RoomRecord
   } from '#lib/data/rooms.js';
   import { findRoomRecord, inviteLinkCopiedToastMessage, inviteLinkForRoom } from '#lib/data/inviteLinks.js';
+  import { meetingLabelForDisplay, recentRoomLabelForDisplay } from '#lib/data/liveStream.js';
+  import { streamerMode, watchStreamerMode } from '#lib/stores/streamerMode.svelte.js';
   import { loadFavoriteRooms, orderRoomsForMenu } from '#lib/data/roomOrdering.js';
   import { COMMANDS, EVENTS, formatRemoteWindowHeaderTitle, hasTauriBridge } from '#lib/ipc.js';
   import { isMac } from '#lib/platform.js';
@@ -95,8 +97,10 @@
   const currentRoomLabel = $derived.by(() => {
     if (!roomName) return null;
     const room = findRoomRecord(rooms, roomName);
-    return room ? roomDisplayLabel(room) : 'Petal meeting';
+    // Streamer mode masks meeting names and links (`data/liveStream.ts`).
+    return meetingLabelForDisplay(room ? roomDisplayLabel(room) : 'Petal meeting', streamerMode.active);
   });
+  $effect(() => watchStreamerMode());
 
   async function refresh() {
     favoriteRooms = loadFavoriteRooms();
@@ -390,7 +394,7 @@
     }
     copied = ok;
     copyFailed = !ok;
-    copiedLink = ok ? inviteLinkCopiedToastMessage(link) : '';
+    copiedLink = ok ? inviteLinkCopiedToastMessage(link, streamerMode.active) : '';
     if (copyTimer) clearTimeout(copyTimer);
     copyTimer = setTimeout(() => {
       copied = false;
@@ -474,7 +478,7 @@
             <button type="button" class="room-action" onclick={() => onJoinRecent(room.name)}>
               <span class="room-dot" aria-hidden="true"></span>
               <!-- Never the raw credential (#42) -- was `{room.name}`. -->
-              <span class="room-name">{roomDisplayLabel(room)}</span>
+              <span class="room-name">{recentRoomLabelForDisplay(roomDisplayLabel(room), streamerMode.active)}</span>
             </button>
           {/each}
         </div>

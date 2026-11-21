@@ -71,18 +71,21 @@ export function meetingInviteAccessCode(
   );
 }
 
-export function inviteCopyAriaLabel(value: string | null | undefined): string {
-  const accessCode = publicInviteAccessCode(value);
+// `masked`: streamer mode is on, so the room code and the link are never
+// shown (copying still works).
+
+export function inviteCopyAriaLabel(value: string | null | undefined, masked = false): string {
+  const accessCode = masked ? null : publicInviteAccessCode(value);
   return accessCode ? `Room ID ${accessCode}, click to copy invite` : 'Copy invite link';
 }
 
-export function inviteCopyTooltip(value: string | null | undefined): string {
-  const accessCode = publicInviteAccessCode(value);
+export function inviteCopyTooltip(value: string | null | undefined, masked = false): string {
+  const accessCode = masked ? null : publicInviteAccessCode(value);
   return accessCode ? `Room ID: ${accessCode} (click to copy invite)` : 'Copy invite link';
 }
 
-export function inviteLinkCopiedToastMessage(link: string): string {
-  return `${INVITE_LINK_COPIED_LABEL}\n${link}`;
+export function inviteLinkCopiedToastMessage(link: string, masked = false): string {
+  return masked ? INVITE_LINK_COPIED_LABEL.replace(/:$/, '') : `${INVITE_LINK_COPIED_LABEL}\n${link}`;
 }
 
 export function inviteLinkForAccessCode(label: string, accessCode: string | null | undefined): string | null {

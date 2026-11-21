@@ -31,11 +31,29 @@ const PREWARM_PANEL_FRAME: WindowFrame = WindowFrame {
 };
 pub(crate) const SHARE_OVERLAY_WINDOW_TITLE: &str = "Share Overlay";
 
+/// Points a macOS Petal View sharer overlay keeps clear of each selector
+/// edge. A panel lying on the selector's edges stops AppKit edge resizes of
+/// the selector even though the panel ignores the mouse (PR #487 held-row
+/// runs), so the panel sits inside the resize band and the page draws the
+/// band's part of the region clipped (`overlayInset.ts`).
+pub(crate) const PETAL_VIEW_OVERLAY_INSET: i32 = 8;
+
+/// The overlay inset for a share of this kind: only Petal View selectors.
+pub(crate) fn overlay_inset_for(source_kind: crate::transport::publisher::SharedSourceKind) -> i32 {
+    match source_kind {
+        crate::transport::publisher::SharedSourceKind::DisplayRegion => PETAL_VIEW_OVERLAY_INSET,
+        crate::transport::publisher::SharedSourceKind::Window
+        | crate::transport::publisher::SharedSourceKind::Display => 0,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ShareOverlayLayout {
     panel: WindowFrame,
     content_width: f64,
     content_height: f64,
+    /// How far the panel sits inside the shared surface on every side.
+    inset: f64,
 }
 
 fn share_overlay_content_frame(source_frame: WindowFrame) -> WindowFrame {
@@ -50,12 +68,24 @@ fn share_overlay_content_frame(source_frame: WindowFrame) -> WindowFrame {
     }
 }
 
-fn share_overlay_layout(source_frame: WindowFrame) -> ShareOverlayLayout {
-    let panel = share_overlay_content_frame(source_frame);
+fn share_overlay_layout(source_frame: WindowFrame, inset: i32) -> ShareOverlayLayout {
+    let content = share_overlay_content_frame(source_frame);
+    // Keep at least a 1-point panel however small the source is.
+    let inset = inset
+        .max(0)
+        .min((content.width - 1) / 2)
+        .min((content.height - 1) / 2)
+        .max(0);
     ShareOverlayLayout {
-        panel,
-        content_width: panel.width as f64,
-        content_height: panel.height as f64,
+        panel: WindowFrame {
+            x: content.x + inset,
+            y: content.y + inset,
+            width: content.width - 2 * inset,
+            height: content.height - 2 * inset,
+        },
+        content_width: content.width as f64,
+        content_height: content.height as f64,
+        inset: inset as f64,
     }
 }
 
@@ -78,12 +108,17 @@ fn content_to_normalized_point(frame: WindowFrame, x: f64, y: f64) -> (f64, f64)
 }
 
 #[cfg(target_os = "macos")]
-fn share_overlay_url(window_id: u32, owner_identity: &str, show_draw_toolbar: bool) -> String {
+fn share_overlay_url(
+    window_id: u32,
+    owner_identity: &str,
+    show_draw_toolbar: bool,
+    inset: f64,
+) -> String {
     let owner_identity =
         percent_encoding::utf8_percent_encode(owner_identity, percent_encoding::NON_ALPHANUMERIC);
     let draw_toolbar = if show_draw_toolbar { "1" } else { "0" };
     format!(
-        "compositor/pointer.html?windowId={window_id}&surface=sharer&drawToolbar={draw_toolbar}&ownerIdentity={owner_identity}"
+        "compositor/pointer.html?windowId={window_id}&surface=sharer&drawToolbar={draw_toolbar}&inset={inset}&ownerIdentity={owner_identity}"
     )
 }
 
@@ -213,6 +248,7 @@ impl Registry {
                 hide_requested: false,
                 draw_active: false,
                 show_draw_toolbar,
+                inset: 0,
             },
         );
         ShowReservation {
@@ -286,6 +322,8 @@ struct OverlayHandle {
     hide_requested: bool,
     draw_active: bool,
     show_draw_toolbar: bool,
+    /// Requested inset from the shared source (`overlay_inset_for`).
+    inset: i32,
 }
 
 fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
@@ -726,16 +764,21 @@ pub(crate) fn show_share_overlay(
     window_id: u32,
     frame: WindowFrame,
     show_draw_toolbar: bool,
+    inset: i32,
 ) -> u32 {
     let owner_identity = owner_identity.to_string();
     let reservation = with_registry(|reg| {
-        reg.reserve_show(
+        let reservation = reg.reserve_show(
             owner_identity.clone(),
             window_id,
             frame,
             show_draw_toolbar,
             || NEXT_OVERLAY_ID.fetch_add(1, Ordering::SeqCst),
-        )
+        );
+        if let Some(handle) = reg.active.get_mut(&reservation.overlay_id) {
+            handle.inset = inset;
+        }
+        reservation
     });
     let overlay_id = reservation.overlay_id;
 
@@ -825,6 +868,8 @@ fn prewarm_share_overlays_on_main(app_main: &AppHandle) {
             hide_requested: false,
             draw_active: false,
             show_draw_toolbar: false,
+            // A reused panel gets its inset with the rest of its update.
+            inset: 0,
         };
 
         match build_share_overlay_panel(app_main, &handle) {
@@ -864,12 +909,13 @@ fn build_share_overlay_panel(
         })
     }
 
+    let layout = share_overlay_layout(handle.frame, handle.inset);
     let url = share_overlay_url(
         handle.window_id,
         &handle.owner_identity,
         handle.show_draw_toolbar,
+        layout.inset,
     );
-    let layout = share_overlay_layout(handle.frame);
 
     PanelBuilder::<_, ShareOverlayPanel>::new(app_main, &handle.label)
         .url(WebviewUrl::App(url.into()))
@@ -945,7 +991,7 @@ fn realize_share_overlay(app_main: &AppHandle, overlay_id: u32) {
             if let Some(window) = app_main.get_webview_window(&handle.label) {
                 let _ = window.set_ignore_cursor_events(!handle.draw_active);
                 crate::webview_transparency::apply_or_retry(app_main, &window);
-                set_share_overlay_frame(&window, handle.frame);
+                set_share_overlay_frame(&window, handle.frame, handle.inset);
                 // No set_overlay_window_id/set_overlay_owner_identity eval here:
                 // `url` above already encodes windowId/ownerIdentity, and
                 // compositor/pointer.html's +page.svelte reads both via
@@ -996,7 +1042,8 @@ fn update_share_overlay_window(
 ) -> i64 {
     let _ = window.set_ignore_cursor_events(!handle.draw_active);
     crate::webview_transparency::apply_or_retry(app, window);
-    set_share_overlay_frame(window, handle.frame);
+    set_share_overlay_frame(window, handle.frame, handle.inset);
+    set_overlay_inset(window, share_overlay_layout(handle.frame, handle.inset).inset);
     set_overlay_window_id(window, handle.window_id);
     set_overlay_owner_identity(window, &handle.owner_identity);
     set_overlay_draw_toolbar(window, handle.show_draw_toolbar);
@@ -1006,8 +1053,8 @@ fn update_share_overlay_window(
 }
 
 #[cfg(target_os = "macos")]
-fn set_share_overlay_frame(window: &tauri::WebviewWindow, frame: WindowFrame) {
-    let layout = share_overlay_layout(frame);
+fn set_share_overlay_frame(window: &tauri::WebviewWindow, frame: WindowFrame, inset: i32) {
+    let layout = share_overlay_layout(frame, inset);
     let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition {
         x: layout.panel.x as f64,
         y: layout.panel.y as f64,
@@ -1016,6 +1063,33 @@ fn set_share_overlay_frame(window: &tauri::WebviewWindow, frame: WindowFrame) {
         width: layout.panel.width.max(1) as f64,
         height: layout.panel.height.max(1) as f64,
     }));
+}
+
+/// Tell a reused page how far its panel sits inside the shared surface.
+#[cfg(target_os = "macos")]
+fn set_overlay_inset(window: &tauri::WebviewWindow, inset: f64) {
+    let js = format!(
+        r#"(() => {{
+  const inset = {inset};
+  const apply = () => {{
+    if (typeof window.__petalOverlaySetInset !== 'function') return false;
+    window.__petalOverlaySetInset(inset);
+    return true;
+  }};
+  if (apply()) return;
+  let attempts = 0;
+  const timer = setInterval(() => {{
+    attempts += 1;
+    if (apply() || attempts >= 20) clearInterval(timer);
+  }}, 50);
+}})();"#
+    );
+    if let Err(error) = window.eval(&js) {
+        log::warn!(
+            "share_overlay: failed to set overlay inset for '{}': {error}",
+            window.label()
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1188,7 +1262,8 @@ fn complete_hide_share_overlay(app_main: &AppHandle, overlay_id: u32) {
 
 #[cfg(target_os = "macos")]
 /// #761: window_id -> overlay panel CGWindowID (same drag-nudge cache pattern
-/// as share_border's; the overlay covers the shared window's frame exactly).
+/// as share_border's; the overlay covers the shared window's frame, inset for
+/// a Petal View).
 static DRAG_OVERLAY_WIDS: Mutex<Option<std::collections::HashMap<u32, u32>>> = Mutex::new(None);
 
 /// #334: every overlay panel CGWindowID seen so far. These panels are
@@ -1209,7 +1284,17 @@ pub(crate) fn drag_nudge_overlay(window_id: u32, x: f64, y: f64) {
         .as_ref()
         .and_then(|m| m.get(&window_id).copied());
     if let Some(wid) = wid {
-        let _ = crate::platform::sls::move_own_window(wid, x, y);
+        // The nudge carries the shared frame's origin. An inset panel
+        // (Petal View) sits that far inside it.
+        let inset = with_registry(|reg| {
+            reg.active
+                .values()
+                .find(|h| h.window_id == window_id && !h.hide_requested)
+                .map(|h| h.inset)
+                .unwrap_or(0)
+        });
+        let inset = f64::from(inset.max(0));
+        let _ = crate::platform::sls::move_own_window(wid, x + inset, y + inset);
     }
 }
 
@@ -1229,14 +1314,14 @@ pub(crate) fn sync_frame_for_window_on_main(app: &AppHandle, window_id: u32, fra
             .filter_map(|(&id, h)| {
                 if h.window_id == window_id && !h.hide_requested {
                     h.frame = frame;
-                    Some((id, h.label.clone()))
+                    Some((id, h.label.clone(), h.inset))
                 } else {
                     None
                 }
             })
             .collect::<Vec<_>>()
     });
-    for (overlay_id, label) in overlays {
+    for (overlay_id, label, inset) in overlays {
         let Some(window) = app.get_webview_window(&label) else {
             continue;
         };
@@ -1251,7 +1336,7 @@ pub(crate) fn sync_frame_for_window_on_main(app: &AppHandle, window_id: u32, fra
                     .insert(window_id, n as u32);
             }
         }
-        set_share_overlay_frame(&window, frame);
+        set_share_overlay_frame(&window, frame, inset);
         let panel_number = order_above_shared(&window, window_id);
         with_registry(|reg| {
             if let Some(handle) = reg.active.get_mut(&overlay_id) {
@@ -1436,6 +1521,7 @@ mod tests {
             hide_requested: false,
             draw_active: false,
             show_draw_toolbar: false,
+            inset: 0,
         }
     }
 
@@ -1448,7 +1534,7 @@ mod tests {
     #[test]
     fn overlay_layout_maps_normalized_points_to_shared_surface() {
         let frame = f(40, 200, 180, 100);
-        let layout = share_overlay_layout(frame);
+        let layout = share_overlay_layout(frame, 0);
         assert_eq!(layout.panel, frame);
         assert_eq!(layout.content_width, 180.0);
         assert_eq!(layout.content_height, 100.0);
@@ -1468,7 +1554,7 @@ mod tests {
     #[test]
     fn overlay_layout_minimizes_degenerate_source_dimensions() {
         let frame = f(40, 200, 0, -10);
-        let layout = share_overlay_layout(frame);
+        let layout = share_overlay_layout(frame, 0);
         assert_eq!(layout.panel, f(40, 200, 1, 1));
         assert_eq!(normalized_to_content_point(frame, 2.0, -1.0), (41.0, 200.0));
     }
@@ -1695,5 +1781,55 @@ mod tests {
             .expect("shared overlay builder must precede realization");
         assert!(builder.contains(".visible(false)"));
         assert!(!builder.contains(".show();"));
+    }
+
+    #[test]
+    fn a_petal_view_overlay_panel_stays_clear_of_the_selector_edges() {
+        use crate::transport::publisher::SharedSourceKind;
+        assert_eq!(overlay_inset_for(SharedSourceKind::DisplayRegion), PETAL_VIEW_OVERLAY_INSET);
+        assert_eq!(overlay_inset_for(SharedSourceKind::Window), 0);
+        assert_eq!(overlay_inset_for(SharedSourceKind::Display), 0);
+
+        let selector = f(785, 478, 213, 120);
+        let layout = share_overlay_layout(selector, PETAL_VIEW_OVERLAY_INSET);
+        assert_eq!(layout.panel, f(793, 486, 197, 104));
+        // The page still draws over the whole shared region.
+        assert_eq!(layout.content_width, 213.0);
+        assert_eq!(layout.content_height, 120.0);
+        assert_eq!(layout.inset, 8.0);
+
+        // Window and display shares keep the panel on the source frame.
+        assert_eq!(share_overlay_layout(selector, 0).panel, selector);
+    }
+
+    #[test]
+    fn an_inset_overlay_keeps_pointers_on_the_shared_region() {
+        let selector = f(785, 478, 213, 120);
+        let layout = share_overlay_layout(selector, PETAL_VIEW_OVERLAY_INSET);
+        let panel_point = |x: f64, y: f64| {
+            let (cx, cy) = normalized_to_content_point(selector, x, y);
+            (cx - layout.panel.x as f64, cy - layout.panel.y as f64)
+        };
+        let inside = |(x, y): (f64, f64)| {
+            x >= 0.0 && y >= 0.0 && x <= layout.panel.width as f64 && y <= layout.panel.height as f64
+        };
+        // The region's center draws at the same screen point as before.
+        assert_eq!(panel_point(0.5, 0.5), (98.5, 52.0));
+        assert_eq!(
+            (layout.panel.x as f64 + 98.5, layout.panel.y as f64 + 52.0),
+            normalized_to_content_point(selector, 0.5, 0.5)
+        );
+        // The region's corners fall in the inset band, so they are clipped.
+        assert_eq!(panel_point(0.0, 0.0), (-8.0, -8.0));
+        assert_eq!(panel_point(1.0, 1.0), (205.0, 112.0));
+        assert!(!inside(panel_point(0.0, 0.0)));
+        assert!(!inside(panel_point(1.0, 1.0)));
+    }
+
+    #[test]
+    fn a_tiny_petal_view_keeps_a_visible_overlay_panel() {
+        let layout = share_overlay_layout(f(0, 0, 10, 12), PETAL_VIEW_OVERLAY_INSET);
+        assert_eq!(layout.panel, f(4, 4, 2, 4));
+        assert_eq!(layout.inset, 4.0);
     }
 }

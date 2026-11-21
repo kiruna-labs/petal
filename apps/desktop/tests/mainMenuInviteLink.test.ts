@@ -81,13 +81,16 @@ test('shared invite-link copied toast message keeps label and URL on separate li
 
   assert.equal(INVITE_LINK_COPIED_LABEL, 'Invite link copied to clipboard:');
   assert.equal(inviteLinkCopiedToastMessage(link), `${INVITE_LINK_COPIED_LABEL}\n${link}`);
+  // Streamer mode: the link is copied but never shown.
+  assert.equal(inviteLinkCopiedToastMessage(link, true), 'Invite link copied to clipboard');
 });
 
 test('main menu room rows expose the canonical access-code copy target and feedback', () => {
   assert.match(roomRow, /onCopyInvite\?: \(\) => boolean \| void \| Promise<boolean \| void>/);
   assert.match(roomRow, /class="room-access-code"/);
   assert.doesNotMatch(roomRow, /Room ID: \$\{accessCode\} \(click to copy invite\)/, 'native tooltip copy must not be emitted');
-  assert.match(roomRow, /Room ID \$\{accessCode\}, click to copy invite/);
+  // Its wording is in `roomCodeCopy` (roomAccessCodeVisibility.test.ts).
+  assert.match(roomRow, /aria-label=\{copiedAccessCode \? code\.copiedLabel : code\.label\}/);
   assert.match(roomRow, /class="room-access-code-status" role="status" aria-live="polite">Copied/);
   assert.doesNotMatch(roomRow, /copy-button|copiedInvite|copyInvite|copyTimer/);
   assert.match(mainMenu, /onCopyRoomLink\?: \(name: string\) => boolean \| void \| Promise<boolean \| void>/);
@@ -160,11 +163,11 @@ test('meeting and menubar copy paths share invite-link construction', () => {
   assert.match(meetingRoute, /inviteLinkCopiedToastMessage,/);
   assert.match(meetingRoute, /inviteLinkForAccessCode/);
   assert.match(meetingRoute, /return inviteLinkForAccessCode\(/);
-  assert.match(meetingRoute, /inviteToast\.show\(inviteLinkCopiedToastMessage\(link\)\)/);
+  assert.match(meetingRoute, /inviteToast\.show\(inviteLinkCopiedToastMessage\(link, streamerMode\.active\)\)/);
   assert.doesNotMatch(meetingRoute, /const INVITE_ORIGIN/);
   assert.match(menubarRoute, /import \{ findRoomRecord, inviteLinkCopiedToastMessage, inviteLinkForRoom \} from '#lib\/data\/inviteLinks\.js'/);
   assert.match(menubarRoute, /room \? inviteLinkForRoom\(room, label\) : null/);
-  assert.match(menubarRoute, /copiedLink = ok \? inviteLinkCopiedToastMessage\(link\) : ''/);
+  assert.match(menubarRoute, /copiedLink = ok \? inviteLinkCopiedToastMessage\(link, streamerMode\.active\) : ''/);
   assert.match(menubarRoute, /overflow-wrap: anywhere;/);
   assert.match(menubarRoute, /white-space: pre-line;/);
 });

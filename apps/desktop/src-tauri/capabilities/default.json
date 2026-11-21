@@ -21,6 +21,7 @@
     "petal-pointer-*",
     "ai-chat-panel",
     "region-window-*",
+    "go-live",
     "cockpit-plugin-boot-probe"
   ],
   "permissions": [

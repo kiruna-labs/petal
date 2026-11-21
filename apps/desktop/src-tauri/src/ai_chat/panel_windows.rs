@@ -11,6 +11,7 @@
 //! - Dismiss hides; the panel is re-presented by a later start.
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 
 pub const AI_CHAT_PANEL_LABEL: &str = "ai-chat-panel";
 pub const AI_CHAT_PANEL_WIDTH: f64 = 340.0;
@@ -47,7 +48,7 @@ pub fn create_ai_chat_panel(app: &AppHandle) {
     .additional_browser_args(crate::webview2_args::WEBVIEW2_ACCEL_ARGS)
     .visible(false)
     .inner_size(AI_CHAT_PANEL_WIDTH, AI_CHAT_PANEL_HEIGHT);
-    match builder.build() {
+    match builder.build_petal() {
         Ok(window) => {
             let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition {
                 x: -10000.0,

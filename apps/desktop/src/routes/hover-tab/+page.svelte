@@ -23,6 +23,8 @@
     AiChatStateEvent,
     HoverTabSide,
     HoverTabUpdate,
+    LiveMenuAction,
+    StreamSessionSnapshot,
     RemoteControlStatus,
     ShareAudioState,
     ShareCaptureOptions,
@@ -100,6 +102,10 @@
   const AUTO_DISMISS_MS = 4000;
 
   const isShared = $derived(currentWindowId !== null && sharedWindows.has(currentWindowId));
+  // The share our own live stream is on. After the share stops the stream
+  // keeps its old id, which is never shared again.
+  let liveWindowId = $state<number | null>(null);
+  const isLive = $derived(isShared && liveWindowId === currentWindowId);
   const isBeingControlled = $derived(
     currentWindowId !== null && controlledWindows.has(currentWindowId)
   );
@@ -112,7 +118,9 @@
       ? aiChatError.reason
       : null
   );
-  const shareActionLabel = $derived(isShared ? 'Stop sharing' : 'Share this window');
+  const shareActionLabel = $derived(
+    isShared ? (isLive ? 'Stop sharing (live streaming)' : 'Stop sharing') : 'Share this window'
+  );
   const shareActionContext = $derived(
     currentAiChatError
       ? aiChatHoverTabOptionsTitle(currentAiChatError)
@@ -556,6 +564,22 @@
       applyUpdate(event.payload);
     });
 
+    // On its slate the stream shows no share: a stopped share's window shared
+    // again (macOS keeps the id) isn't on air until resumed.
+    const onAirWindow = (snapshot: StreamSessionSnapshot | null) =>
+      snapshot && snapshot.phase !== 'paused' ? snapshot.windowId : null;
+    invoke<StreamSessionSnapshot | null>(COMMANDS.streamSessionState)
+      .then((snapshot) => {
+        liveWindowId = onAirWindow(snapshot);
+      })
+      .catch(() => {});
+    const unStreamSession = listen<StreamSessionSnapshot>(EVENTS.streamSessionChanged, (event) => {
+      liveWindowId = onAirWindow(event.payload);
+    });
+    const unStreamEnded = listen(EVENTS.streamSessionEnded, () => {
+      liveWindowId = null;
+    });
+
     const unShareState = listen<{ windowId: number; shared: boolean }>(EVENTS.shareStateChanged, (event) => {
       sharedWindows = windowShareSet(sharedWindows, event.payload.windowId, event.payload.shared);
       if (!event.payload.shared && currentWindowId === event.payload.windowId) {
@@ -616,6 +640,8 @@
 
     return () => {
       unUpdate.then((u) => u()).catch(() => {});
+      unStreamSession.then((u) => u()).catch(() => {});
+      unStreamEnded.then((u) => u()).catch(() => {});
       unShareState.then((u) => u()).catch(() => {});
       unShareAudio.then((u) => u()).catch(() => {});
       unShareControlMode.then((u) => u()).catch(() => {});
@@ -893,7 +919,17 @@
     // section. Without them (macOS) the menu is unchanged. The fetch only fails
     // when the shared window is gone, and then the menu does not open.
     let windowsCapture: ShareCaptureOptions | undefined;
+    let liveAction: LiveMenuAction | null = null;
+    let liveSlateRemainingS: number | null = null;
     if (menuWindowId !== null) {
+      liveAction = await invoke<LiveMenuAction | null>(COMMANDS.streamMenuAction, {
+        windowId: menuWindowId
+      }).catch(() => null);
+      if (liveAction === 'resume') {
+        liveSlateRemainingS =
+          (await invoke<StreamSessionSnapshot | null>(COMMANDS.streamSessionState).catch(() => null))
+            ?.slateRemainingS ?? null;
+      }
       shareAudio = await invoke<ShareAudioState>(COMMANDS.shareAudioState, {
         windowId: menuWindowId
       }).catch(() => ({
@@ -929,7 +965,9 @@
         side,
         shareAudio.enabled,
         shareAudio.available,
-        windowsCapture
+        windowsCapture,
+        liveAction,
+        liveSlateRemainingS
       );
       const placement = keyboardInvocation && actionButton
         ? (() => {
@@ -956,10 +994,27 @@
         },
         onCursorInVideo: (enabled) => {
           if (menuWindowId !== null) void setShareCursorInVideo(menuWindowId, enabled);
+        },
+        onLiveStream: (action) => {
+          if (menuWindowId !== null) void runLiveStreamAction(menuWindowId, action);
         }
       }, placement);
     } finally {
       await invoke(COMMANDS.setHoverTabMenuOpen, { open: false }).catch(() => {});
+    }
+  }
+
+  async function runLiveStreamAction(windowId: number, action: LiveMenuAction) {
+    try {
+      if (action === 'goLive') {
+        await invoke(COMMANDS.openGoLiveWindow, { windowId });
+      } else if (action === 'stop') {
+        await invoke(COMMANDS.streamStop);
+      } else {
+        await invoke(COMMANDS.streamResumeHere, { windowId });
+      }
+    } catch (error) {
+      console.error(`live stream ${action} failed`, error);
     }
   }
 
@@ -1028,7 +1083,7 @@
             <path d="m17 8 5-5M17 3h5v5"></path>
           {/if}
         </svg>
-        {#if isShared}<span class="hover-tab-live-dot" aria-hidden="true"></span>{/if}
+        {#if isShared}<span class="hover-tab-live-dot" class:is-live={isLive} aria-hidden="true"></span>{/if}
       </button>
     </div>
   </Pill>
@@ -1339,6 +1394,21 @@
     box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent);
   }
 
+  /* Live streaming: red, ringed so it reads on every identity colour, and
+     pulsing gently (steady under reduced motion). */
+  .hover-tab-live-dot.is-live {
+    background: var(--danger, #ff6b5e);
+    box-shadow: none;
+    outline: 1.5px solid var(--text-primary, #f5f6f7);
+    animation: hover-tab-live-pulse 1.6s ease-in-out infinite;
+  }
+
+  @keyframes hover-tab-live-pulse {
+    50% {
+      opacity: 0.45;
+    }
+  }
+
   .hover-tab-host.side-top .hover-tab-live-dot {
     top: 7px;
     bottom: auto;
@@ -1352,6 +1422,10 @@
   @media (prefers-reduced-motion: reduce) {
     .hover-tab-action {
       transition: none;
+    }
+
+    .hover-tab-live-dot.is-live {
+      animation: none;
     }
 
     .hover-tab-action:active:not(:disabled) {

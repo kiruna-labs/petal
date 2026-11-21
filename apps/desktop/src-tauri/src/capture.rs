@@ -131,6 +131,11 @@ impl NativeCapturedPixelBuffer {
         self.pixel_buffer.pixel_format()
     }
 
+    /// The borrowed `CVPixelBuffer`, valid while `self` lives.
+    pub(crate) fn as_ptr(&self) -> *mut c_void {
+        self.pixel_buffer.as_ptr()
+    }
+
     pub fn copy_nv12_payload(&self) -> Result<CapturedFramePayload, CaptureError> {
         self.copy_nv12_payload_with_pool(None)
     }
@@ -273,6 +278,11 @@ pub struct CapturedFrame {
     /// denotes a non-region capture; region frames are rejected at the pump
     /// boundary if this no longer matches the applied generation.
     pub region_generation: Option<u64>,
+    /// Captured with Petal's own windows already out of the picture: a
+    /// window or region share, or a whole-display share whose streamer-mode
+    /// filter was in place before this frame was taken. A live stream takes
+    /// only such frames (`streaming::tap`, #487).
+    pub excludes_petal_windows: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -591,6 +601,13 @@ pub struct WindowCapture {
     degenerate_region_size: Arc<AtomicBool>,
     region_transaction: Arc<Mutex<()>>,
     origin: CaptureSourceOrigin,
+    /// Whether the content filter leaves Petal's own windows out (streamer
+    /// mode on a whole-display share; a region share's own filter, which
+    /// is never rebuilt).
+    own_windows_excluded: Arc<AtomicBool>,
+    /// Since when (mach absolute time) frames leave Petal out; see
+    /// [`frame_excludes_petal_windows`].
+    own_windows_excluded_since: Arc<AtomicU64>,
     layout_gate: LayoutIntegrityGate,
     layout_error: Arc<dyn Fn(String) + Send + Sync>,
     /// Last successfully committed output size and its effective source scale.
@@ -829,6 +846,8 @@ pub struct WindowCaptureConfig {
     degenerate_region_size: Arc<AtomicBool>,
     region_transaction: Arc<Mutex<()>>,
     origin: CaptureSourceOrigin,
+    own_windows_excluded: Arc<AtomicBool>,
+    own_windows_excluded_since: Arc<AtomicU64>,
     layout_gate: LayoutIntegrityGate,
     layout_error: Arc<dyn Fn(String) + Send + Sync>,
     configured_state: Arc<Mutex<ConfiguredCaptureState>>,
@@ -950,6 +969,12 @@ struct PreparedCaptureSource {
     source_display_id: Option<u32>,
     source_generation: u64,
     origin: CaptureSourceOrigin,
+    /// Whether `filter` leaves Petal's own windows out of a whole-display
+    /// capture.
+    own_windows_excluded: bool,
+    /// Whether Petal's windows could appear in this capture at all: a
+    /// display or region, not a single window.
+    petal_can_appear: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1472,6 +1497,24 @@ impl WindowCapture {
             return Err(CaptureError::PermissionDenied);
         }
 
+        // While this computer is live, a picked display starts without Petal
+        // rather than waiting for a streamer-mode rebuild that only runs when
+        // going live or ending the stream.
+        let (filter, own_windows_excluded) = match picked_display_to_exclude(
+            window_id,
+            crate::streaming::streamer_mode::capture_exclusion_active(),
+        ) {
+            Some(display_id) => {
+                let (filter, _, excluded) = direct_display_filter(display_id, true)?;
+                if excluded {
+                    log::info!(
+                        "capture: display {display_id} picked while live starts without Petal's windows"
+                    );
+                }
+                (filter, excluded)
+            }
+            None => (filter, false),
+        };
         let source = PreparedCaptureSource {
             filter,
             logical_width,
@@ -1482,6 +1525,8 @@ impl WindowCapture {
             source_display_id: None,
             source_generation: 0,
             origin: CaptureSourceOrigin::SystemPicker,
+            own_windows_excluded,
+            petal_can_appear: crate::window_source::is_display_source_id(window_id),
         };
         Self::start_prepared(window_id, fps, resolution, source, on_frame, on_error, None)
     }
@@ -1509,7 +1554,12 @@ impl WindowCapture {
             source_display_id,
             source_generation,
             origin,
+            own_windows_excluded,
+            petal_can_appear,
         } = source;
+        let own_windows_excluded_since =
+            Arc::new(AtomicU64::new(initial_exclusion_since(petal_can_appear, own_windows_excluded)));
+        let own_windows_excluded = Arc::new(AtomicBool::new(own_windows_excluded));
         let Some((source_layout, (width, height, initial_source_scale))) =
             CaptureSourceLayout::new(logical_width, logical_height, backing_scale.max(1.0))
                 .and_then(|layout| {
@@ -1604,6 +1654,7 @@ impl WindowCapture {
         let region_generation_for_handler = region_generation.clone();
         let pending_region_generation_for_handler = pending_region_generation.clone();
         let region_transaction_for_handler = region_transaction.clone();
+        let own_windows_excluded_since_for_handler = own_windows_excluded_since.clone();
         let layout_gate_for_handler = layout_gate.clone();
         let layout_error_for_handler = layout_error.clone();
         let diagnostics_for_handler = diagnostics.clone();
@@ -1788,6 +1839,10 @@ impl WindowCapture {
                     dirty_rects_known,
                     lock_copy_ms: 0.0,
                     region_generation: frame_region_generation,
+                    excludes_petal_windows: frame_excludes_petal_windows(
+                        own_windows_excluded_since_for_handler.load(Ordering::Acquire),
+                        frame_info.as_ref().and_then(|info| info.display_time),
+                    ),
                 });
             },
             SCStreamOutputType::Screen,
@@ -1814,6 +1869,8 @@ impl WindowCapture {
             degenerate_region_size: Arc::new(AtomicBool::new(false)),
             region_transaction,
             origin,
+            own_windows_excluded,
+            own_windows_excluded_since,
             layout_gate,
             layout_error,
             configured_state,
@@ -1868,6 +1925,8 @@ impl WindowCapture {
             filter: self.filter.clone(),
             region_display_id: self.region_display_id.clone(),
             origin: self.origin,
+            own_windows_excluded: self.own_windows_excluded.clone(),
+            own_windows_excluded_since: self.own_windows_excluded_since.clone(),
             layout_gate: self.layout_gate.clone(),
             layout_error: self.layout_error.clone(),
             configured_state: self.configured_state.clone(),
@@ -2002,6 +2061,8 @@ fn prepare_direct_window_source(window_id: u32) -> Result<PreparedCaptureSource,
         source_display_id: None,
         source_generation: 0,
         origin: CaptureSourceOrigin::DirectWindowId,
+        own_windows_excluded: false,
+        petal_can_appear: false,
     })
 }
 
@@ -2053,21 +2114,33 @@ fn prepare_direct_display_region_source(
         region.width,
         region.height,
     );
-    let excluded: Vec<_> = content
-        .windows()
+    // Petal leaves as an application, so windows it opens later (the go-live
+    // dialog, a toast, a remote share) stay out too. Only if Petal isn't in
+    // the shareable applications does the filter fall back to the windows it
+    // has now, and then a live stream can't use this share (#487).
+    let own_app = content
+        .applications()
         .into_iter()
-        .filter(|window| {
-            window.window_id() == selector_window_id
-                || window
-                    .owning_application()
-                    .is_some_and(|app| app.process_id() == std::process::id() as i32)
-        })
-        .collect();
-    let excluded_refs: Vec<_> = excluded.iter().collect();
-    let filter = SCContentFilter::create()
-        .with_display(&display)
-        .with_excluding_windows(&excluded_refs)
-        .build();
+        .find(|app| app.process_id() == std::process::id() as i32);
+    let own_windows_excluded = own_app.is_some();
+    let filter = match own_app.as_ref() {
+        Some(app) => SCContentFilter::create().with_display(&display).with_excluding_applications(&[app], &[]).build(),
+        None => {
+            log::warn!("capture: region {selector_window_id}: Petal isn't in the shareable applications; excluding its current windows only");
+            let excluded: Vec<_> = content
+                .windows()
+                .into_iter()
+                .filter(|window| {
+                    window.window_id() == selector_window_id
+                        || window
+                            .owning_application()
+                            .is_some_and(|app| app.process_id() == std::process::id() as i32)
+                })
+                .collect();
+            let excluded_refs: Vec<_> = excluded.iter().collect();
+            SCContentFilter::create().with_display(&display).with_excluding_windows(&excluded_refs).build()
+        }
+    };
     let scale = f64::from(filter.point_pixel_scale()).max(1.0);
     crate::region_window::update_display(
         selector_window_id,
@@ -2095,10 +2168,138 @@ fn prepare_direct_display_region_source(
             .map(|source| source.generation.0)
             .unwrap_or(1),
         origin: CaptureSourceOrigin::DirectWindowId,
+        own_windows_excluded,
+        petal_can_appear: true,
     })
 }
 
-fn prepare_direct_display_source(display_id: u32) -> Result<PreparedCaptureSource, CaptureError> {
+/// The display whose whole-display capture streamer mode rebuilds, if this
+/// capture is one. A direct (restarted) display capture is keyed by the
+/// display id; a display picked in the share picker by its display source
+/// id, and its filter (`with_display(..).with_excluding_windows(&[])`) is
+/// exactly what `direct_display_filter(.., false)` restores. Region shares
+/// already exclude Petal; a picked window isn't a display.
+fn streamer_exclusion_display_id(origin: CaptureSourceOrigin, capture_id: u32, has_region: bool) -> Option<u32> {
+    if has_region {
+        return None;
+    }
+    match origin {
+        CaptureSourceOrigin::DirectWindowId => Some(capture_id),
+        CaptureSourceOrigin::SystemPicker => crate::window_source::is_display_source_id(capture_id)
+            .then(|| crate::window_source::display_id_from_source_id(capture_id)),
+    }
+}
+
+/// The display a picked capture should start without Petal: a display picked
+/// in the share picker while this computer is live. A picked window isn't a
+/// display, and outside a stream the picker's own filter is kept.
+fn picked_display_to_exclude(capture_id: u32, live: bool) -> Option<u32> {
+    streamer_exclusion_display_id(CaptureSourceOrigin::SystemPicker, capture_id, false)
+        .filter(|_| live)
+}
+
+/// `own_windows_excluded_since` when nothing has left Petal out yet.
+const EXCLUSION_NOT_APPLIED: u64 = u64::MAX;
+
+#[cfg(test)]
+mod exclusion_proof_tests {
+    use super::*;
+
+    #[test]
+    fn a_display_frame_proves_exclusion_only_after_the_filter_took_effect() {
+        // Window and region shares never contain Petal's windows.
+        assert_eq!(initial_exclusion_since(false, false), 0);
+        assert!(frame_excludes_petal_windows(0, None));
+        // A display share built without Petal: every frame.
+        assert_eq!(initial_exclusion_since(true, true), 0);
+        // A display share still showing Petal: none, until the rebuild.
+        let since = initial_exclusion_since(true, false);
+        assert!(!frame_excludes_petal_windows(since, Some(u64::MAX - 1)));
+        // After the rebuild took effect at `t`: frames from `t` on only.
+        let t = mach_now();
+        assert!(!frame_excludes_petal_windows(t, Some(t - 1)), "taken before the new filter");
+        assert!(frame_excludes_petal_windows(t, Some(t)));
+        assert!(!frame_excludes_petal_windows(t, None), "no frame time: no proof");
+        assert!(mach_ticks(EXCLUSION_MARGIN_NS) > 0);
+    }
+}
+
+/// Where a capture's exclusion clock starts: from the first frame for a
+/// window share (Petal's windows are never in it) or a display or region
+/// share built without Petal as an application; never for one that may
+/// still show Petal.
+fn initial_exclusion_since(petal_can_appear: bool, built_excluding_petal: bool) -> u64 {
+    if !petal_can_appear || built_excluding_petal {
+        0
+    } else {
+        EXCLUSION_NOT_APPLIED
+    }
+}
+
+/// Whether a frame taken at `display_time` (mach absolute time, from
+/// `SCStreamFrameInfo`) leaves Petal out, given when the exclusion took
+/// effect. A frame with no time can't prove it once a filter change is
+/// involved.
+fn frame_excludes_petal_windows(excluded_since: u64, display_time: Option<u64>) -> bool {
+    match excluded_since {
+        0 => true,
+        EXCLUSION_NOT_APPLIED => false,
+        since => display_time.is_some_and(|time| time >= since),
+    }
+}
+
+/// Margin after a filter update completes before frames count as excluded.
+const EXCLUSION_MARGIN_NS: u64 = 50_000_000;
+
+#[repr(C)]
+struct MachTimebaseInfo {
+    numer: u32,
+    denom: u32,
+}
+
+unsafe extern "C" {
+    fn mach_absolute_time() -> u64;
+    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
+}
+
+fn mach_now() -> u64 {
+    // SAFETY: a plain clock read with no arguments.
+    unsafe { mach_absolute_time() }
+}
+
+/// `nanos` in mach absolute time units.
+fn mach_ticks(nanos: u64) -> u64 {
+    let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
+    // SAFETY: a valid out-param.
+    if unsafe { mach_timebase_info(&mut info) } != 0 || info.numer == 0 {
+        return nanos;
+    }
+    ((u128::from(nanos) * u128::from(info.denom)) / u128::from(info.numer)) as u64
+}
+
+/// The display whose filter a streamer-mode rebuild should replace: only a
+/// whole-display capture whose filter isn't already in the wanted state.
+fn streamer_filter_rebuild(
+    origin: CaptureSourceOrigin,
+    capture_id: u32,
+    has_region: bool,
+    current_excluded: bool,
+    wanted: bool,
+) -> Option<u32> {
+    streamer_exclusion_display_id(origin, capture_id, has_region)
+        .filter(|_| current_excluded != wanted)
+}
+
+/// A whole-display filter. With `exclude_own`, Petal itself is left out --
+/// as an application, so windows it opens later (a remote share surface, a
+/// toast, the go-live dialog) stay out too. That is streamer mode while this
+/// computer is live: a public stream of a display never shows the meeting.
+/// The flag returned says whether Petal was actually left out; it isn't when
+/// Petal is missing from the shareable applications.
+fn direct_display_filter(
+    display_id: u32,
+    exclude_own: bool,
+) -> Result<(SCContentFilter, SCDisplay, bool), CaptureError> {
     let content = SCShareableContent::create()
         .with_on_screen_windows_only(true)
         .with_exclude_desktop_windows(true)
@@ -2110,13 +2311,31 @@ fn prepare_direct_display_source(display_id: u32) -> Result<PreparedCaptureSourc
         .into_iter()
         .find(|d| d.display_id() == display_id)
         .ok_or(CaptureError::DisplayNotFound(display_id))?;
+    let own_app = exclude_own
+        .then(|| {
+            content
+                .applications()
+                .into_iter()
+                .find(|app| app.process_id() == std::process::id() as i32)
+        })
+        .flatten();
+    if exclude_own && own_app.is_none() {
+        log::warn!("capture: display {display_id}: Petal isn't in the shareable applications; its windows can't be excluded");
+    }
+    let builder = SCContentFilter::create().with_display(&display);
+    let filter = match own_app.as_ref() {
+        Some(app) => builder.with_excluding_applications(&[app], &[]).build(),
+        None => builder.with_excluding_windows(&[]).build(),
+    };
+    Ok((filter, display, own_app.is_some()))
+}
+
+fn prepare_direct_display_source(display_id: u32) -> Result<PreparedCaptureSource, CaptureError> {
+    let exclude_own = crate::streaming::streamer_mode::capture_exclusion_active();
+    let (filter, display, own_windows_excluded) = direct_display_filter(display_id, exclude_own)?;
 
     let color_profile = color_profile_for_display_id(display_id)
         .unwrap_or_else(VideoColorProfile::legacy_publish_default);
-    let filter = SCContentFilter::create()
-        .with_display(&display)
-        .with_excluding_windows(&[])
-        .build();
     Ok(PreparedCaptureSource {
         backing_scale: f64::from(filter.point_pixel_scale()).max(1.0),
         logical_width: f64::from(display.width()),
@@ -2127,6 +2346,8 @@ fn prepare_direct_display_source(display_id: u32) -> Result<PreparedCaptureSourc
         source_display_id: None,
         source_generation: 0,
         origin: CaptureSourceOrigin::DirectWindowId,
+        own_windows_excluded,
+        petal_can_appear: true,
     })
 }
 
@@ -2194,6 +2415,42 @@ impl WindowCaptureConfig {
 
     pub(crate) fn configured_output(&self) -> (u32, u32) {
         self.configured_state.lock_unpoisoned().output
+    }
+
+    /// Streamer mode: rebuild a whole-display share's filter with or without
+    /// Petal's own windows. Only for a display share (the caller checks the
+    /// share's kind), whether picked in the share picker or restarted
+    /// directly ([`streamer_exclusion_display_id`]). Region shares already
+    /// exclude Petal, and a filter already in the wanted state is left alone
+    /// ([`streamer_filter_rebuild`]). Returns whether the filter changed.
+    pub(crate) fn set_display_own_windows_excluded(&self, excluded: bool) -> Result<bool, CaptureError> {
+        let _region_transaction = self.region_transaction.lock_unpoisoned();
+        let has_region = self.source_rect.lock_unpoisoned().is_some();
+        let Some(display_id) = streamer_filter_rebuild(
+            self.origin,
+            self.window_id,
+            has_region,
+            self.own_windows_excluded.load(Ordering::Acquire),
+            excluded,
+        ) else {
+            return Ok(false);
+        };
+        let (filter, _, now_excluded) = direct_display_filter(display_id, excluded)?;
+        if !now_excluded {
+            // Frames from here on may show Petal again.
+            self.own_windows_excluded_since.store(EXCLUSION_NOT_APPLIED, Ordering::Release);
+        }
+        self.stream
+            .update_content_filter(&filter)
+            .map_err(|e| CaptureError::ScreenCaptureKit(e.to_string()))?;
+        *self.filter.lock_unpoisoned() = filter;
+        self.own_windows_excluded.store(now_excluded, Ordering::Release);
+        if now_excluded {
+            // The update has completed: a frame taken after this instant
+            // (plus a frame's margin) leaves Petal out; one before may not.
+            self.own_windows_excluded_since.store(mach_now().saturating_add(mach_ticks(EXCLUSION_MARGIN_NS)), Ordering::Release);
+        }
+        Ok(true)
     }
 
     pub(crate) fn current_region_generation(&self) -> Option<u64> {
@@ -2606,6 +2863,8 @@ impl WindowCaptureConfig {
             dirty_rects_known: false,
             lock_copy_ms: 0.0,
             region_generation,
+            // Taken now, through the current filter.
+            excludes_petal_windows: self.own_windows_excluded_since.load(Ordering::Acquire) != EXCLUSION_NOT_APPLIED,
         })
     }
 }
@@ -3160,6 +3419,58 @@ fn cap_capture_size_to_long_edge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Streamer mode rebuilds the filter of a display picked in the share
+    /// picker, not only of a restarted direct display capture: the picker is
+    /// how every ordinary display share starts (2026-10-31 tier 3 on m1).
+    #[test]
+    fn streamer_exclusion_covers_picked_and_direct_display_captures() {
+        let picked_display = crate::window_source::display_source_id(9);
+        assert_eq!(
+            streamer_exclusion_display_id(CaptureSourceOrigin::SystemPicker, picked_display, false),
+            Some(9)
+        );
+        assert_eq!(streamer_exclusion_display_id(CaptureSourceOrigin::DirectWindowId, 9, false), Some(9));
+        assert_eq!(
+            streamer_exclusion_display_id(CaptureSourceOrigin::SystemPicker, 15803, false),
+            None,
+            "a picked window"
+        );
+        assert_eq!(
+            streamer_exclusion_display_id(CaptureSourceOrigin::SystemPicker, picked_display, true),
+            None,
+            "a region share"
+        );
+    }
+
+    /// A display picked while this computer is live starts without Petal; the
+    /// go-live rebuild alone left it in the public stream (2026-11-03, m1).
+    #[test]
+    fn a_display_picked_while_live_starts_without_petal() {
+        let picked_display = crate::window_source::display_source_id(9);
+        assert_eq!(picked_display_to_exclude(picked_display, true), Some(9));
+        assert_eq!(picked_display_to_exclude(picked_display, false), None, "not live");
+        assert_eq!(picked_display_to_exclude(15803, true), None, "a picked window");
+    }
+
+    #[test]
+    fn streamer_rebuild_skips_a_filter_already_in_that_state() {
+        let picked_display = crate::window_source::display_source_id(9);
+        let picker = CaptureSourceOrigin::SystemPicker;
+        assert_eq!(streamer_filter_rebuild(picker, picked_display, false, true, true), None);
+        assert_eq!(streamer_filter_rebuild(picker, picked_display, false, true, false), Some(9));
+        assert_eq!(streamer_filter_rebuild(picker, picked_display, false, false, true), Some(9));
+        assert_eq!(
+            streamer_filter_rebuild(CaptureSourceOrigin::DirectWindowId, 9, false, false, false),
+            None
+        );
+        assert_eq!(
+            streamer_filter_rebuild(picker, picked_display, true, false, true),
+            None,
+            "a region share"
+        );
+        assert_eq!(streamer_filter_rebuild(picker, 15803, false, false, true), None, "a picked window");
+    }
 
     /// PETAL-DESKTOP-3C/-3D: a window CoreGraphics lists but the on-screen
     /// `SCShareableContent` omits is closed, excluded by its app, or worth

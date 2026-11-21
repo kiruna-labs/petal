@@ -10,6 +10,8 @@ import {
   DEBUG_MENU_ITEM_ID,
   DEBUG_MENU_ITEM_LABEL,
   fpsMenuItemId,
+  LIVE_STREAM_MENU_ITEM_ID,
+  LIVE_STREAM_MENU_LABELS,
   HOVER_TAB_POSITION_CHOICES,
   HOVER_TAB_POSITION_SECTION_LABEL,
   positionMenuItemId,
@@ -26,7 +28,7 @@ import type {
   HoverTabPosition,
   WindowsCaptureMenuState
 } from './hoverTabMenu.ts';
-import type { HoverTabSide, SharePriority } from '../ipc.ts';
+import type { HoverTabSide, LiveMenuAction, SharePriority } from '../ipc.ts';
 
 export {
   CONTROL_MODE_CHOICES,
@@ -36,6 +38,8 @@ export {
   DEBUG_MENU_ITEM_ID,
   DEBUG_MENU_ITEM_LABEL,
   fpsMenuItemId,
+  LIVE_STREAM_MENU_ITEM_ID,
+  LIVE_STREAM_MENU_LABELS,
   HOVER_TAB_POSITION_CHOICES,
   HOVER_TAB_POSITION_SECTION_LABEL,
   positionMenuItemId,
@@ -63,7 +67,9 @@ export function buildShareOptionsMenuEntries(
   hoverTabSide: HoverTabSide = 'right',
   shareAudioEnabled = false,
   shareAudioAvailable = false,
-  windowsCapture?: WindowsCaptureMenuState
+  windowsCapture?: WindowsCaptureMenuState,
+  liveAction: LiveMenuAction | null = null,
+  liveSlateRemainingS: number | null = null
 ): HoverTabMenuEntry[] {
   return buildHoverTabMenuEntries(
     currentPriority,
@@ -79,6 +85,8 @@ export function buildShareOptionsMenuEntries(
     hoverTabSide,
     shareAudioEnabled,
     shareAudioAvailable,
-    windowsCapture
+    windowsCapture,
+    liveAction,
+    liveSlateRemainingS
   );
 }

@@ -1,0 +1,17 @@
+[package]
+name = "shiguredo_rtmp"
+version = "2026.1.0-canary.6"
+edition = "2024"
+rust-version = "1.88"
+description = "RTMP library"
+readme = "README.md"
+homepage = "https://github.com/shiguredo/rtmp-rs"
+repository = "https://github.com/shiguredo/rtmp-rs"
+license = "Apache-2.0"
+include = ["/LICENSE", "/README.md", "/src/**"]
+
+[workspace]
+members = ["examples/publish", "examples/server", "pbt"]
+exclude = ["fuzz"]
+
+[dependencies]

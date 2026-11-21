@@ -235,7 +235,7 @@ test('Petal View offers Windows capture choices in place of priority, with the s
     route,
     /isWindows\(\)\s*\?\s*await invoke<ShareCaptureOptions>\(COMMANDS\.regionShareCaptureOptions,/
   );
-  assert.match(route, /shareAudioAvailable,\s*windowsCapture\s*\)/);
+  assert.match(route, /shareAudioAvailable,\s*windowsCapture,\s*liveAction,\s*liveSlateRemainingS\s*\)/);
   assert.match(ipc, /regionShareCaptureOptions: 'region_share_capture_options'/);
   assert.match(ipc, /setRegionShareFps: 'set_region_share_fps'/);
   assert.match(ipc, /setRegionShareCursorInVideo: 'set_region_share_cursor_in_video'/);

@@ -794,6 +794,7 @@ mod tests {
             dirty_rects_known: true,
             lock_copy_ms: 0.0,
             region_generation: None,
+            excludes_petal_windows: true,
         };
         let still = encode_captured_frame_still(&frame, 777).unwrap();
         assert_eq!(still.width, width);
@@ -857,6 +858,7 @@ mod tests {
             dirty_rects_known: true,
             lock_copy_ms: 0.0,
             region_generation: None,
+            excludes_petal_windows: true,
         };
         let still = encode_captured_frame_still(&frame, 0).unwrap();
         println!(

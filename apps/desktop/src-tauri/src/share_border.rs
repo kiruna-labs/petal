@@ -1074,6 +1074,17 @@ fn complete_hide_share_border(app_main: &AppHandle, border_id: u32) {
     }
 }
 
+/// Whether a share of this kind gets a sharer border panel. A Petal View
+/// selector draws its own shared frame (WINDOWS_NATIVE_SURFACE_AUDIT.md
+/// decision 3), and on macOS a border panel over the selector's edges stops
+/// AppKit edge resizes of the selector.
+pub(crate) fn shows_sharer_border(source_kind: SharedSourceKind) -> bool {
+    match source_kind {
+        SharedSourceKind::Window | SharedSourceKind::Display => true,
+        SharedSourceKind::DisplayRegion => false,
+    }
+}
+
 /// Reposition an already-shown border to `frame` (e.g. if the shared window
 /// moves or is resized).
 ///
@@ -3013,5 +3024,14 @@ mod tests {
         ];
         assert!(plan_border_actions(&stack, PANEL, SHARED, false, SELF_PID, None).is_empty());
         assert!(plan_border_actions(&stack, panel_b, shared_b, false, SELF_PID, None).is_empty());
+    }
+
+    #[test]
+    fn a_petal_view_share_gets_no_sharer_border() {
+        // The selector's own frame is the share indicator, and a border panel
+        // over its edges stops macOS edge resizes (PR #487 held-row runs).
+        assert!(!shows_sharer_border(SharedSourceKind::DisplayRegion));
+        assert!(shows_sharer_border(SharedSourceKind::Window));
+        assert!(shows_sharer_border(SharedSourceKind::Display));
     }
 }
