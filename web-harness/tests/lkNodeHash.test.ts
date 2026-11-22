@@ -15,7 +15,9 @@ import {
   lkRegionToken,
   localEdge,
   sameEdge,
+  selectedIcePath,
   selfHostedSfu,
+  worstIcePath,
   type EdgeFlag,
   type LocalEdge,
 } from '@petal/shared/logic/lkNodeHash';
@@ -30,6 +32,12 @@ const contract = JSON.parse(
     sameEdge: Array<{ local: string | null; peer: string | null; expected: EdgeFlag }>;
     selfHostedSfu: Array<{ url: string; expected: EdgeFlag }>;
     regionTokens: Array<{ region: string; selfHostedSfu: EdgeFlag; expected: string }>;
+    icePath: Array<{
+      name: string;
+      publisher: Array<Record<string, unknown>>;
+      subscriber: Array<Record<string, unknown>>;
+      expected: { candidateType: string; protocol: string } | null;
+    }>;
   };
 };
 const edge = contract.lkEdgeTelemetry;
@@ -160,4 +168,13 @@ test('#372: edgeDimensions sets what is known and clears the rest', () => {
     same_edge: 'unknown',
   });
   assert.deepEqual(edgeDimensions(null, '69e94d0a'), { lk_region: undefined, self_hosted_sfu: undefined, same_edge: undefined });
+});
+
+test('#372: the web ICE path matches the native classification vectors', () => {
+  const report = (entries: Array<Record<string, unknown>>) => ({ forEach: (cb: (s: unknown) => void) => entries.forEach(cb) });
+  assert.ok(edge.icePath.some((v) => v.name === 'relay-tcp-beats-srflx-udp'));
+  for (const v of edge.icePath) {
+    const path = worstIcePath([selectedIcePath(report(v.publisher)), selectedIcePath(report(v.subscriber))]);
+    assert.deepEqual(path, v.expected, v.name);
+  }
 });

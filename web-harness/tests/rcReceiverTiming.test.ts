@@ -215,6 +215,57 @@ test('stats polls record jitter-buffer deltas, counters, loss and both RTTs', as
   assert.equal(emitted.dimensions.jb_min_ms, '1_19', 'bucketed, never raw ms');
 });
 
+function statsReport(entries: Stats) {
+  return { forEach: (callback: (stats: unknown) => void) => entries.forEach(callback) };
+}
+
+function icePathTiming(publisher: Stats) {
+  const emitted: RcLatencySummary[] = [];
+  const aggregator = new RcLatencyAggregator('controller', { emit: (s) => emitted.push(s) });
+  aggregator.sync(true, 0);
+  const track = new FakeTrack();
+  const timing = createRcReceiverTiming({
+    aggregator,
+    clock: () => null,
+    publisherStats: () => Promise.resolve(statsReport(publisher)),
+    frameMetadataSupported: () => false,
+  });
+  const target: RcReceiverTarget = { hostIdentity: 'native-host', track, video: new FakeVideo() };
+  const summary = () => {
+    aggregator.sync(true, 60_000);
+    return emitted.at(-1)!;
+  };
+  return { track, timing, target, summary };
+}
+
+const selectedPair = (local: Record<string, unknown>): Stats => [
+  { type: 'transport', selectedCandidatePairId: 'p' },
+  { type: 'candidate-pair', id: 'p', localCandidateId: 'l', currentRoundTripTime: 0.004 },
+  { type: 'local-candidate', id: 'l', ...local },
+];
+
+test('#372: ICE dimensions take the worse of the receiver and publisher paths', async () => {
+  const { track, timing, target, summary } = icePathTiming(
+    selectedPair({ candidateType: 'relay', protocol: 'udp', relayProtocol: 'tls' })
+  );
+  track.reports.push(selectedPair({ candidateType: 'srflx', protocol: 'udp' }));
+  await timing.sync(target);
+  const emitted = summary();
+  assert.equal(emitted.dimensions.ice_candidate_type, 'relay');
+  assert.equal(emitted.dimensions.ice_protocol, 'tcp', 'a TURN/TLS leg counts as tcp');
+});
+
+test('#372: a sampled poll with no selected pair on either PC records unknown', async () => {
+  const { track, timing, target, summary } = icePathTiming([
+    { type: 'candidate-pair', id: 'q', nominated: true, state: 'succeeded', currentRoundTripTime: 0.003 },
+  ]);
+  track.reports.push([{ type: 'inbound-rtp', kind: 'video', bytesReceived: 1 }]);
+  await timing.sync(target);
+  const emitted = summary();
+  assert.equal(emitted.dimensions.ice_candidate_type, 'unknown');
+  assert.equal(emitted.dimensions.ice_protocol, 'unknown');
+});
+
 test('release stops the frame loop and drops a poll still in flight', async () => {
   const { aggregator, video, track, timing, target, summary } = harness();
   let resolveReport!: (report: { forEach: (callback: (stats: unknown) => void) => void }) => void;

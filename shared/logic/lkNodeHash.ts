@@ -3,6 +3,8 @@
 // by `contracts/petal-contracts.json` -> `lkEdgeTelemetry`. Used by the web
 // client (web-harness/src/connection.ts, remoteControlUi.ts).
 
+import { selectedCandidatePair, type StatsLike, type StatsReportLike } from './inboundRtpDeltas';
+
 export const LK_NODE_HASH_SALT = 'petal-lk-node:';
 const LK_NODE_HASH_PATTERN = /^[0-9a-f]{8}$/;
 
@@ -97,8 +99,8 @@ export function currentServerInfo(room: {
 
 /** The edge dimensions of a control session's latency summary (#372): a
  * string to set, `undefined` to clear (an unknown edge, a refresh in flight,
- * or a reconnect with no server info must not keep the old value). ICE is
- * native-only. */
+ * or a reconnect with no server info must not keep the old value). The ICE
+ * dimensions come from `selectedIcePath` / `worstIcePath` instead. */
 export function edgeDimensions(
   local: LocalEdge | null | undefined,
   peerHash: string | undefined
@@ -108,4 +110,61 @@ export function edgeDimensions(
     self_hosted_sfu: local?.selfHostedSfu,
     same_edge: local ? sameEdge(local.lkNodeHash, peerHash) : undefined,
   };
+}
+
+export type IceCandidateType = 'host' | 'srflx' | 'prflx' | 'relay' | 'unknown';
+export type IceProtocol = 'udp' | 'tcp' | 'unknown';
+export interface IcePath {
+  candidateType: IceCandidateType;
+  protocol: IceProtocol;
+}
+
+const CANDIDATE_TYPE_RANK: Record<IceCandidateType, number> = { unknown: 0, host: 1, srflx: 2, prflx: 3, relay: 4 };
+const PROTOCOL_RANK: Record<IceProtocol, number> = { unknown: 0, udp: 1, tcp: 2 };
+
+function candidateType(value: unknown): IceCandidateType {
+  return value === 'host' || value === 'srflx' || value === 'prflx' || value === 'relay' ? value : 'unknown';
+}
+
+function protocol(value: unknown): IceProtocol {
+  const lower = typeof value === 'string' ? value.toLowerCase() : '';
+  return lower === 'udp' || lower === 'tcp' ? lower : 'unknown';
+}
+
+/** One peer connection's local ICE path (`icePathRule`); null with no selected pair. */
+export function selectedIcePath(report: StatsReportLike): IcePath | null {
+  const pair = selectedCandidatePair(report);
+  if (!pair) return null;
+  let local: StatsLike | null = null;
+  report.forEach((value) => {
+    const stats = value as StatsLike;
+    if (stats && typeof stats === 'object' && stats.type === 'local-candidate' && stats.id === pair.localCandidateId) {
+      local = stats;
+    }
+  });
+  if (!local) return null;
+  const found: StatsLike = local;
+  const type = candidateType(found.candidateType);
+  // A relay's latency-relevant leg is client-to-TURN; tls counts as tcp.
+  if (type === 'relay' && typeof found.relayProtocol === 'string') {
+    return { candidateType: type, protocol: found.relayProtocol.toLowerCase() === 'udp' ? 'udp' : 'tcp' };
+  }
+  return { candidateType: type, protocol: protocol(found.protocol) };
+}
+
+/** Worst of the publisher and subscriber paths, per dimension; unknown never overrides. */
+export function worstIcePath(paths: ReadonlyArray<IcePath | null>): IcePath | null {
+  let worst: IcePath | null = null;
+  for (const path of paths) {
+    if (!path) continue;
+    if (!worst) {
+      worst = { ...path };
+      continue;
+    }
+    if (CANDIDATE_TYPE_RANK[path.candidateType] > CANDIDATE_TYPE_RANK[worst.candidateType]) {
+      worst.candidateType = path.candidateType;
+    }
+    if (PROTOCOL_RANK[path.protocol] > PROTOCOL_RANK[worst.protocol]) worst.protocol = path.protocol;
+  }
+  return worst;
 }
