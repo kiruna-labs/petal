@@ -365,9 +365,10 @@ impl ReceiverTiming {
     }
 }
 
-async fn next_event<E>(events: &mut Option<E>) -> Option<SubscribeTimingEvent>
+/// The next event, or never when there is no stream (#373 shares it).
+pub(crate) async fn next_event<T, E>(events: &mut Option<E>) -> Option<T>
 where
-    E: Stream<Item = SubscribeTimingEvent> + Unpin,
+    E: Stream<Item = T> + Unpin,
 {
     match events.as_mut() {
         Some(events) => events.next().await,
@@ -375,7 +376,7 @@ where
     }
 }
 
-async fn finish_poll<Fut>(in_flight: &mut Option<(u64, Pin<Box<Fut>>)>) -> Option<Vec<RtcStats>>
+pub(crate) async fn finish_poll<Fut>(in_flight: &mut Option<(u64, Pin<Box<Fut>>)>) -> Option<Vec<RtcStats>>
 where
     Fut: Future<Output = Option<Vec<RtcStats>>>,
 {

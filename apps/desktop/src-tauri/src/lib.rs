@@ -131,6 +131,8 @@ mod control_consent;
 // `main.rs` isn't the only caller if a future example/binary ever wants the
 // same sink; today only `run()` below calls `logging::init()`.
 mod analytics;
+// #373: host video-send stage timing (publish timing events + pub RTT).
+mod rc_host_send_timing;
 mod rc_input_timing;
 mod rc_latency_telemetry;
 // #374: native controller receive-path stage timing (subscriber + compositor).

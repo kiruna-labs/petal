@@ -454,6 +454,16 @@ test('latency-summary mirror lines are parsed and reported without gating', () =
   assert.ok(!LATENCY_CHECKS.some((check) => check.metric === 'latencySummary'));
   const verdict = latencyVerdict({ hostLog: log });
   assert.ok(verdict.notes.some((note) => note.includes('latency summary (#370, not gated): 2 host interval(s), 1 final')));
+  // #373: host send stages are reported, n/a when no interval carries them.
+  assert.equal(summary.captureToEncoded.samples, 0);
+  assert.ok(verdict.notes.some((note) => note.includes('capture_to_encoded_ms worst p50 n/a p95 n/a over 0 samples')));
+  const sendLine = `${prefix}${contract.remoteControlLatencySummary.example.logLine} capture_to_encoded_ms_p50=9 capture_to_encoded_ms_p95=14 capture_to_encoded_ms_max=20 capture_to_encoded_ms_n=1800 pub_rtt_ms_p50=3 pub_rtt_ms_p95=4 pub_rtt_ms_max=6 pub_rtt_ms_n=60`;
+  const send = summarizeLatencySummaries(parseLatencySummaryLog(`${log}\n${sendLine}`));
+  assert.deepEqual(
+    [send.captureToEncoded.p50MaxMs, send.captureToEncoded.p95MaxMs, send.captureToEncoded.samples, send.pubRtt.samples],
+    [9, 14, 1800, 60]
+  );
+  assert.equal(send.encodedToPacketized.p50MaxMs, null);
 });
 
 // ---------------------------------------------------------------------------
