@@ -1956,11 +1956,21 @@ pub(crate) async fn start_share_token(
     let callback_latest_frame = latest_frame.clone();
     let callback_frame_ready = frame_ready.clone();
     let callback_first_frame_sent = first_frame_sent.clone();
+    let callback_capture_seq = AtomicU64::new(0);
     let start_task = tokio::task::spawn_blocking(move || {
         crate::windows_screen_capture::TargetCaptureSession::start(
             token,
             indicator_mode,
             move |frame| {
+                // #373: every WGC delivery is a full frame, but WGC reports no
+                // dirty rects here, so the next frame after an inject ends its
+                // leg with `content_change=unknown`.
+                crate::remote_control::note_captured_frame(
+                    token,
+                    callback_capture_seq.fetch_add(1, Ordering::Relaxed) + 1,
+                    crate::remote_control::CapturedContentChange::Unknown,
+                    true,
+                );
                 if callback_first_frame_sent
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()

@@ -1480,14 +1480,71 @@ fn clear_all_control_state() {
     target_pid_cache().lock_unpoisoned().clear();
     control_frame_cache().lock_unpoisoned().clear();
     input_latency_markers().lock_unpoisoned().clear();
+    capture_interval_marks().lock_unpoisoned().clear();
+}
+
+/// #373: the last complete captured frame of each controlled window.
+fn capture_interval_marks() -> &'static Mutex<HashMap<u32, Instant>> {
+    static MARKS: OnceLock<Mutex<HashMap<u32, Instant>>> = OnceLock::new();
+    MARKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// #373: whether any controller holds a grant on `window_id` right now.
+fn window_is_controlled(window_id: u32) -> bool {
+    sessions()
+        .lock_unpoisoned()
+        .keys()
+        .any(|key| key.window_id == window_id)
+}
+
+/// #373: `capture_interval_ms`, the gap between complete frames of a window
+/// while it is controlled. An idle or blank frame neither records nor resets
+/// the gap; leaving control forgets the last frame, so no gap spans two
+/// sessions or the time in between.
+fn record_capture_interval_at(
+    marks: &Mutex<HashMap<u32, Instant>>,
+    aggregator: &rc_latency_telemetry::Aggregator,
+    window_id: u32,
+    complete: bool,
+    controlled: bool,
+    now: Instant,
+) {
+    let mut marks = marks.lock_unpoisoned();
+    if !controlled {
+        marks.remove(&window_id);
+        return;
+    }
+    if !complete {
+        return;
+    }
+    if let Some(previous) = marks.insert(window_id, now) {
+        aggregator.record_stage(
+            Stage::CaptureIntervalMs,
+            now.saturating_duration_since(previous).as_secs_f64() * 1000.0,
+        );
+    }
 }
 
 /// #373: the capture callback for `window_id` delivered a frame. A frame
 /// that shows a change consumes every pending marker for the window, one per
 /// controller, and records `inject_to_capture_ms` for each; an idle frame
 /// consumes nothing. Markers older than `INPUT_LATENCY_MARKER_TTL` expire.
-pub(crate) fn note_captured_frame(window_id: u32, capture_seq: u64, change: CapturedContentChange) {
+/// `complete` = a full frame, not an SCK idle/blank/suspended one.
+pub(crate) fn note_captured_frame(
+    window_id: u32,
+    capture_seq: u64,
+    change: CapturedContentChange,
+    complete: bool,
+) {
     let now = Instant::now();
+    record_capture_interval_at(
+        capture_interval_marks(),
+        rc_latency_telemetry::aggregator(RcRole::Host),
+        window_id,
+        complete,
+        window_is_controlled(window_id),
+        now,
+    );
     for marker in take_input_latency_markers(window_id, change, now) {
         let inject_to_capture = now.saturating_duration_since(marker.injected_at);
         rc_latency_telemetry::record_stage(
@@ -27015,6 +27072,57 @@ mod tests {
         let taken = take_input_latency_markers(window, CapturedContentChange::Detected, t0 + INPUT_LATENCY_MARKER_TTL);
         assert_eq!(taken.iter().map(|marker| marker.injected_at_ms).collect::<Vec<_>>(), vec![4_000]);
         assert!(take_input_latency_markers(window + 1, CapturedContentChange::Detected, t0).is_empty());
+    }
+
+    /// #373: drives the grant lookup the capture callback uses
+    /// (`window_is_controlled`) into a real aggregator.
+    #[test]
+    fn issue373_capture_interval_counts_complete_frames_only_while_controlled() {
+        let window = remote_control_test_ids("issue373_capture_interval").window_id;
+        let marks = Mutex::new(HashMap::new());
+        let aggregator = rc_latency_telemetry::Aggregator::new(RcRole::Host);
+        let t0 = Instant::now();
+        aggregator.sync_at(true, t0);
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let frame = |ms: u64, complete: bool| {
+            record_capture_interval_at(&marks, &aggregator, window, complete, window_is_controlled(window), at(ms));
+        };
+        frame(0, true);
+        frame(33, true); // not controlled yet: no sample
+        authorize_shared(window, "ctrl-a");
+        frame(100, true); // first controlled frame starts the gap
+        frame(120, false); // idle frame: no sample, gap keeps running
+        frame(150, true); // 50 ms
+        frame(180, true); // 30 ms
+        sessions().lock_unpoisoned().remove(&ControlGrantKey::legacy(window, "ctrl-a"));
+        frame(300, true); // released: forgotten
+        authorize_shared(window, "ctrl-a");
+        frame(5_000, true); // new session restarts the gap
+        frame(5_040, true); // 40 ms
+        sessions().lock_unpoisoned().remove(&ControlGrantKey::legacy(window, "ctrl-a"));
+        let summary = aggregator.sync_at(true, t0 + rc_latency_telemetry::EMIT_INTERVAL).unwrap();
+        assert_eq!(summary.stages.len(), 1);
+        let (stage, stats) = summary.stages[0];
+        assert_eq!(stage, Stage::CaptureIntervalMs);
+        assert_eq!((stats.n, stats.max), (3, 50), "50, 30 and 40 ms; nothing outside control");
+    }
+
+    /// #373: both capture callbacks feed the host stages: SCK passes its
+    /// complete-frame test, WGC passes every frame as complete + unknown.
+    #[test]
+    fn issue373_both_capture_callbacks_note_captured_frames() {
+        let share = include_str!("session/share.rs");
+        let call = &share[share.find("crate::remote_control::note_captured_frame(").unwrap()..];
+        let call = &call[..call.find(");").unwrap()];
+        assert!(call.contains("captured_content_change(&frame)"));
+        assert!(call.contains("frame_status_allows_dirty_rect_skip(frame.frame_status)"));
+        let stub = include_str!("session_stub.rs");
+        let start = &stub[stub.find("TargetCaptureSession::start(").unwrap()..];
+        let callback = &start[..start.find("callback_frame_ready.notify_one();").unwrap()];
+        let call = &callback[callback.find("crate::remote_control::note_captured_frame(").expect("WGC notes frames")..];
+        let call = &call[..call.find(");").unwrap()];
+        assert!(call.contains("CapturedContentChange::Unknown"));
+        assert!(call.contains("true"));
     }
 
     #[test]
