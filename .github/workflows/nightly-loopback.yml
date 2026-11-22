@@ -699,6 +699,7 @@ jobs:
           IMPAIRED_RESULTS_JSON="$LOG_DIR/remote-control-results-impaired.json"
           IMPAIRED_PHOTON_JSON="$LOG_DIR/remote-control-photon-impaired.json"
           IMPAIRED_LATENCY_JSON="$LOG_DIR/remote-control-latency-impaired.json"
+          POST_CHURN_PHOTON_JSON="$LOG_DIR/remote-control-photon-post-churn.json"
           CLEAN_PETAL_LOG="$LOG_DIR/petal-dev-clean.log"
           IMPAIRED_PETAL_LOG="$LOG_DIR/petal-dev-impaired.log"
           NET_DELAY_MS="${NET_DELAY_MS_OVERRIDE:-$PETAL_NET_IMPAIR_DELAY_MS}"
@@ -709,7 +710,7 @@ jobs:
           CHROME_LOG="$LOG_DIR/chrome-cdp.log"
           PETAL_LOG="$LOG_DIR/petal-dev.log"
           rm -f "$SOCKET" "$RESULTS_JSON" "$PHOTON_JSON" "$LATENCY_JSON" \
-            "$IMPAIRED_RESULTS_JSON" "$IMPAIRED_PHOTON_JSON" "$IMPAIRED_LATENCY_JSON"
+            "$IMPAIRED_RESULTS_JSON" "$IMPAIRED_PHOTON_JSON" "$IMPAIRED_LATENCY_JSON" "$POST_CHURN_PHOTON_JSON"
           CRASH_MARK="$LOG_DIR/loopback-start.mark"; touch "$CRASH_MARK"
 
           pids=()
@@ -950,6 +951,18 @@ jobs:
           consent_status=${PIPESTATUS[0]}
           set -e
 
+          # #427: a wedged VideoToolbox encoder made every share after the
+          # churn above publish an empty track. One more press-to-photon run
+          # proves decoded video still reaches the browser. Budgets are the
+          # latency gate's job; this only requires frames to arrive.
+          echo "==> Post-churn share reaches the browser (#427)" | tee -a "$HARNESS_LOG"
+          set +e
+          PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_LOG_PATH="$PETAL_LOG" \
+            node apps/desktop/scripts/remote-control-local-loopback.mjs --live --skip-preflight --press-to-photon --json "$POST_CHURN_PHOTON_JSON" \
+            2>&1 | tee -a "$HARNESS_LOG"
+          echo "post-churn press-to-photon harness exit ${PIPESTATUS[0]} (verdict: frames only, below)" | tee -a "$HARNESS_LOG"
+          set -e
+
           # -- Survival. The 0.9.7 telepointer SIGSEGV lived on a background
           # thread the harness never talks to; a green scorecard alone would
           # not have caught it. The native app must still be alive after the
@@ -1055,6 +1068,15 @@ jobs:
 
           if [ "$consent_status" -ne 0 ]; then
             echo "::error::PostHog usage-stats opt-out check did not pass (exit $consent_status); see posthog-consent.json." | tee -a "$HARNESS_LOG"
+            gate_fail=1
+          fi
+          if node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).summary||{};
+            const frames=s.freezeProbe?.frames??0, samples=s.pressToPhoton?.samples??0;
+            console.log("post-churn video: frames=" + frames + " photon_samples=" + samples);
+            process.exit(frames>0&&samples>0?0:1)' "$POST_CHURN_PHOTON_JSON" 2>&1 | tee -a "$HARNESS_LOG"; [ "${PIPESTATUS[0]}" -eq 0 ]; then
+            echo "e2e-gate-verdict post-churn video (#427): PASS" | tee -a "$HARNESS_LOG"
+          else
+            echo "::error::No decoded video reached the browser after the share churn -- the #427 encoder-wedge class (see remote-control-photon-post-churn.json)." | tee -a "$HARNESS_LOG"
             gate_fail=1
           fi
 
