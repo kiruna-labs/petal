@@ -66,7 +66,7 @@ export function jbMinMsBucket(ms: number): JbMinMsBucket {
   return '200_plus';
 }
 
-type StatsLike = Record<string, unknown>;
+export type StatsLike = Record<string, unknown>;
 export type StatsReportLike = { forEach(callback: (stats: unknown) => void): void };
 
 function finite(value: unknown): number | null {
@@ -146,10 +146,11 @@ export function inboundRtpCounters(report: StatsReportLike): InboundRtpCounters 
 }
 
 /**
- * The selected ICE candidate pair's `currentRoundTripTime` in ms: via the
- * transport's `selectedCandidatePairId`, else the nominated succeeded pair.
+ * One peer connection's selected ICE candidate pair: via the transport's
+ * `selectedCandidatePairId`, else the nominated succeeded pair. Shared by
+ * `sub_rtt_ms`/`pub_rtt_ms` (#375) and the ICE path (#372).
  */
-export function selectedCandidatePairRttMs(report: StatsReportLike): number | null {
+export function selectedCandidatePair(report: StatsReportLike): StatsLike | null {
   const pairs = new Map<string, StatsLike>();
   let selectedId: string | null = null;
   let nominated: StatsLike | null = null;
@@ -163,7 +164,11 @@ export function selectedCandidatePairRttMs(report: StatsReportLike): number | nu
       if (stats.nominated === true && stats.state === 'succeeded') nominated = stats;
     }
   });
-  const pair: StatsLike | null = (selectedId !== null ? pairs.get(selectedId) : undefined) ?? nominated;
-  const seconds = finite(pair?.currentRoundTripTime);
+  return (selectedId !== null ? pairs.get(selectedId) : undefined) ?? nominated;
+}
+
+/** The selected candidate pair's `currentRoundTripTime` in ms, or null. */
+export function selectedCandidatePairRttMs(report: StatsReportLike): number | null {
+  const seconds = finite(selectedCandidatePair(report)?.currentRoundTripTime);
   return seconds === null || seconds < 0 ? null : seconds * 1000;
 }

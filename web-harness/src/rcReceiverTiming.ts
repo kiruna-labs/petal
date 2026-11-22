@@ -2,7 +2,8 @@
 // Fed only while control is active, and only for the controlled window:
 // - a 1 s poll of that track's inbound-rtp / candidate-pair stats (jitter
 //   buffer, decode, processing, loss counters, sub_rtt_ms) plus the local
-//   publisher's selected pair (pub_rtt_ms, the input data-channel path);
+//   publisher's selected pair (pub_rtt_ms, the input data-channel path),
+//   and the worse of the two local ICE paths (#372 ice_* dimensions);
 // - one requestVideoFrameCallback loop on its <video>, joined to the host's
 //   capture stamp through `lookupFrameMetadata` (capture_to_present_ms).
 // Per-frame values go into the histograms only; nothing here logs per frame.
@@ -15,6 +16,7 @@ import {
   type InboundRtpCounters,
   type StatsReportLike,
 } from '@petal/shared/logic/inboundRtpDeltas';
+import { selectedIcePath, worstIcePath } from '@petal/shared/logic/lkNodeHash';
 import type { RcLatencyAggregator, RcLatencyCounter } from '@petal/shared/logic/rcLatencyAggregator';
 import type { ClockEstimate } from './latencyProbeClock.ts';
 
@@ -173,6 +175,13 @@ export function createRcReceiverTiming(deps: RcReceiverTimingDeps) {
       recordStats(report);
       const pubRtt = publisher ? selectedCandidatePairRttMs(publisher) : null;
       if (pubRtt !== null) aggregator.recordStage('pub_rtt_ms', pubRtt);
+      // #372: like native sfu_edge, a sampled poll with no selected pair on
+      // either PC records unknown; a failed poll on both leaves the last value.
+      if (report || publisher) {
+        const path = worstIcePath([report ? selectedIcePath(report) : null, publisher ? selectedIcePath(publisher) : null]);
+        aggregator.setDimension('ice_candidate_type', path?.candidateType ?? 'unknown');
+        aggregator.setDimension('ice_protocol', path?.protocol ?? 'unknown');
+      }
     } finally {
       // Only this poll's own generation may clear the flag (a stale one must not unlock the next session's).
       if (pollGenerationInFlight === pollGeneration) pollGenerationInFlight = null;

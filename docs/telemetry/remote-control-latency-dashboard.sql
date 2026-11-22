@@ -48,7 +48,7 @@ ORDER BY sessions DESC
 
 -- insight: ice-path-mix
 -- name: RC latency: ICE path mix
--- description: Selected ICE candidate type and protocol, with RTT and input leg medians per path. The web controller reports no ICE yet.
+-- description: Selected ICE candidate type and protocol, with RTT and input leg medians per path.
 SELECT properties.ice_candidate_type AS candidate_type,
        properties.ice_protocol AS protocol,
        count() AS control_minutes,
