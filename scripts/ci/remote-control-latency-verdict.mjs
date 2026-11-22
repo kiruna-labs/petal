@@ -180,6 +180,11 @@ export function summarizeLatencySummaries(intervals, role = 'host') {
     finals: mine.filter((fields) => fields.final === true).length,
     replayInject: stage('replay_inject_ms'),
     replayComplete: stage('replay_complete_ms'),
+    // #373: host video-send stages, reported for the VM check (not gated).
+    injectToCapture: stage('inject_to_capture_ms'),
+    captureToEncoded: stage('capture_to_encoded_ms'),
+    encodedToPacketized: stage('encoded_to_packetized_ms'),
+    pubRtt: stage('pub_rtt_ms'),
     edge,
   };
 }
@@ -369,6 +374,14 @@ export function latencyVerdict({ results = null, photon = null, hostLog = '', en
       `(log receive->inject p95 ${metrics.hostReceiveToInject.p95Ms ?? 'n/a'}); ` +
       `replay_complete_ms worst p95 ${summary.replayComplete.p95MaxMs ?? 'n/a'} over ${summary.replayComplete.samples} samples ` +
       `(log receive->complete p95 ${metrics.hostReceiveToComplete.p95Ms ?? 'n/a'})`
+  );
+  const sendStage = (label, metric) =>
+    `${label} worst p50 ${metric.p50MaxMs ?? 'n/a'} p95 ${metric.p95MaxMs ?? 'n/a'} over ${metric.samples} samples`;
+  notes.push(
+    `  host send stages (#373, not gated): ${sendStage('inject_to_capture_ms', summary.injectToCapture)}; ` +
+      `${sendStage('capture_to_encoded_ms', summary.captureToEncoded)}; ` +
+      `${sendStage('encoded_to_packetized_ms', summary.encodedToPacketized)}; ` +
+      `${sendStage('pub_rtt_ms', summary.pubRtt)} (log inject->frame p50 ${metrics.hostInjectToFrame.p50Ms ?? 'n/a'})`
   );
   notes.push(`  host replay timeouts: ${metrics.hostReplayTimeouts}; send->inject paired ${metrics.sendToInject.paired}/${metrics.sendToInject.publishes} controller publishes; observation methods ${JSON.stringify(metrics.targetObservation.methods)}, watcher max read gap ${metrics.targetObservation.maxReadGapMs ?? 'n/a'}ms`);
   const freeze = metrics.presentedFreeze;

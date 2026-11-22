@@ -288,6 +288,11 @@ Known biases:
 - Native photon is +-1 display refresh.
 - Windows reports `content_change=unknown`, which undercounts
   `inject_to_capture_ms`.
+- `capture_to_encoded_ms` runs from the capture callback to the slowest
+  simulcast layer's encoder output, so it includes pump queueing and the
+  source push. `encoded_to_packetized_ms` is only the sender frame
+  transformer's hand-off (both events fire in one `TransformSend` call); pacer
+  queueing is not in it (#373).
 - `jb_min_ms` is a bucket. The target-vs-min rule divides by the bucket's
   upper bound, so it fires late rather than early, and it leaves out `0` and
   `200_plus`.

@@ -2722,6 +2722,11 @@ impl RoomConnection<Arc<Room>> {
                 log_encoder_once(track_for_stats, encoder_origin, encoder_recovery, cancel).await;
             });
         }
+        // #373: encoder/packetize stages and pub RTT while this window is
+        // remotely controlled. After publish: the sender transformer exists.
+        if let Some(window_id) = window_id {
+            crate::rc_host_send_timing::spawn_for_window_track(&track, window_id, background_cancel.clone());
+        }
         // #907 review finding 4/6: shared (not per-task-snapshotted) state so
         // the starvation guard below and `PublishedTrack::set_quality` always
         // agree on the CURRENT quality/size -- see the struct field doc

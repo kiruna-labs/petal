@@ -1796,6 +1796,26 @@ fn granted_window_ids() -> HashSet<u32> {
         .collect()
 }
 
+/// #373: an identity for the grants held on `window_id` right now, `None`
+/// when nobody controls it. Any grant on the window being replaced, added or
+/// removed changes it, so host send timing never straddles two sessions.
+pub(crate) fn host_window_grant(window_id: u32) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let sessions = sessions().lock_unpoisoned();
+    let mut tokens: Vec<&String> = sessions
+        .iter()
+        .filter(|(key, _)| key.window_id == window_id)
+        .map(|(_, token)| token)
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    tokens.sort_unstable();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tokens.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 /// #404: the set of granted windows changed (grant, revoke, release, share
 /// teardown). macOS switches Chromium web accessibility on for granted
 /// browser windows and back off when the last grant on that app ends -- see
@@ -27015,6 +27035,29 @@ mod tests {
         let taken = take_input_latency_markers(window, CapturedContentChange::Detected, t0 + INPUT_LATENCY_MARKER_TTL);
         assert_eq!(taken.iter().map(|marker| marker.injected_at_ms).collect::<Vec<_>>(), vec![4_000]);
         assert!(take_input_latency_markers(window + 1, CapturedContentChange::Detected, t0).is_empty());
+    }
+
+    #[test]
+    fn issue373_host_window_grant_changes_with_every_grant_on_the_window() {
+        let ids = remote_control_test_ids("issue373_host_window_grant");
+        let window = ids.window_id;
+        assert_eq!(host_window_grant(window), None, "uncontrolled");
+        authorize_shared(window, "ctrl-a");
+        let first = host_window_grant(window).expect("controlled");
+        authorize_shared(window, "ctrl-a");
+        let regranted = host_window_grant(window).expect("still controlled");
+        assert_ne!(first, regranted, "a regrant is a new session");
+        authorize_shared(window, "ctrl-b");
+        let second_controller = host_window_grant(window).expect("two controllers");
+        assert_ne!(second_controller, regranted);
+        let other = remote_control_test_ids("issue373_host_window_grant_other").window_id;
+        assert_eq!(host_window_grant(other), None, "other windows are untouched");
+        for controller in ["ctrl-a", "ctrl-b"] {
+            sessions()
+                .lock_unpoisoned()
+                .remove(&ControlGrantKey::legacy(window, controller));
+        }
+        assert_eq!(host_window_grant(window), None, "released");
     }
 
     #[test]
