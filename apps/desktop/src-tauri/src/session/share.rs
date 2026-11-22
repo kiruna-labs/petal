@@ -4723,6 +4723,7 @@ async fn start_capture_for_share(
                     window_id,
                     frame.sequence,
                     captured_content_change(&frame),
+                    frame_status_allows_dirty_rect_skip(frame.frame_status),
                 );
                 if !first_frame_sent_cb.swap(true, Ordering::SeqCst) {
                     if let Some(size_tx) = size_tx_cb.lock_unpoisoned().take() {

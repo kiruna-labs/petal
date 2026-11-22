@@ -275,6 +275,7 @@ How to read it:
 | `input_excess_delay_ms`, `input_stall_count` | host | measured, clock-free head-of-line proxy |
 | `replay_inject_ms`, `replay_complete_ms` | host | measured |
 | `inject_to_capture_ms` | host | measured (Windows: next frame, `content_change=unknown`) |
+| `capture_interval_ms` | host | measured: gap between complete captured frames while controlled |
 | `capture_to_encoded_ms`, `encoded_to_packetized_ms` | host | measured |
 | `pub_rtt_ms`, `sub_rtt_ms` | both | measured RTT to the SFU edge |
 | `video_net_ms` | receiver | measured, error <= `offset_err_ms` |
