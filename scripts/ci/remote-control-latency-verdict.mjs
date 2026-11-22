@@ -479,7 +479,11 @@ export const REPLAY_ATTRIBUTION_ROWS = [
   { role: 'host', stage: 'input_leg_ms', rule: 'must-not-move', optional: true },
   { role: 'controller', stage: 'pub_rtt_ms', rule: 'must-not-move', optional: true },
   { role: 'controller', stage: 'sub_rtt_ms', rule: 'must-not-move', optional: true },
-  { role: 'controller', stage: 'capture_to_present_ms', rule: 'must-not-move', optional: true },
+  // Network + capture leg. capture_to_present_ms also carries the browser's
+  // adaptive jitter buffer, which a stalled host's bursty frames legitimately
+  // raise (red run 44979923707: jb_target 13 -> 27ms), so it is reported only.
+  { role: 'controller', stage: 'capture_to_receive_ms', rule: 'must-not-move', optional: true },
+  { role: 'controller', stage: 'capture_to_present_ms', rule: 'report' },
   { metric: 'pressToPhoton', rule: 'report' },
 ];
 

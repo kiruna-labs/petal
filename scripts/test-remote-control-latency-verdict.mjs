@@ -601,12 +601,13 @@ function hostLine({ n = 40, inject = 1, complete = 2, capture = 22, excess = 1, 
   if (stalls) line += ` input_stall_count=${stalls}`;
   return `${SUMMARY_PREFIX}${line} window_codec=h264 content_change=detected`;
 }
-function controllerLine({ subRtt = 2, pubRtt = 2, nacks = 0, present = null } = {}) {
+function controllerLine({ subRtt = 2, pubRtt = 2, nacks = 0, present = null, receive = null } = {}) {
   let line = `remote-control-latency-summary: role=controller rc_session_id=fedcba9876543210fedcba9876543210 interval_s=60 final=true`
     + ` sub_rtt_ms_p50=${subRtt} sub_rtt_ms_p95=${subRtt + 2} sub_rtt_ms_max=${subRtt + 7} sub_rtt_ms_n=60`
     + ` pub_rtt_ms_p50=${pubRtt} pub_rtt_ms_p95=${pubRtt + 2} pub_rtt_ms_max=${pubRtt + 7} pub_rtt_ms_n=60`
     + ` decode_ms_p50=3 decode_ms_p95=6 decode_ms_max=11 decode_ms_n=58`;
   if (present !== null) line += ` capture_to_present_ms_p50=${present} capture_to_present_ms_p95=${present + 20} capture_to_present_ms_max=${present + 70} capture_to_present_ms_n=1790`;
+  if (receive !== null) line += ` capture_to_receive_ms_p50=${receive} capture_to_receive_ms_p95=${receive + 20} capture_to_receive_ms_max=${receive + 60} capture_to_receive_ms_n=1790`;
   if (nacks) line += ` nack_count=${nacks}`;
   return `${line} offset_err_ms=1 packets_lost_pct_x100=0 jb_min_ms=0 frame_metadata=unavailable`;
 }
@@ -696,7 +697,7 @@ test('attribution loss row: a loss-only impairment (0ms delay) asserts the loss 
   assert.equal(attributionVerdict({ clean: LOSS_CLEAN, impaired: lossy, delayMs: 0, lossPct: 1 }).ok, false, '0ms at 1% asserts nothing');
 });
 
-const REPLAY_BASELINE = passJson({ host: [hostLine({ leg: 4 })], controller: [controllerLine({ present: 48 })] });
+const REPLAY_BASELINE = passJson({ host: [hostLine({ leg: 4 })], controller: [controllerLine({ present: 48, receive: 7 })] });
 const REPLAY_RED_P50S = { sendToReceive: 3, hostReceiveToInject: 152, pressToPhoton: 337 };
 
 test('attribution replay row: a 150ms host stall lands on the replay stages only -> pass', () => {
@@ -726,13 +727,23 @@ test('attribution replay row: replay delay showing up on the network, capture or
     [{ host: [hostLine({ inject: 151, complete: 160, leg: 150 })], controller, p50s: REPLAY_RED_P50S }, 'host input_leg_ms'],
     [{ host, controller: [controllerLine({ subRtt: 150, present: 50 })], p50s: REPLAY_RED_P50S }, 'controller sub_rtt_ms'],
     [{ host, controller: [controllerLine({ pubRtt: 150, present: 50 })], p50s: REPLAY_RED_P50S }, 'controller pub_rtt_ms'],
-    [{ host, controller: [controllerLine({ present: 200 })], p50s: REPLAY_RED_P50S }, 'controller capture_to_present_ms'],
+    [{ host, controller: [controllerLine({ present: 200, receive: 157 })], p50s: REPLAY_RED_P50S }, 'controller capture_to_receive_ms'],
   ];
   for (const [red, name] of leaks) {
     const verdict = replayAttributionVerdict({ baseline: REPLAY_BASELINE, red: passJson(red), delayMs: 150 });
     assert.equal(verdict.ok, false, name);
     assert.ok(verdict.errors.some((e) => e.includes(`${name} (must-not-move): FAIL`)), `${name}: ${verdict.errors.join('\n')}`);
   }
+});
+
+test('attribution replay row: a jitter-buffer rise in capture_to_present alone is reported, not failed', () => {
+  // Red run 44979923707: capture_to_receive held at 7ms while the browser's
+  // adaptive jitter buffer took capture_to_present 51 -> 75ms.
+  const red = passJson({ host: [hostLine({ inject: 151, complete: 160, leg: 5 })], controller: [controllerLine({ present: 75, receive: 7 })], p50s: REPLAY_RED_P50S });
+  const verdict = replayAttributionVerdict({ baseline: REPLAY_BASELINE, red, delayMs: 150 });
+  assert.equal(verdict.ok, true, verdict.errors.join('\n'));
+  assert.ok(verdict.notes.some((n) => /controller capture_to_present_ms \(report\): PASS -- 48 -> 75/.test(n)));
+  assert.ok(verdict.notes.some((n) => /controller capture_to_receive_ms \(must-not-move\): PASS -- 7 -> 7/.test(n)));
 });
 
 test('attribution replay row: optional stages are n/a when absent, required ones are insufficient', () => {
