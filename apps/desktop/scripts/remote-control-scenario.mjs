@@ -1631,6 +1631,31 @@ async function collectControllerPublishes(ctx, caseId) {
   }
 }
 
+// #378: the web controller's `remote-control-latency-summary:` lines (#375
+// receive stages, nack_count) from the harness session log, for the
+// attribution verdict. The log dies with the page, so a mid-suite rejoin
+// banks it first. Only rejoins: the initial join's page still holds an
+// earlier invocation's lines (one browser serves every suite). The verdict
+// scores missing lines insufficient, never a pass.
+const bankedControllerSummaryLines = [];
+async function readControllerSummaryLines(cdp) {
+  try {
+    const lines = await evaluate(
+      cdp,
+      `Array.from(document.querySelectorAll('#session-log .log-line')).map((line) => line.lastElementChild?.textContent ?? '').filter((text) => text.startsWith('remote-control-latency-summary: role=controller ')).reverse()`
+    );
+    return Array.isArray(lines) ? lines : [];
+  } catch {
+    return [];
+  }
+}
+
+// Waits one reconcile tick first so a final partial lands.
+async function collectControllerLatencySummaries(cdp) {
+  await sleep(1500);
+  return [...bankedControllerSummaryLines, ...(await readControllerSummaryLines(cdp))];
+}
+
 async function published(ctx, predicateSource, timeoutMs = acquisitionTimeoutMs) {
   return waitUntil(
     'remote-control publish metric',
@@ -3907,6 +3932,9 @@ try {
       );
       try {
         const report = await runPressToPhotonSuite(ctx);
+        // Release first so the controller's final partial summary is emitted.
+        try { await send(ctx, 'api.release(target); return true;'); } catch {}
+        report.controllerLatencySummaryLines = await collectControllerLatencySummaries(cdp);
         writePhotonReport(report);
         process.exitCode = suiteExitCode(report.summary);
       } finally {
@@ -3968,6 +3996,8 @@ try {
         terminalDeliveries: [],
       },
       rejoinWebHarness: async () => {
+        // #378: bank this suite's controller summaries before the reload.
+        bankedControllerSummaryLines.push(...(await readControllerSummaryLines(cdp)));
         const rejoined = await joinWebHarness(cdp, pageUrl, room.accessCode, room.livekitRoom);
         console.log(`# controller rejoined after disconnect room=${rejoined.name}`);
         return rejoined;
@@ -4068,9 +4098,10 @@ try {
       );
     }
     if (jsonOutputPath) {
+      const controllerLatencySummaryLines = await collectControllerLatencySummaries(ctx.cdp);
       fs.writeFileSync(
         jsonOutputPath,
-        `${JSON.stringify({ summary, recoveries, results, terminalDeliveries, terminalRecovery: ctx.terminalRecovery, controllerPublishes }, null, 2)}\n`,
+        `${JSON.stringify({ summary, recoveries, results, terminalDeliveries, terminalRecovery: ctx.terminalRecovery, controllerPublishes, controllerLatencySummaryLines }, null, 2)}\n`,
         'utf8'
       );
     }

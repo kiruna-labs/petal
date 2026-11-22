@@ -17,7 +17,11 @@ import { fileURLToPath } from 'node:url';
 import {
   ATTRIBUTION_ROWS,
   LATENCY_CHECKS,
+  LOSS_ATTRIBUTION_ROWS,
+  REPLAY_ATTRIBUTION_ROWS,
+  SUMMARY_COUNTERS,
   attributionVerdict,
+  replayAttributionVerdict,
   collectLatencyMetrics,
   evaluateLatencyGate,
   latencyVerdict,
@@ -581,4 +585,214 @@ test('the workflow runs the impaired pass with its own budgets and always tears 
   for (const name of ['IMPAIRED_OBSERVATION_P50_MS', 'IMPAIRED_SEND_TO_INJECT_P95_MS', 'IMPAIRED_PHOTON_P50_MS', 'IMPAIRED_PHOTON_P95_MS']) {
     assert.match(workflow, new RegExp(`${name}:\\s*"\\d+"`), `${name} must be pinned in the workflow`);
   }
+});
+
+// #378 loss + replay rows. Fixtures go through the real collectLatencyMetrics
+// (host log mirror lines + the web controller lines the harness collects),
+// so the `--json` shape the attribution reads is the one the gate writes.
+const SUMMARY_PREFIX = '2026-11-11 17:47:15.534 [INFO] [desktop_lib::rc_latency_telemetry] ';
+function hostLine({ n = 40, inject = 1, complete = 2, capture = 22, excess = 1, excessP95 = 10, stalls = 0, leg = null } = {}) {
+  let line = `remote-control-latency-summary: role=host rc_session_id=7a23449f7989695427755c28f0f75454 interval_s=25 final=true`
+    + ` input_excess_delay_ms_p50=${excess} input_excess_delay_ms_p95=${excessP95} input_excess_delay_ms_max=${excessP95 + 2} input_excess_delay_ms_n=${n}`
+    + ` replay_inject_ms_p50=${inject} replay_inject_ms_p95=${inject + 1} replay_inject_ms_max=${inject + 14} replay_inject_ms_n=${n}`
+    + ` replay_complete_ms_p50=${complete} replay_complete_ms_p95=${complete + 60} replay_complete_ms_max=${complete + 70} replay_complete_ms_n=${n}`
+    + ` inject_to_capture_ms_p50=${capture} inject_to_capture_ms_p95=${capture + 30} inject_to_capture_ms_max=${capture + 60} inject_to_capture_ms_n=${n}`;
+  if (leg !== null) line += ` input_leg_ms_p50=${leg} input_leg_ms_p95=${leg + 3} input_leg_ms_max=${leg + 9} input_leg_ms_n=${n}`;
+  if (stalls) line += ` input_stall_count=${stalls}`;
+  return `${SUMMARY_PREFIX}${line} window_codec=h264 content_change=detected`;
+}
+function controllerLine({ subRtt = 2, pubRtt = 2, nacks = 0, present = null, receive = null } = {}) {
+  let line = `remote-control-latency-summary: role=controller rc_session_id=fedcba9876543210fedcba9876543210 interval_s=60 final=true`
+    + ` sub_rtt_ms_p50=${subRtt} sub_rtt_ms_p95=${subRtt + 2} sub_rtt_ms_max=${subRtt + 7} sub_rtt_ms_n=60`
+    + ` pub_rtt_ms_p50=${pubRtt} pub_rtt_ms_p95=${pubRtt + 2} pub_rtt_ms_max=${pubRtt + 7} pub_rtt_ms_n=60`
+    + ` decode_ms_p50=3 decode_ms_p95=6 decode_ms_max=11 decode_ms_n=58`;
+  if (present !== null) line += ` capture_to_present_ms_p50=${present} capture_to_present_ms_p95=${present + 20} capture_to_present_ms_max=${present + 70} capture_to_present_ms_n=1790`;
+  if (receive !== null) line += ` capture_to_receive_ms_p50=${receive} capture_to_receive_ms_p95=${receive + 20} capture_to_receive_ms_max=${receive + 60} capture_to_receive_ms_n=1790`;
+  if (nacks) line += ` nack_count=${nacks}`;
+  return `${line} offset_err_ms=1 packets_lost_pct_x100=0 jb_min_ms=0 frame_metadata=unavailable`;
+}
+// One pass's latency `--json`: summary lines plus the per-event p50s.
+function passJson({ host = [hostLine()], controller = [controllerLine()], p50s = { sendToReceive: 2, hostReceiveToInject: 0, pressToPhoton: 76 } } = {}) {
+  const metrics = collectLatencyMetrics({ results: { controllerLatencySummaryLines: controller }, hostLog: host.join('\n') });
+  for (const [metric, p50Ms] of Object.entries(p50s)) metrics[metric] = { ...metrics[metric], p50Ms };
+  return { metrics };
+}
+
+test('summary stages get a run-level p50 (sample-weighted median) and counters sum per role', () => {
+  const intervals = parseLatencySummaryLog([
+    hostLine({ n: 10, complete: 8, stalls: 2 }),
+    hostLine({ n: 30, complete: 1 }),
+    hostLine({ n: 5, complete: 90, stalls: 1 }),
+  ].join('\n'));
+  const host = summarizeLatencySummaries(intervals);
+  assert.equal(host.stages.replay_complete_ms.p50Ms, 1, '30 of 45 samples sit at 1ms');
+  assert.equal(host.stages.replay_complete_ms.samples, 45);
+  assert.equal(host.stages.replay_complete_ms.p95MaxMs, 150);
+  assert.equal(host.counters.input_stall_count, 3);
+  assert.equal(host.counters.nack_count, 0);
+  assert.equal(host.stages.input_leg_ms, undefined, 'a stage no interval carries is absent, never 0');
+  // Counter keys are the contract's, so a new counter cannot be silently dropped.
+  const contract = JSON.parse(readFileSync(path.join(repoRoot, 'contracts/petal-contracts.json'), 'utf8'));
+  assert.deepEqual([...SUMMARY_COUNTERS].sort(), [...contract.remoteControlLatencySummary.counters].sort());
+  // Controller lines ride in the results/photon JSON, not the host log.
+  const contractLine = contract.remoteControlLatencySummary.controllerExample.logLine;
+  const metrics = collectLatencyMetrics({ results: { controllerLatencySummaryLines: [contractLine] }, photon: { controllerLatencySummaryLines: [controllerLine({ nacks: 4 })] } });
+  assert.equal(metrics.controllerSummary.intervals, 2);
+  assert.equal(metrics.controllerSummary.counters.frames_dropped, 3);
+  assert.equal(metrics.controllerSummary.counters.nack_count, 4);
+  assert.equal(metrics.latencySummary.intervals, 0, 'controller lines never count as host intervals');
+});
+
+const NET_IMPAIRED_P50S = { sendToReceive: 43, hostReceiveToInject: 0, pressToPhoton: 189 };
+const LOSS_CLEAN = passJson();
+
+test('attribution loss row: 2% loss raises web NACKs and leaves host replay still -> pass', () => {
+  const impaired = passJson({ host: [hostLine({ complete: 3 })], controller: [controllerLine({ nacks: 37 })], p50s: NET_IMPAIRED_P50S });
+  const verdict = attributionVerdict({ clean: LOSS_CLEAN, impaired, delayMs: 20, lossPct: 2 });
+  assert.equal(verdict.ok, true, verdict.errors.join('\n'));
+  assert.equal(verdict.lossRows.length, LOSS_ATTRIBUTION_ROWS.length);
+  assert.ok(verdict.notes.some((n) => /loss 2%: controller nack_count \(must-increase\): PASS -- count 0 -> 37/.test(n)));
+  assert.ok(verdict.notes.some((n) => /host input_stall_count \(report\)/.test(n)), 'stalls are reported');
+});
+
+test('attribution loss row: loss that did not apply (no NACK rise) fails', () => {
+  const impaired = passJson({ p50s: NET_IMPAIRED_P50S });
+  const verdict = attributionVerdict({ clean: LOSS_CLEAN, impaired, delayMs: 20, lossPct: 2 });
+  assert.equal(verdict.ok, false);
+  assert.ok(verdict.errors.some((e) => /controller nack_count \(must-increase\): FAIL/.test(e)));
+});
+
+test('attribution loss row: loss showing up in host replay is a misattribution and fails', () => {
+  const impaired = passJson({ host: [hostLine({ inject: 30, complete: 45 })], controller: [controllerLine({ nacks: 37 })], p50s: NET_IMPAIRED_P50S });
+  const verdict = attributionVerdict({ clean: LOSS_CLEAN, impaired, delayMs: 20, lossPct: 2 });
+  assert.equal(verdict.ok, false);
+  assert.ok(verdict.errors.some((e) => /host replay_inject_ms \(must-not-move\): FAIL/.test(e)));
+  assert.ok(verdict.errors.some((e) => /host replay_complete_ms \(must-not-move\): FAIL/.test(e)));
+});
+
+test('attribution loss row: missing controller lines are insufficient; below 2% it is not asserted', () => {
+  const impaired = passJson({ controller: [], p50s: NET_IMPAIRED_P50S });
+  const missing = attributionVerdict({ clean: LOSS_CLEAN, impaired, delayMs: 20, lossPct: 2 });
+  assert.equal(missing.ok, false);
+  assert.ok(missing.errors.some((e) => /nack_count \(must-increase\): INSUFFICIENT/.test(e)));
+  // The gate profile (1%) and an old caller without --loss-pct keep the delay rows only.
+  const gate = attributionVerdict({ clean: LOSS_CLEAN, impaired, delayMs: 20, lossPct: 1 });
+  assert.equal(gate.ok, true, gate.errors.join('\n'));
+  assert.ok(gate.notes.some((n) => /loss row: not asserted at 1%/.test(n)));
+  assert.equal(attributionVerdict({ clean: LOSS_CLEAN, impaired, delayMs: 20 }).ok, true);
+  assert.equal(attributionVerdict({ clean: LOSS_CLEAN, impaired, delayMs: 20, lossPct: 'two' }).ok, false);
+});
+
+test('attribution loss row: a loss-only impairment (0ms delay) asserts the loss row alone', () => {
+  const lossy = passJson({ controller: [controllerLine({ nacks: 37 })] });
+  const green = attributionVerdict({ clean: LOSS_CLEAN, impaired: lossy, delayMs: 0, lossPct: 2 });
+  assert.equal(green.ok, true, green.errors.join('\n'));
+  assert.equal(green.rows.length, 0);
+  assert.ok(green.notes.some((n) => /delay rows: not asserted/.test(n)));
+  const red = attributionVerdict({ clean: LOSS_CLEAN, impaired: LOSS_CLEAN, delayMs: 0, lossPct: 2 });
+  assert.equal(red.ok, false);
+  assert.ok(red.errors.some((e) => /controller nack_count \(must-increase\): FAIL/.test(e)));
+  // 0ms without a loss % is still a bad call, never a vacuous pass.
+  assert.equal(attributionVerdict({ clean: LOSS_CLEAN, impaired: lossy, delayMs: 0 }).ok, false);
+  assert.equal(attributionVerdict({ clean: LOSS_CLEAN, impaired: lossy, delayMs: 0, lossPct: 1 }).ok, false, '0ms at 1% asserts nothing');
+});
+
+const REPLAY_BASELINE = passJson({ host: [hostLine({ leg: 4 })], controller: [controllerLine({ present: 48, receive: 7 })] });
+const REPLAY_RED_P50S = { sendToReceive: 3, hostReceiveToInject: 152, pressToPhoton: 337 };
+
+test('attribution replay row: a 150ms host stall lands on the replay stages only -> pass', () => {
+  const red = passJson({ host: [hostLine({ inject: 151, complete: 160, capture: 25, leg: 5 })], controller: [controllerLine({ subRtt: 3, present: 50 })], p50s: REPLAY_RED_P50S });
+  const verdict = replayAttributionVerdict({ baseline: REPLAY_BASELINE, red, delayMs: 150 });
+  assert.equal(verdict.ok, true, verdict.errors.join('\n'));
+  assert.equal(verdict.rows.length, REPLAY_ATTRIBUTION_ROWS.length);
+  assert.ok(verdict.notes.some((n) => /replay 150ms: host replay_inject_ms \(must-move\): PASS -- 1 -> 151ms moved 150ms/.test(n)));
+  assert.ok(verdict.notes.some((n) => /pressToPhoton \(report\)/.test(n)), 'photon is reported only (photon_ms has no producer yet)');
+});
+
+test('attribution replay row: a stall that did not apply (red run is a baseline) fails', () => {
+  const verdict = replayAttributionVerdict({ baseline: REPLAY_BASELINE, red: REPLAY_BASELINE, delayMs: 150 });
+  assert.equal(verdict.ok, false);
+  for (const name of ['host replay_inject_ms', 'host replay_complete_ms', 'hostReceiveToInject']) {
+    assert.ok(verdict.errors.some((e) => e.includes(`${name} (must-move): FAIL`)), name);
+  }
+});
+
+test('attribution replay row: replay delay showing up on the network, capture or input legs fails', () => {
+  const host = [hostLine({ inject: 151, complete: 160, capture: 25, leg: 5 })];
+  const controller = [controllerLine({ present: 50 })];
+  const leaks = [
+    [{ host, controller, p50s: { ...REPLAY_RED_P50S, sendToReceive: 150 } }, 'sendToReceive'],
+    [{ host: [hostLine({ inject: 151, complete: 160, capture: 175, leg: 5 })], controller, p50s: REPLAY_RED_P50S }, 'host inject_to_capture_ms'],
+    [{ host: [hostLine({ inject: 151, complete: 160, excess: 150, leg: 5 })], controller, p50s: REPLAY_RED_P50S }, 'host input_excess_delay_ms'],
+    [{ host: [hostLine({ inject: 151, complete: 160, leg: 150 })], controller, p50s: REPLAY_RED_P50S }, 'host input_leg_ms'],
+    [{ host, controller: [controllerLine({ subRtt: 150, present: 50 })], p50s: REPLAY_RED_P50S }, 'controller sub_rtt_ms'],
+    [{ host, controller: [controllerLine({ pubRtt: 150, present: 50 })], p50s: REPLAY_RED_P50S }, 'controller pub_rtt_ms'],
+    [{ host, controller: [controllerLine({ present: 200, receive: 157 })], p50s: REPLAY_RED_P50S }, 'controller capture_to_receive_ms'],
+  ];
+  for (const [red, name] of leaks) {
+    const verdict = replayAttributionVerdict({ baseline: REPLAY_BASELINE, red: passJson(red), delayMs: 150 });
+    assert.equal(verdict.ok, false, name);
+    assert.ok(verdict.errors.some((e) => e.includes(`${name} (must-not-move): FAIL`)), `${name}: ${verdict.errors.join('\n')}`);
+  }
+});
+
+test('attribution replay row: a jitter-buffer rise in capture_to_present alone is reported, not failed', () => {
+  // Red run 44979923707: capture_to_receive held at 7ms while the browser's
+  // adaptive jitter buffer took capture_to_present 51 -> 75ms.
+  const red = passJson({ host: [hostLine({ inject: 151, complete: 160, leg: 5 })], controller: [controllerLine({ present: 75, receive: 7 })], p50s: REPLAY_RED_P50S });
+  const verdict = replayAttributionVerdict({ baseline: REPLAY_BASELINE, red, delayMs: 150 });
+  assert.equal(verdict.ok, true, verdict.errors.join('\n'));
+  assert.ok(verdict.notes.some((n) => /controller capture_to_present_ms \(report\): PASS -- 48 -> 75/.test(n)));
+  assert.ok(verdict.notes.some((n) => /controller capture_to_receive_ms \(must-not-move\): PASS -- 7 -> 7/.test(n)));
+});
+
+test('attribution replay row: optional stages are n/a when absent, required ones are insufficient', () => {
+  const baseline = passJson();
+  const red = passJson({ host: [hostLine({ inject: 151, complete: 160 })], p50s: REPLAY_RED_P50S });
+  const verdict = replayAttributionVerdict({ baseline, red, delayMs: 150 });
+  assert.equal(verdict.ok, true, verdict.errors.join('\n'));
+  assert.ok(verdict.notes.some((n) => /host input_leg_ms \(must-not-move\): PASS -- n\/a/.test(n)));
+  const noHostLog = passJson({ host: [], p50s: REPLAY_RED_P50S });
+  const missing = replayAttributionVerdict({ baseline, red: noHostLog, delayMs: 150 });
+  assert.equal(missing.ok, false);
+  assert.ok(missing.errors.some((e) => /host replay_inject_ms \(must-move\): INSUFFICIENT/.test(e)));
+  assert.equal(replayAttributionVerdict({ baseline: null, red, delayMs: 150 }).ok, false);
+  assert.equal(replayAttributionVerdict({ baseline, red, delayMs: '' }).ok, false);
+});
+
+test('e2e-gate-verdict.mjs attribution-replay and --loss-pct exit 0 on a correct attribution and 1 on a wrong one', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'rc-attribution-rows-'));
+  const write = (name, json) => { const file = path.join(dir, name); writeFileSync(file, JSON.stringify(json)); return file; };
+  const verdictScript = path.join(scriptDir, 'ci/e2e-gate-verdict.mjs');
+  const run = (args) => spawnSync(process.execPath, [verdictScript, ...args], { encoding: 'utf8' });
+  const baseline = write('baseline.json', REPLAY_BASELINE);
+  const goodRed = write('red.json', passJson({ host: [hostLine({ inject: 151, complete: 160, leg: 5 })], controller: [controllerLine({ present: 50 })], p50s: REPLAY_RED_P50S }));
+  const green = run(['attribution-replay', '--baseline', baseline, '--red', goodRed, '--replay-delay-ms', '150']);
+  assert.equal(green.status, 0, green.stdout);
+  const red = run(['attribution-replay', '--baseline', baseline, '--red', baseline, '--replay-delay-ms', '150']);
+  assert.equal(red.status, 1, red.stdout);
+  assert.match(red.stdout, /::error::attribution replay 150ms: host replay_inject_ms/);
+  const clean = write('clean.json', LOSS_CLEAN);
+  const lossy = write('lossy.json', passJson({ controller: [controllerLine({ nacks: 37 })], p50s: NET_IMPAIRED_P50S }));
+  const quiet = write('quiet.json', passJson({ p50s: NET_IMPAIRED_P50S }));
+  const loss = (impaired) => run(['attribution', '--clean', clean, '--impaired', impaired, '--delay-ms', '20', '--loss-pct', '2']);
+  assert.equal(loss(lossy).status, 0, loss(lossy).stdout);
+  const noLoss = loss(quiet);
+  assert.equal(noLoss.status, 1, noLoss.stdout);
+  assert.match(noLoss.stdout, /::error::attribution loss 2%: controller nack_count/);
+});
+
+test('the workflow hands the impaired loss % to the attribution verdict', () => {
+  const workflow = readFileSync(path.join(repoRoot, '.github/workflows/nightly-loopback.yml'), 'utf8');
+  assert.match(workflow, /node "\$VERDICT" attribution [^\n]*\n[^\n]*--delay-ms "\$NET_DELAY_MS" --loss-pct "\$NET_LOSS_PCT"/);
+  // Unconditional: a no-op impaired pass (0ms, 0%) must fail the verdict, not skip it.
+  const step = workflow.slice(workflow.indexOf('Post-suite: IMPAIRED remote-control latency gate'), workflow.indexOf('node "$VERDICT" attribution '));
+  assert.ok(!/NET_DELAY_MS" -gt 0|NET_LOSS_PCT"[^\n]*BEGIN/.test(step), 'attribution must run for every impaired pass');
+  assert.equal(attributionVerdict({ clean: LOSS_CLEAN, impaired: LOSS_CLEAN, delayMs: '0', lossPct: '0' }).ok, false);
+  // The harness banks web controller summaries only before a mid-suite rejoin,
+  // never on the initial join (that page holds an earlier suite's lines).
+  const scenario = readFileSync(path.join(rcScripts, 'remote-control-scenario.mjs'), 'utf8');
+  const join = scenario.slice(scenario.indexOf('async function joinWebHarness('), scenario.indexOf('async function waitForMatchingWindow('));
+  assert.ok(!join.includes('bankedControllerSummaryLines'), 'joinWebHarness must not bank');
+  assert.match(scenario, /rejoinWebHarness: async \(\) => \{[^}]*bankedControllerSummaryLines\.push\(\.\.\.\(await readControllerSummaryLines\(cdp\)\)\);\s*const rejoined = await joinWebHarness/);
 });

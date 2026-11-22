@@ -10,7 +10,9 @@
 //
 //   node scripts/ci/e2e-gate-verdict.mjs loopback --results <json> --harness-exit <n> [--quarantine <ids>] [--required <ids>]
 //   node scripts/ci/e2e-gate-verdict.mjs latency  --results <json> --photon <json> --host-log <petal log> [--json <out>]
-//   node scripts/ci/e2e-gate-verdict.mjs attribution --clean <latency json> --impaired <latency json> --delay-ms <n>
+//   node scripts/ci/e2e-gate-verdict.mjs attribution --clean <latency json> --impaired <latency json> --delay-ms <n> [--loss-pct <n>]
+//   node scripts/ci/e2e-gate-verdict.mjs attribution-replay --baseline <latency json> --red <latency json> --replay-delay-ms <n>
+//   (#378: two RUNS' clean-pass latency JSON, a baseline and an rc_test_replay_delay_ms red run)
 //   Any tier takes --pass clean|impaired (default clean). An impaired-pass
 //   verdict is REPORT-ONLY (failures print as warnings, exit 0) unless
 //   E2E_IMPAIRED_BLOCKING=true (#378; nightly-loopback.yml sets it).
@@ -24,7 +26,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { attributionVerdict, envFlagTrue, IMPAIRED_BLOCKING_ENV, latencyVerdict } from './remote-control-latency-verdict.mjs';
+import { attributionVerdict, envFlagTrue, IMPAIRED_BLOCKING_ENV, latencyVerdict, replayAttributionVerdict } from './remote-control-latency-verdict.mjs';
 import { FREEZE_WARMUP_MS, freezeVerdict } from './share-freeze-verdict.mjs';
 
 // Skips that are structurally unavoidable on the release runner and carry no
@@ -357,6 +359,14 @@ function main(argv) {
       clean: args.clean && fs.existsSync(args.clean) ? readJson(args.clean) : null,
       impaired: args.impaired && fs.existsSync(args.impaired) ? readJson(args.impaired) : null,
       delayMs: args['delay-ms'],
+      lossPct: args['loss-pct'],
+    });
+  } else if (tier === 'attribution-replay') {
+    // #378: a host replay stall must land on the replay stages only.
+    verdict = replayAttributionVerdict({
+      baseline: args.baseline && fs.existsSync(args.baseline) ? readJson(args.baseline) : null,
+      red: args.red && fs.existsSync(args.red) ? readJson(args.red) : null,
+      delayMs: args['replay-delay-ms'],
     });
   } else if (tier === 'freeze') {
     // Share-freeze soak (#391): scripts/ci/share-freeze-verdict.mjs. The
@@ -372,7 +382,7 @@ function main(argv) {
     console.log(`share-freeze outcome: ${verdict.outcome.toUpperCase()}`);
     verdict = applyReportOnly(verdict, { blocking: envFlagTrue(process.env, FREEZE_SOAK_BLOCKING_ENV) });
   } else {
-    console.log(`::error::e2e-gate-verdict: unknown tier '${tier}' (expected loopback|latency|attribution|cockpit|freeze)`);
+    console.log(`::error::e2e-gate-verdict: unknown tier '${tier}' (expected loopback|latency|attribution|attribution-replay|cockpit|freeze)`);
     return 1;
   }
   if (pass === 'impaired') {

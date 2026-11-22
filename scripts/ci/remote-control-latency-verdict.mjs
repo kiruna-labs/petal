@@ -174,6 +174,28 @@ export function summarizeLatencySummaries(intervals, role = 'host') {
   const edge = withEdge
     ? Object.fromEntries(edgeKeys.map((key) => [key, withEdge[key] === undefined ? null : String(withEdge[key])]))
     : null;
+  // #378: run-level view of every stage and sum counter, for attribution.
+  // p50Ms is the sample-weighted median of the interval p50s.
+  const stages = {};
+  const names = new Set(mine.flatMap((fields) => Object.keys(fields).filter((key) => key.endsWith('_n')).map((key) => key.slice(0, -2))));
+  for (const name of names) {
+    const withData = mine.filter((fields) => Number.isFinite(fields[`${name}_n`]) && fields[`${name}_n`] > 0 && Number.isFinite(fields[`${name}_p50`]));
+    if (!withData.length) continue;
+    const samples = withData.reduce((sum, fields) => sum + fields[`${name}_n`], 0);
+    const byP50 = [...withData].sort((a, b) => a[`${name}_p50`] - b[`${name}_p50`]);
+    let seen = 0;
+    const median = byP50.find((fields) => (seen += fields[`${name}_n`]) >= samples / 2);
+    stages[name] = {
+      intervals: withData.length,
+      samples,
+      p50Ms: median[`${name}_p50`],
+      p95MaxMs: Math.max(...withData.map((fields) => fields[`${name}_p95`] ?? -Infinity)),
+    };
+  }
+  const counters = Object.fromEntries(SUMMARY_COUNTERS.map((key) => [
+    key,
+    mine.reduce((sum, fields) => sum + (Number.isFinite(fields[key]) ? fields[key] : 0), 0),
+  ]));
   return {
     role,
     intervals: mine.length,
@@ -181,7 +203,19 @@ export function summarizeLatencySummaries(intervals, role = 'host') {
     replayInject: stage('replay_inject_ms'),
     replayComplete: stage('replay_complete_ms'),
     edge,
+    stages,
+    counters,
   };
+}
+
+// Sum-per-interval counters (rc_latency_telemetry.rs `Counter`); an
+// interval omits a zero counter, so a role with intervals sums to 0.
+export const SUMMARY_COUNTERS = ['input_stall_count', 'frames_dropped', 'freeze_count', 'nack_count', 'pli_count', 'freeze_duration_ms'];
+
+// #378: the web controller's own summary lines (#375 receive stages), which
+// the harness reads from the web session log into the results/photon JSON.
+export function controllerSummaryLines(...reports) {
+  return reports.flatMap((report) => (Array.isArray(report?.controllerLatencySummaryLines) ? report.controllerLatencySummaryLines : []));
 }
 
 const INPUT_KINDS = new Set(['pointer', 'key', 'text', 'wheel']);
@@ -285,8 +319,10 @@ export function collectLatencyMetrics({ results = null, photon = null, hostLog =
     .filter((event) => Number.isFinite(event.receiveTsMs) && Number.isFinite(event.completeTsMs))
     .map((event) => event.completeTsMs - event.receiveTsMs);
   const latencySummary = summarizeLatencySummaries(parseLatencySummaryLog(hostLog));
+  const controllerSummary = summarizeLatencySummaries(parseLatencySummaryLog(controllerSummaryLines(results, photon).join('\n')), 'controller');
   return {
     latencySummary,
+    controllerSummary,
     targetObservation: {
       ...distribution(observationSamples(results?.results)),
       methods: results?.summary?.targetObservationLatency?.methods ?? null,
@@ -370,6 +406,12 @@ export function latencyVerdict({ results = null, photon = null, hostLog = '', en
       `replay_complete_ms worst p95 ${summary.replayComplete.p95MaxMs ?? 'n/a'} over ${summary.replayComplete.samples} samples ` +
       `(log receive->complete p95 ${metrics.hostReceiveToComplete.p95Ms ?? 'n/a'})`
   );
+  const controller = metrics.controllerSummary;
+  notes.push(
+    `  web controller summary (#375, not gated): ${controller.intervals} interval(s); ` +
+      `nack_count ${controller.counters.nack_count}, sub_rtt_ms p50 ${controller.stages.sub_rtt_ms?.p50Ms ?? 'n/a'}, ` +
+      `capture_to_present_ms p50 ${controller.stages.capture_to_present_ms?.p50Ms ?? 'n/a'}`
+  );
   notes.push(`  host replay timeouts: ${metrics.hostReplayTimeouts}; send->inject paired ${metrics.sendToInject.paired}/${metrics.sendToInject.publishes} controller publishes; observation methods ${JSON.stringify(metrics.targetObservation.methods)}, watcher max read gap ${metrics.targetObservation.maxReadGapMs ?? 'n/a'}ms`);
   const freeze = metrics.presentedFreeze;
   notes.push(freeze.error
@@ -407,37 +449,140 @@ export const ATTRIBUTION_ROWS = [
   { metric: 'pressToPhoton', traversals: 4, rule: 'report' },
 ];
 
-export function attributionVerdict({ clean, impaired, delayMs }) {
+// #378 2%-loss row, asserted only when the impaired pass ran at least this
+// much loss each way (a `net_loss_pct` red-proof); no VM run has measured
+// the gate profile's 1% here yet. Input counters are reported, not asserted:
+// since #421 every ordered input rides redundant lossy bundles and its
+// receive stamp is the first copy's arrival, so 2% loss is meant NOT to stall
+// input (0 stalls at 1% in run 43067248846). Video NACKs are the loss signal.
+export const LOSS_ROW_MIN_PCT = 2;
+export const LOSS_ATTRIBUTION_ROWS = [
+  { role: 'controller', counter: 'nack_count', rule: 'must-increase' },
+  { role: 'host', stage: 'replay_inject_ms', rule: 'must-not-move' },
+  { role: 'host', stage: 'replay_complete_ms', rule: 'must-not-move' },
+  { role: 'host', counter: 'input_stall_count', rule: 'report' },
+  { role: 'host', stage: 'input_excess_delay_ms', stat: 'p95MaxMs', rule: 'report' },
+];
+
+// #378 replay-delay row: a baseline run vs a `rc_test_replay_delay_ms` red
+// run. The knob stalls the host before every inject and is read once at
+// launch, so both passes of one run carry it: this row compares two RUNS.
+// Optional rows are n/a unless both runs produced the stage. photon_ms (P6)
+// has no producer yet; pressToPhoton is reported only.
+export const REPLAY_ATTRIBUTION_ROWS = [
+  { role: 'host', stage: 'replay_inject_ms', rule: 'must-move' },
+  { role: 'host', stage: 'replay_complete_ms', rule: 'must-move' },
+  { metric: 'hostReceiveToInject', rule: 'must-move' },
+  { metric: 'sendToReceive', rule: 'must-not-move' },
+  { role: 'host', stage: 'inject_to_capture_ms', rule: 'must-not-move' },
+  { role: 'host', stage: 'input_excess_delay_ms', rule: 'must-not-move' },
+  { role: 'host', stage: 'input_leg_ms', rule: 'must-not-move', optional: true },
+  { role: 'controller', stage: 'pub_rtt_ms', rule: 'must-not-move', optional: true },
+  { role: 'controller', stage: 'sub_rtt_ms', rule: 'must-not-move', optional: true },
+  // Network + capture leg. capture_to_present_ms also carries the browser's
+  // adaptive jitter buffer, which a stalled host's bursty frames legitimately
+  // raise (red run 44979923707: jb_target 13 -> 27ms), so it is reported only.
+  { role: 'controller', stage: 'capture_to_receive_ms', rule: 'must-not-move', optional: true },
+  { role: 'controller', stage: 'capture_to_present_ms', rule: 'report' },
+  { metric: 'pressToPhoton', rule: 'report' },
+];
+
+function rowName(row) {
+  if (row.metric) return row.metric;
+  return `${row.role} ${row.stage ?? row.counter}${row.stat && row.stat !== 'p50Ms' ? ` ${row.stat.replace('Ms', '')}` : ''}`;
+}
+
+// A row's value from one latency `--json`: a per-event metric's p50, a
+// summary stage's run-level p50 (or `stat`), or a summary counter's sum.
+// null when the evidence is absent (a counter needs >= 1 interval).
+function rowValue(json, row) {
+  const metrics = json?.metrics;
+  let value;
+  if (row.metric) {
+    value = metrics?.[row.metric]?.p50Ms;
+  } else {
+    const summary = row.role === 'controller' ? metrics?.controllerSummary : metrics?.latencySummary;
+    if (row.counter) value = summary?.intervals > 0 ? summary.counters?.[row.counter] : null;
+    else value = summary?.stages?.[row.stage]?.[row.stat ?? 'p50Ms'];
+  }
+  return Number.isFinite(value) ? value : null;
+}
+
+// `expectedMs` is the delay the injection should add to a must-move row.
+function evaluateAttributionRow(row, before, after, expectedMs, [was, now] = ['clean', 'impaired']) {
+  const name = rowName(row);
+  const base = { ...row, name, before, after };
+  if (before === null || after === null) {
+    if (row.rule === 'report' || row.optional) return { ...base, movedMs: null, status: 'pass', detail: `n/a (${was} ${before}, ${now} ${after}; ${row.optional ? 'optional, not asserted' : 'reported only'})` };
+    return { ...base, movedMs: null, status: 'insufficient', detail: `evidence missing (${was} ${before}, ${now} ${after})` };
+  }
+  const movedMs = Math.round((after - before) * 10) / 10;
+  if (row.rule === 'must-increase') {
+    const ok = after > before && after >= 1;
+    return { ...base, movedMs, status: ok ? 'pass' : 'fail', detail: `count ${before} -> ${after}; must rise above ${was} and be >= 1` };
+  }
+  if (row.rule === 'must-move') {
+    const needMs = ATTRIBUTION_MOVE_FRACTION * expectedMs;
+    const ok = movedMs >= needMs;
+    return { ...base, movedMs, status: ok ? 'pass' : 'fail', detail: `${before} -> ${after}ms moved ${movedMs}ms; expected ~${expectedMs}ms, need >= ${needMs}ms` };
+  }
+  if (row.rule === 'report') {
+    return { ...base, movedMs, status: 'pass', detail: `${before} -> ${after} moved ${movedMs} (reported only)` };
+  }
+  const ok = Math.abs(movedMs) <= ATTRIBUTION_STILL_TOLERANCE_MS;
+  return { ...base, movedMs, status: ok ? 'pass' : 'fail', detail: `${before} -> ${after}ms moved ${movedMs}ms; must stay within ${ATTRIBUTION_STILL_TOLERANCE_MS}ms` };
+}
+
+function pushRows(rows, label, notes, errors) {
+  for (const row of rows) {
+    const line = `attribution ${label}${row.name} (${row.rule}): ${row.status.toUpperCase()} -- ${row.detail}`;
+    if (row.status === 'pass') notes.push(line);
+    else errors.push(line);
+  }
+}
+
+export function attributionVerdict({ clean, impaired, delayMs, lossPct }) {
+  const errors = [];
+  const notes = [];
+  const delay = Number(delayMs);
+  const hasLoss = lossPct !== undefined && lossPct !== null && `${lossPct}`.trim() !== '';
+  // A loss-only red-proof (net_delay_ms=0) asserts the loss row alone.
+  const lossOnly = hasLoss && Number(lossPct) >= LOSS_ROW_MIN_PCT;
+  if (!Number.isFinite(delay) || delay < 0 || (delay === 0 && !lossOnly) || `${delayMs ?? ''}`.trim() === '') {
+    errors.push(`attribution: impairment delay must be a positive number of ms (0 only with --loss-pct >= ${LOSS_ROW_MIN_PCT}), got ${JSON.stringify(delayMs)}`);
+    return { ok: false, errors, warnings: [], notes, rows: [] };
+  }
+  let rows = [];
+  if (delay > 0) {
+    rows = ATTRIBUTION_ROWS.map((row) => evaluateAttributionRow(row, rowValue(clean, row), rowValue(impaired, row), row.traversals * delay));
+    pushRows(rows, '', notes, errors);
+  } else {
+    notes.push('attribution delay rows: not asserted (loss-only impairment, 0ms delay)');
+  }
+  let lossRows = [];
+  if (hasLoss) {
+    const loss = Number(lossPct);
+    if (!Number.isFinite(loss) || loss < 0) {
+      errors.push(`attribution: impairment loss must be a non-negative number of %, got ${JSON.stringify(lossPct)}`);
+    } else if (loss >= LOSS_ROW_MIN_PCT) {
+      lossRows = LOSS_ATTRIBUTION_ROWS.map((row) => evaluateAttributionRow(row, rowValue(clean, row), rowValue(impaired, row), 0));
+      pushRows(lossRows, `loss ${loss}%: `, notes, errors);
+    } else {
+      notes.push(`attribution loss row: not asserted at ${loss}% (asserted from ${LOSS_ROW_MIN_PCT}%, a net_loss_pct red-proof)`);
+    }
+  }
+  return { ok: errors.length === 0, errors, warnings: [], notes, rows, lossRows };
+}
+
+export function replayAttributionVerdict({ baseline, red, delayMs }) {
   const errors = [];
   const notes = [];
   const delay = Number(delayMs);
   if (!Number.isFinite(delay) || delay <= 0) {
-    errors.push(`attribution: impairment delay must be a positive number of ms, got ${JSON.stringify(delayMs)}`);
+    errors.push(`attribution: replay delay must be a positive number of ms, got ${JSON.stringify(delayMs)}`);
     return { ok: false, errors, warnings: [], notes, rows: [] };
   }
-  const rows = ATTRIBUTION_ROWS.map((row) => {
-    const before = clean?.metrics?.[row.metric]?.p50Ms ?? null;
-    const after = impaired?.metrics?.[row.metric]?.p50Ms ?? null;
-    if (!Number.isFinite(before) || !Number.isFinite(after)) {
-      if (row.rule === 'report') return { ...row, before, after, movedMs: null, status: 'pass', detail: 'n/a (reported only)' };
-      return { ...row, before, after, movedMs: null, status: 'insufficient', detail: `p50 missing (clean ${before}, impaired ${after})` };
-    }
-    const movedMs = Math.round((after - before) * 10) / 10;
-    if (row.rule === 'must-move') {
-      const needMs = ATTRIBUTION_MOVE_FRACTION * row.traversals * delay;
-      const ok = movedMs >= needMs;
-      return { ...row, before, after, movedMs, status: ok ? 'pass' : 'fail', detail: `p50 ${before} -> ${after}ms moved ${movedMs}ms; expected ~${row.traversals * delay}ms (${row.traversals} x ${delay}ms), need >= ${needMs}ms` };
-    }
-    if (row.rule === 'report') {
-      return { ...row, before, after, movedMs, status: 'pass', detail: `p50 ${before} -> ${after}ms moved ${movedMs}ms (reported only; modelled ~${row.traversals * delay}ms)` };
-    }
-    const ok = Math.abs(movedMs) <= ATTRIBUTION_STILL_TOLERANCE_MS;
-    return { ...row, before, after, movedMs, status: ok ? 'pass' : 'fail', detail: `p50 ${before} -> ${after}ms moved ${movedMs}ms; host stage must stay within ${ATTRIBUTION_STILL_TOLERANCE_MS}ms` };
-  });
-  for (const row of rows) {
-    const line = `attribution ${row.metric} (${row.rule}): ${row.status.toUpperCase()} -- ${row.detail}`;
-    if (row.status === 'pass') notes.push(line);
-    else errors.push(line);
-  }
+  const rows = REPLAY_ATTRIBUTION_ROWS.map((row) => evaluateAttributionRow(row, rowValue(baseline, row), rowValue(red, row), delay, ['baseline', 'red']));
+  pushRows(rows, `replay ${delay}ms: `, notes, errors);
   return { ok: errors.length === 0, errors, warnings: [], notes, rows };
 }
