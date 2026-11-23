@@ -13,15 +13,15 @@
   },
   "dependencies": {
     "@google/genai": "^2.31.0",
-    "@sentry/node": "^11.11.0",
-    "@vercel/blob": "^2.8.2",
-    "livekit-server-sdk": "^2.19.2"
+    "@sentry/node": "^11.16.0",
+    "@vercel/blob": "^2.9.0",
+    "livekit-server-sdk": "^2.20.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "~7.0.2",
-    "undici": "^8.12.3"
+    "undici": "^8.13.0"
   },
   "overrides": {
     "@vercel/cli-config": {
