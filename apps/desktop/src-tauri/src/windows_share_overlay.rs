@@ -1543,9 +1543,11 @@ enum OverlayExclusion {
 /// Petal window or keeps the stream's fence shut (`streamer_mode`). Until
 /// then the kept overlay is as capturable as Petal's other windows, so a
 /// display share or another app's capture of the same screen can show it.
-/// Only a closed overlay leaves the WGC system border as the indicator; a
-/// kept one can still become the custom indicator
-/// (`custom_indicator_is_ready`), so the log only says so when it closes.
+/// A kept window share overlay can still become the custom indicator,
+/// because `custom_indicator_is_ready` ignores `capture_excluded` for a
+/// window, so only a closed display or window overlay's log line says the
+/// WGC system indicator is kept. A region share's indicator comes from Petal
+/// View's selector instead (`session_stub.rs`).
 fn settle_overlay_exclusion(
     logger: &dyn log::Log,
     window_id: u32,
@@ -1576,13 +1578,21 @@ fn settle_overlay_exclusion(
         return OverlayExclusion::Capturable;
     }
     close();
-    log_overlay(
-        logger,
-        log::Level::Warn,
-        format_args!(
-            "windows share overlay: closed the capturable overlay for window {window_id}; retaining the WGC system indicator"
-        ),
-    );
+    if region_share {
+        log_overlay(
+            logger,
+            log::Level::Warn,
+            format_args!("windows share overlay: closed the capturable overlay for region share {window_id}"),
+        );
+    } else {
+        log_overlay(
+            logger,
+            log::Level::Warn,
+            format_args!(
+                "windows share overlay: closed the capturable overlay for window {window_id}; retaining the WGC system indicator"
+            ),
+        );
+    }
     OverlayExclusion::Closed
 }
 
@@ -1756,12 +1766,11 @@ mod tests {
 
     /// The line logged first whenever the exclusion fails, before anything
     /// is decided. It states only that fact (#487).
-    const EXCLUSION_UNAVAILABLE: &str =
-        "windows share overlay: WDA_EXCLUDEFROMCAPTURE exclusion unavailable for window 7";
-
-    /// Whether any logged line says the WGC system indicator is kept.
-    fn claims_wgc_indicator(lines: &[(log::Level, String)]) -> bool {
-        lines.iter().any(|(_, line)| line.contains("WGC"))
+    fn exclusion_unavailable() -> (log::Level, String) {
+        (
+            log::Level::Warn,
+            "windows share overlay: WDA_EXCLUDEFROMCAPTURE exclusion unavailable for window 7".to_string(),
+        )
     }
 
     #[test]
@@ -1769,16 +1778,24 @@ mod tests {
         // Windows before 2004 and some RDP or VM setups can't exclude a
         // window from capture. A window capture never contains the overlay,
         // so when nobody is live the telepointer and draw layer stay (#487).
-        let (outcome, closed, lines) = settle_with_failed_exclusion(TargetKind::Window, false, false);
-        assert_eq!((outcome, closed), (OverlayExclusion::Capturable, false));
-        assert_eq!(
-            lines.first(),
-            Some(&(log::Level::Warn, EXCLUSION_UNAVAILABLE.to_string()))
-        );
         // The kept overlay can still become the custom indicator
-        // (`custom_indicator_is_ready`), so the log must not say the WGC
-        // indicator is kept.
-        assert!(!claims_wgc_indicator(&lines), "{lines:?}");
+        // (`custom_indicator_is_ready`), so no line says the WGC indicator
+        // is kept.
+        assert_eq!(
+            settle_with_failed_exclusion(TargetKind::Window, false, false),
+            (
+                OverlayExclusion::Capturable,
+                false,
+                vec![
+                    exclusion_unavailable(),
+                    (
+                        log::Level::Info,
+                        "windows share overlay: keeping the capturable overlay for window share 7; nobody is live"
+                            .to_string(),
+                    ),
+                ]
+            )
+        );
     }
 
     #[test]
@@ -1786,25 +1803,34 @@ mod tests {
         // While live, a display stream would show a capturable window
         // share's overlay. A display or region share's own capture would
         // show its overlay, live or not.
-        let mut cases = vec![(TargetKind::Window, false, true)];
+        //
+        // Only the line about the closed overlay says the WGC indicator is
+        // kept. A region share's indicator comes from Petal View's selector
+        // (`session_stub.rs`), so its line doesn't say so.
+        let wgc_kept = (
+            log::Level::Warn,
+            "windows share overlay: closed the capturable overlay for window 7; retaining the WGC system indicator"
+                .to_string(),
+        );
+        let region_closed = (
+            log::Level::Warn,
+            "windows share overlay: closed the capturable overlay for region share 7".to_string(),
+        );
+        let mut cases = vec![(TargetKind::Window, false, true, wgc_kept.clone())];
         for live in [false, true] {
-            for region_share in [false, true] {
-                cases.push((TargetKind::Display, region_share, live));
-            }
+            cases.push((TargetKind::Display, false, live, wgc_kept.clone()));
+            cases.push((TargetKind::Display, true, live, region_closed.clone()));
         }
-        for (kind, region_share, live) in cases {
-            let case = format!("{kind:?} share, region={region_share}, live={live}");
-            let (outcome, closed, lines) = settle_with_failed_exclusion(kind, region_share, live);
-            assert_eq!((outcome, closed), (OverlayExclusion::Closed, true), "{case}");
-            // The first line only says the exclusion failed, and only the
-            // closed overlay's line says the WGC indicator is kept.
+        for (kind, region_share, live, closed_line) in cases {
             assert_eq!(
-                lines.first(),
-                Some(&(log::Level::Warn, EXCLUSION_UNAVAILABLE.to_string())),
-                "{case}"
+                settle_with_failed_exclusion(kind, region_share, live),
+                (
+                    OverlayExclusion::Closed,
+                    true,
+                    vec![exclusion_unavailable(), closed_line]
+                ),
+                "{kind:?} share, region={region_share}, live={live}"
             );
-            assert!(!claims_wgc_indicator(&lines[..1]), "{case}: {lines:?}");
-            assert!(claims_wgc_indicator(&lines[1..]), "{case}: {lines:?}");
         }
         // An excluded overlay always stays, and nothing is logged.
         assert_eq!(
