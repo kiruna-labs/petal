@@ -1344,7 +1344,8 @@ pub(crate) fn create_share_overlay(
                 page_loaded_callback.store(true, Ordering::Release);
             }
         });
-    // Every share overlay stays out of every capture for its whole life:
+    // Every share overlay is built to stay out of every capture for its
+    // whole life:
     // excluded before it is first shown, and kept so when a stream stops
     // (#487). Excluding a window share's overlay only while live made
     // Windows keep a surface the size of the share in Petal's process until
