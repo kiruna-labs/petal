@@ -9444,6 +9444,9 @@ mod tests {
     fn a_level_capped_logger_drops_a_level_above_its_cap() {
         let recorder = RecordingLog::new();
         let capped = LevelCapped(&recorder, log::LevelFilter::Warn);
+        let at = |level| log::Metadata::builder().level(level).target("desktop_lib::test").build();
+        assert!(!capped.enabled(&at(log::Level::Info)));
+        assert!(capped.enabled(&at(log::Level::Warn)));
         log_to(&capped, log::Level::Info, "desktop_lib::test", format_args!("info via log_to"));
         log_to(&capped, log::Level::Warn, "desktop_lib::test", format_args!("warn via log_to"));
         capped.log(
