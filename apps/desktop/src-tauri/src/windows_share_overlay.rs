@@ -1534,9 +1534,9 @@ enum OverlayExclusion {
 /// (`close`) when that fails and capture could show it.
 ///
 /// A display capture includes every visible pixel on that monitor, so a
-/// display or region share's overlay that can't be excluded is closed: the
-/// WGC system border stays the only indicator and no Petal chrome leaks into
-/// outgoing pixels. A window capture never contains its overlay, so a window
+/// display or region share's overlay that can't be excluded is closed, so no
+/// Petal chrome leaks into outgoing pixels. A display share then keeps only
+/// the WGC system border. A window capture never contains its overlay, so a window
 /// share keeps its telepointer and draw layer (Windows before 2004, some RDP
 /// or VM setups) unless this computer is live (`capture_exclusion_active`),
 /// when a display stream would show it. Going live later excludes every
