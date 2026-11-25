@@ -1666,9 +1666,16 @@ mod tests {
         let settle = body.find("settle_overlay_exclusion(").expect("create_share_overlay settles the exclusion");
         let exclude = body.find("crate::platform::windows::set_capture_exclusion(").expect("real exclusion call");
         let live = body.find("crate::streaming::streamer_mode::capture_exclusion_active,").expect("live state");
-        let close = body[live..].find("let _ = overlay.close();").expect("close closure") + live;
+        let after_live: String = body[live..]
+            ["crate::streaming::streamer_mode::capture_exclusion_active,".len()..]
+            .split_whitespace()
+            .collect();
+        assert!(
+            after_live.starts_with("||{let_=overlay.close();},"),
+            "the argument after the live state must close the overlay"
+        );
         let show = body.find("OverlayPlacementAction::Show").expect("show");
-        assert!(settle < exclude && exclude < live && live < close && close < show);
+        assert!(settle < exclude && exclude < live && live < show);
     }
 
     /// Runs `settle_overlay_exclusion` with an exclusion call that fails, and
