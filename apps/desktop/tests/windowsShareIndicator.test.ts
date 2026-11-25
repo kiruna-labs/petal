@@ -162,7 +162,7 @@ test('Windows ordinary capture uses an explicit indicator policy instead of an u
   );
 });
 
-test('the existing sharer overlay is the single local Petal indicator and is fail-safe for every share', () => {
+test('the existing sharer overlay is the single local Petal indicator and is fail-safe for displays and live streams', () => {
   assert.match(overlaySource, /ShareOverlayReadiness/);
   assert.match(overlaySource, /PageLoadEvent::Finished/);
   assert.match(overlaySource, /OVERLAY_PAGE_LOAD_TIMEOUT/);
@@ -175,8 +175,10 @@ test('the existing sharer overlay is the single local Petal indicator and is fai
   assert.match(overlaySource, /GW_OWNER/);
   assert.match(overlaySource, /SWP_NOZORDER/);
   assert.match(overlaySource, /map_err\(\|error\|/);
-  // An overlay capture can't skip is closed whatever the share kind (#487).
-  assert.match(overlaySource, /if !capture_excluded \{\s*let _ = overlay\.close\(\);/);
+  // An overlay capture can't skip is closed for a display or region share,
+  // and for a window share while live (#487). The Rust tests on
+  // settle_overlay_exclusion pin each case.
+  assert.match(overlaySource, /OverlayExclusion::Closed => \{\s*return Ok\(ShareOverlayReadiness \{\s*shown: false,/);
   assert.match(pointerSource, /sharer-share-border/);
   assert.match(pointerSource, /border:\s*4px solid var\(--sharer-share-border-color\)/);
   assert.match(pointerSource, /border-radius:\s*var\(--radius-input\)/);

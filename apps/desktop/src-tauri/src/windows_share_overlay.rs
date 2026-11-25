@@ -1374,30 +1374,30 @@ pub(crate) fn create_share_overlay(
         ));
     }
 
-    let capture_excluded = {
-        let hwnd = windows::Win32::Foundation::HWND(overlay_hwnd as *mut core::ffi::c_void);
-        let excluded = crate::platform::windows::set_capture_exclusion(hwnd);
-        if !excluded {
-            log::warn!(
-                "windows share overlay: capture exclusion unavailable for window {window_id}; retaining the WGC system indicator"
-            );
+    let capture_excluded = match settle_overlay_exclusion(
+        window_id,
+        target.kind(),
+        region_share,
+        || {
+            crate::platform::windows::set_capture_exclusion(windows::Win32::Foundation::HWND(
+                overlay_hwnd as *mut core::ffi::c_void,
+            ))
+        },
+        crate::streaming::streamer_mode::capture_exclusion_active,
+        || {
+            let _ = overlay.close();
+        },
+    ) {
+        OverlayExclusion::Excluded => true,
+        OverlayExclusion::Capturable => false,
+        OverlayExclusion::Closed => {
+            return Ok(ShareOverlayReadiness {
+                shown: false,
+                capture_excluded: false,
+                custom_indicator_ready: false,
+            });
         }
-        excluded
     };
-    // A display capture includes every visible pixel on that monitor, and a
-    // live display or region stream would include a capturable window
-    // share's overlay too (it is built without the stream's build gate). If
-    // affinity cannot exclude this process-owned overlay, do not show even
-    // the pointer/draw layer: the system WGC border remains the only trusted
-    // indicator and no local Petal chrome can leak into outgoing pixels.
-    if !capture_excluded {
-        let _ = overlay.close();
-        return Ok(ShareOverlayReadiness {
-            shown: false,
-            capture_excluded: false,
-            custom_indicator_ready: false,
-        });
-    }
 
     // Resolve the initial geometry before exposing the WebView. The same
     // visible-frame source is used for the hidden pre-load position and the
@@ -1517,6 +1517,51 @@ pub(crate) fn create_share_overlay(
     Ok(readiness)
 }
 
+/// What became of a share overlay after its capture exclusion was tried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayExclusion {
+    Excluded,
+    /// The exclusion failed, and the overlay stays capturable.
+    Capturable,
+    /// The exclusion failed, and the overlay was closed.
+    Closed,
+}
+
+/// Try to keep a share overlay out of capture (`exclude`), and close it
+/// (`close`) when that fails and capture could show it.
+///
+/// A display capture includes every visible pixel on that monitor, so a
+/// display or region share's overlay that can't be excluded is closed: the
+/// WGC system border stays the only indicator and no Petal chrome leaks into
+/// outgoing pixels. A window capture never contains its overlay, so a window
+/// share keeps its telepointer and draw layer (Windows before 2004, some RDP
+/// or VM setups) unless this computer is live (`capture_exclusion_active`),
+/// when a display stream would show it. Going live later excludes every
+/// Petal window or keeps the stream's fence shut (`streamer_mode`).
+fn settle_overlay_exclusion(
+    window_id: u32,
+    target_kind: TargetKind,
+    region_share: bool,
+    exclude: impl FnOnce() -> bool,
+    capture_exclusion_active: impl FnOnce() -> bool,
+    close: impl FnOnce(),
+) -> OverlayExclusion {
+    if exclude() {
+        return OverlayExclusion::Excluded;
+    }
+    log::warn!(
+        "windows share overlay: capture exclusion unavailable for window {window_id}; retaining the WGC system indicator"
+    );
+    if target_kind == TargetKind::Window && !region_share && !capture_exclusion_active() {
+        log::info!(
+            "windows share overlay: keeping the capturable overlay for window share {window_id}; nobody is live"
+        );
+        return OverlayExclusion::Capturable;
+    }
+    close();
+    OverlayExclusion::Closed
+}
+
 /// Tear down the sharer overlay for a locally shared window on share stop.
 pub(crate) fn close_share_overlay(app: &AppHandle, window_id: u32) {
     let _lifecycle_guard = OVERLAY_RECONCILE_LOCK.lock_unpoisoned();
@@ -1602,11 +1647,11 @@ mod tests {
     }
 
     #[test]
-    fn every_share_overlay_is_built_excluded_and_hidden_when_exclusion_fails() {
+    fn every_share_overlay_is_built_excluded_and_settled_after_its_exclusion() {
         // Excluding a window share's overlay only while live left Windows
-        // holding a surface the size of the share after Stop, and an overlay
-        // that capture can't skip must never be shown, whatever the share
-        // kind (#487). Checked on the source of `create_share_overlay`.
+        // holding a surface the size of the share after Stop (#487), and
+        // what happens when the exclusion fails is decided in one place.
+        // Checked on the source of `create_share_overlay`.
         let source = include_str!("windows_share_overlay.rs");
         let start = source.find("pub(crate) fn create_share_overlay(").expect("create_share_overlay");
         let end = source[start..].find("pub(crate) fn close_share_overlay(").expect("close_share_overlay") + start;
@@ -1614,9 +1659,62 @@ mod tests {
         assert!(body.contains(".build_petal_excluded()"), "the overlay must be built excluded from capture");
         assert!(!body.contains(".build_petal()"), "no share overlay may be built capturable");
         assert!(
-            body.contains("if !capture_excluded {"),
-            "an overlay whose exclusion failed must be closed for every share kind"
+            body.contains("settle_overlay_exclusion(")
+                && body.contains("crate::platform::windows::set_capture_exclusion(")
+                && body.contains("crate::streaming::streamer_mode::capture_exclusion_active"),
+            "the overlay's real exclusion call and live state must go through settle_overlay_exclusion"
         );
+    }
+
+    /// Runs `settle_overlay_exclusion` with an exclusion call that fails, and
+    /// returns its outcome and whether the overlay was closed.
+    fn settle_with_failed_exclusion(
+        kind: TargetKind,
+        region_share: bool,
+        live: bool,
+    ) -> (OverlayExclusion, bool) {
+        let mut closed = false;
+        let outcome = settle_overlay_exclusion(7, kind, region_share, || false, || live, || closed = true);
+        (outcome, closed)
+    }
+
+    #[test]
+    fn a_window_share_overlay_stays_open_when_exclusion_fails_and_nobody_is_live() {
+        // Windows before 2004 and some RDP or VM setups can't exclude a
+        // window from capture. A window capture never contains the overlay,
+        // so when nobody is live the telepointer and draw layer stay (#487).
+        assert_eq!(
+            settle_with_failed_exclusion(TargetKind::Window, false, false),
+            (OverlayExclusion::Capturable, false)
+        );
+    }
+
+    #[test]
+    fn a_share_overlay_closes_when_exclusion_fails_while_live_or_for_a_display() {
+        // While live, a display stream would show a capturable window
+        // share's overlay.
+        assert_eq!(
+            settle_with_failed_exclusion(TargetKind::Window, false, true),
+            (OverlayExclusion::Closed, true)
+        );
+        // A display or region share's own capture would show its overlay,
+        // live or not.
+        for live in [false, true] {
+            for region_share in [false, true] {
+                assert_eq!(
+                    settle_with_failed_exclusion(TargetKind::Display, region_share, live),
+                    (OverlayExclusion::Closed, true),
+                    "display share, region={region_share}, live={live}"
+                );
+            }
+        }
+        // An excluded overlay always stays.
+        let mut closed = false;
+        assert_eq!(
+            settle_overlay_exclusion(7, TargetKind::Display, false, || true, || true, || closed = true),
+            OverlayExclusion::Excluded
+        );
+        assert!(!closed);
     }
 
     #[test]
