@@ -1536,18 +1536,20 @@ enum OverlayExclusion {
 /// A display capture includes every visible pixel on that monitor, so a
 /// display or region share's overlay that can't be excluded is closed, so no
 /// Petal chrome leaks into outgoing pixels. A display share then keeps only
-/// the WGC system border. A window capture never contains its overlay, so a window
-/// share keeps its telepointer and draw layer (Windows before 2004, some RDP
+/// the WGC system border. A window capture never contains its overlay, so a
+/// window share keeps its telepointer and draw layer (Windows before 2004, some RDP
 /// or VM setups) unless this computer is live (`capture_exclusion_active`),
 /// when a display stream would show it. Going live later excludes every
 /// Petal window or keeps the stream's fence shut (`streamer_mode`). Until
 /// then the kept overlay is as capturable as Petal's other windows, so a
 /// display share or another app's capture of the same screen can show it.
-/// A kept window share overlay can still become the custom indicator,
-/// because `custom_indicator_is_ready` ignores `capture_excluded` for a
-/// window, so only a closed display or window overlay's log line says the
-/// WGC system indicator is kept. A region share's indicator comes from Petal
-/// View's selector instead (`session_stub.rs`).
+/// A window share keeps the WGC system border today, because
+/// `session_stub.rs` never requests borderless access for one, but the kept
+/// overlay's log line doesn't rely on that: `custom_indicator_is_ready`
+/// doesn't check `capture_excluded` for a window. So only a closed display or
+/// window overlay's line says the WGC system indicator is kept. A region
+/// share's indicator is Petal View's selector or the WGC border, depending on
+/// the selector's own exclusion (`session_stub.rs`), so its line names neither.
 fn settle_overlay_exclusion(
     logger: &dyn log::Log,
     window_id: u32,
@@ -1596,7 +1598,8 @@ fn settle_overlay_exclusion(
     OverlayExclusion::Closed
 }
 
-/// Logs one line to `logger`, which is `log::logger()` outside tests.
+/// Logs one line to `logger`, which outside tests is the app's logger capped
+/// at `log::max_level()` (`LevelCapped`).
 fn log_overlay(logger: &dyn log::Log, level: log::Level, args: std::fmt::Arguments<'_>) {
     crate::logging::log_to(logger, level, module_path!(), args);
 }
@@ -1778,9 +1781,9 @@ mod tests {
         // Windows before 2004 and some RDP or VM setups can't exclude a
         // window from capture. A window capture never contains the overlay,
         // so when nobody is live the telepointer and draw layer stay (#487).
-        // The kept overlay can still become the custom indicator
-        // (`custom_indicator_is_ready`), so no line says the WGC indicator
-        // is kept.
+        // Today a window share keeps the WGC border (`session_stub.rs` never
+        // requests borderless access for one), but the kept overlay's line
+        // doesn't rely on that, so no line says the WGC indicator is kept.
         assert_eq!(
             settle_with_failed_exclusion(TargetKind::Window, false, false),
             (
