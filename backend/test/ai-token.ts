@@ -161,6 +161,21 @@ function slowParticipants(identities: string[], delayMs: number): RoomDiscoveryS
   } as unknown as RoomDiscoveryService;
 }
 
+// Spends the whole budget INSIDE the lookup and still answers it. A sleep of
+// exactly the budget ties with the route's own timeout timer, and Node can fire
+// that sleep a fraction of a millisecond early, which left budget for a mint.
+function budgetSpendingParticipants(identities: string[], budgetMs: number): RoomDiscoveryService {
+  return {
+    async listParticipants() {
+      const until = performance.now() + budgetMs + 1;
+      while (performance.now() < until) {
+        // busy-wait: the timeout timer cannot fire while this runs
+      }
+      return identities.map((identity) => ({ identity }));
+    },
+  } as unknown as RoomDiscoveryService;
+}
+
 function slowMinter(records: MintRecord[], delayMs: number): GeminiTokenMinter {
   return async (env, request) => {
     await sleep(delayMs);
@@ -1102,9 +1117,9 @@ async function main() {
     // Paying Google for a token we have no time left to hand back is pure
     // waste, so an exhausted budget must stop before the minter, not inside it.
     const records: MintRecord[] = [];
-    const budgetMs = 120;
+    const budgetMs = 20;
     const context = await baseContext({
-      service: slowParticipants([ALICE_ID], budgetMs),
+      service: budgetSpendingParticipants([ALICE_ID], budgetMs),
       mintEphemeralToken: recordingMinter(records),
       upstreamTimeoutMs: budgetMs,
     });
