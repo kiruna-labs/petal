@@ -1377,7 +1377,7 @@ pub(crate) fn create_share_overlay(
     }
 
     let capture_excluded = match settle_overlay_exclusion(
-        log::logger(),
+        &crate::logging::LevelCapped(log::logger(), log::max_level()),
         window_id,
         target.kind(),
         region_share,
@@ -1702,6 +1702,15 @@ mod tests {
         );
         let show = body.find("OverlayPlacementAction::Show").expect("show");
         assert!(settle < exclude && exclude < live && live < show);
+        // Its lines go to the app's logger, behind the same level cap as
+        // `log::warn!`.
+        let settle_args: String = body[settle..].split_whitespace().collect();
+        assert!(
+            settle_args.starts_with(
+                "settle_overlay_exclusion(&crate::logging::LevelCapped(log::logger(),log::max_level()),"
+            ),
+            "settle_overlay_exclusion must log to the app's logger"
+        );
     }
 
     /// Records the level and text of every line `settle_overlay_exclusion`
