@@ -1349,7 +1349,8 @@ pub(crate) fn create_share_overlay(
     // (#487). Excluding a window share's overlay only while live made
     // Windows keep a surface the size of the share in Petal's process until
     // the share ended, even after Stop restored capture. Other capture tools
-    // (OBS, a screen share in another app) don't see the overlay either.
+    // (OBS, a screen share in another app) don't see the overlay either,
+    // unless Windows refuses the exclusion (`settle_overlay_exclusion`).
     let overlay = builder
         .build_petal_excluded()
         .map_err(|error| format!("failed to build overlay for window {window_id}: {error}"))?;
@@ -1537,7 +1538,9 @@ enum OverlayExclusion {
 /// share keeps its telepointer and draw layer (Windows before 2004, some RDP
 /// or VM setups) unless this computer is live (`capture_exclusion_active`),
 /// when a display stream would show it. Going live later excludes every
-/// Petal window or keeps the stream's fence shut (`streamer_mode`).
+/// Petal window or keeps the stream's fence shut (`streamer_mode`). Until
+/// then the kept overlay is as capturable as Petal's other windows, so a
+/// display share or another app's capture of the same screen can show it.
 fn settle_overlay_exclusion(
     window_id: u32,
     target_kind: TargetKind,

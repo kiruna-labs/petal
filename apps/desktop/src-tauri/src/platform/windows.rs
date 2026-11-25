@@ -603,7 +603,8 @@ pub(crate) fn window_title(hwnd: HWND) -> Option<String> {
 
 /// Set whether an app-owned top-level window participates in supported
 /// Windows capture paths. `WDA_NONE` is the idle/recordable state. Share
-/// overlays stay excluded for their whole life (#487), and a Petal View
+/// overlays stay excluded for their whole life when Windows allows it
+/// (#487), and a Petal View
 /// selector holds exclusion only while its share runs.
 pub(crate) fn set_capture_affinity(hwnd: HWND, excluded: bool) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{

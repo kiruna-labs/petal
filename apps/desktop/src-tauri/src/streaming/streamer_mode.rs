@@ -7,7 +7,8 @@
 //!
 //! Capture exclusion follows only this computer's own stream, never the
 //! forced setting (OBS and similar tools still capture Petal normally,
-//! except the share overlays, which no capture shows on Windows):
+//! except the share overlays, which no capture shows on Windows unless
+//! Windows refuses to exclude a window share's overlay):
 //!
 //! * Windows: every Petal top-level window except the Petal View selectors
 //!   (`region-window-*`, which keep their own lease) gets
@@ -177,7 +178,8 @@ pub trait BuildPetalWindow<R: tauri::Runtime> {
 
     /// A window that is excluded from capture for its whole life, live or
     /// not (the share overlays): excluded before it is first shown, and never
-    /// handed back to capture when a stream stops.
+    /// handed back to capture when a stream stops. tao ignores a failed
+    /// affinity call, so the share overlay checks it itself.
     #[cfg(target_os = "windows")]
     fn build_petal_excluded(self) -> tauri::Result<tauri::WebviewWindow<R>>;
 }
