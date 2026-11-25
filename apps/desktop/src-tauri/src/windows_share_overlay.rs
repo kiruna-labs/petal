@@ -1654,16 +1654,18 @@ mod tests {
         // Checked on the source of `create_share_overlay`.
         let source = include_str!("windows_share_overlay.rs");
         let start = source.find("pub(crate) fn create_share_overlay(").expect("create_share_overlay");
-        let end = source[start..].find("pub(crate) fn close_share_overlay(").expect("close_share_overlay") + start;
+        let end = source[start..].find("/// What became of a share overlay").expect("settle_overlay_exclusion docs") + start;
         let body = &source[start..end];
         assert!(body.contains(".build_petal_excluded()"), "the overlay must be built excluded from capture");
         assert!(!body.contains(".build_petal()"), "no share overlay may be built capturable");
-        assert!(
-            body.contains("settle_overlay_exclusion(")
-                && body.contains("crate::platform::windows::set_capture_exclusion(")
-                && body.contains("crate::streaming::streamer_mode::capture_exclusion_active"),
-            "the overlay's real exclusion call and live state must go through settle_overlay_exclusion"
-        );
+        // The real exclusion call, the live state and the overlay's close go
+        // to settle_overlay_exclusion in that order, before it is shown.
+        let settle = body.find("settle_overlay_exclusion(").expect("create_share_overlay settles the exclusion");
+        let exclude = body.find("crate::platform::windows::set_capture_exclusion(").expect("real exclusion call");
+        let live = body.find("crate::streaming::streamer_mode::capture_exclusion_active,").expect("live state");
+        let close = body[live..].find("let _ = overlay.close();").expect("close closure") + live;
+        let show = body.find("OverlayPlacementAction::Show").expect("show");
+        assert!(settle < exclude && exclude < live && live < close && close < show);
     }
 
     /// Runs `settle_overlay_exclusion` with an exclusion call that fails, and

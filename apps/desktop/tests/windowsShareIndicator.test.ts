@@ -178,6 +178,10 @@ test('the existing sharer overlay is the single local Petal indicator and is fai
   // An overlay capture can't skip is closed for a display or region share,
   // and for a window share while live (#487). The Rust tests on
   // settle_overlay_exclusion pin each case.
+  assert.match(
+    overlaySource,
+    /settle_overlay_exclusion\([\s\S]*?set_capture_exclusion\([\s\S]*?\},\s*crate::streaming::streamer_mode::capture_exclusion_active,\s*\|\| \{\s*let _ = overlay\.close\(\);/
+  );
   assert.match(overlaySource, /OverlayExclusion::Closed => \{\s*return Ok\(ShareOverlayReadiness \{\s*shown: false,/);
   assert.match(pointerSource, /sharer-share-border/);
   assert.match(pointerSource, /border:\s*4px solid var\(--sharer-share-border-color\)/);
