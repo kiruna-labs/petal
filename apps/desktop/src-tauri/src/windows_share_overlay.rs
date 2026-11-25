@@ -1377,6 +1377,7 @@ pub(crate) fn create_share_overlay(
     }
 
     let capture_excluded = match settle_overlay_exclusion(
+        log::logger(),
         window_id,
         target.kind(),
         region_share,
@@ -1542,7 +1543,11 @@ enum OverlayExclusion {
 /// Petal window or keeps the stream's fence shut (`streamer_mode`). Until
 /// then the kept overlay is as capturable as Petal's other windows, so a
 /// display share or another app's capture of the same screen can show it.
+/// Only a closed overlay leaves the WGC system border as the indicator; a
+/// kept one can still become the custom indicator
+/// (`custom_indicator_is_ready`), so the log only says so when it closes.
 fn settle_overlay_exclusion(
+    logger: &dyn log::Log,
     window_id: u32,
     target_kind: TargetKind,
     region_share: bool,
@@ -1553,17 +1558,37 @@ fn settle_overlay_exclusion(
     if exclude() {
         return OverlayExclusion::Excluded;
     }
-    log::warn!(
-        "windows share overlay: capture exclusion unavailable for window {window_id}; retaining the WGC system indicator"
+    log_overlay(
+        logger,
+        log::Level::Warn,
+        format_args!(
+            "windows share overlay: WDA_EXCLUDEFROMCAPTURE exclusion unavailable for window {window_id}"
+        ),
     );
     if target_kind == TargetKind::Window && !region_share && !capture_exclusion_active() {
-        log::info!(
-            "windows share overlay: keeping the capturable overlay for window share {window_id}; nobody is live"
+        log_overlay(
+            logger,
+            log::Level::Info,
+            format_args!(
+                "windows share overlay: keeping the capturable overlay for window share {window_id}; nobody is live"
+            ),
         );
         return OverlayExclusion::Capturable;
     }
     close();
+    log_overlay(
+        logger,
+        log::Level::Warn,
+        format_args!(
+            "windows share overlay: closed the capturable overlay for window {window_id}; retaining the WGC system indicator"
+        ),
+    );
     OverlayExclusion::Closed
+}
+
+/// Logs one line to `logger`, which is `log::logger()` outside tests.
+fn log_overlay(logger: &dyn log::Log, level: log::Level, args: std::fmt::Arguments<'_>) {
+    crate::logging::log_to(logger, level, module_path!(), args);
 }
 
 /// Tear down the sharer overlay for a locally shared window on share stop.
@@ -1679,16 +1704,55 @@ mod tests {
         assert!(settle < exclude && exclude < live && live < show);
     }
 
-    /// Runs `settle_overlay_exclusion` with an exclusion call that fails, and
-    /// returns its outcome and whether the overlay was closed.
-    fn settle_with_failed_exclusion(
-        kind: TargetKind,
-        region_share: bool,
-        live: bool,
-    ) -> (OverlayExclusion, bool) {
+    /// Records the level and text of every line `settle_overlay_exclusion`
+    /// logs.
+    #[derive(Default)]
+    struct RecordingLog(std::sync::Mutex<Vec<(log::Level, String)>>);
+
+    impl log::Log for RecordingLog {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            self.0
+                .lock_unpoisoned()
+                .push((record.level(), record.args().to_string()));
+        }
+        fn flush(&self) {}
+    }
+
+    /// What a settled share overlay ended as: its outcome, whether it was
+    /// closed, and the lines logged on the way.
+    type Settled = (OverlayExclusion, bool, Vec<(log::Level, String)>);
+
+    fn settle(kind: TargetKind, region_share: bool, excluded: bool, live: bool) -> Settled {
+        let logger = RecordingLog::default();
         let mut closed = false;
-        let outcome = settle_overlay_exclusion(7, kind, region_share, || false, || live, || closed = true);
-        (outcome, closed)
+        let outcome = settle_overlay_exclusion(
+            &logger,
+            7,
+            kind,
+            region_share,
+            || excluded,
+            || live,
+            || closed = true,
+        );
+        (outcome, closed, logger.0.into_inner().unwrap())
+    }
+
+    /// Runs `settle_overlay_exclusion` with an exclusion call that fails.
+    fn settle_with_failed_exclusion(kind: TargetKind, region_share: bool, live: bool) -> Settled {
+        settle(kind, region_share, false, live)
+    }
+
+    /// The line logged first whenever the exclusion fails, before anything
+    /// is decided. It states only that fact (#487).
+    const EXCLUSION_UNAVAILABLE: &str =
+        "windows share overlay: WDA_EXCLUDEFROMCAPTURE exclusion unavailable for window 7";
+
+    /// Whether any logged line says the WGC system indicator is kept.
+    fn claims_wgc_indicator(lines: &[(log::Level, String)]) -> bool {
+        lines.iter().any(|(_, line)| line.contains("WGC"))
     }
 
     #[test]
@@ -1696,38 +1760,48 @@ mod tests {
         // Windows before 2004 and some RDP or VM setups can't exclude a
         // window from capture. A window capture never contains the overlay,
         // so when nobody is live the telepointer and draw layer stay (#487).
+        let (outcome, closed, lines) = settle_with_failed_exclusion(TargetKind::Window, false, false);
+        assert_eq!((outcome, closed), (OverlayExclusion::Capturable, false));
         assert_eq!(
-            settle_with_failed_exclusion(TargetKind::Window, false, false),
-            (OverlayExclusion::Capturable, false)
+            lines.first(),
+            Some(&(log::Level::Warn, EXCLUSION_UNAVAILABLE.to_string()))
         );
+        // The kept overlay can still become the custom indicator
+        // (`custom_indicator_is_ready`), so the log must not say the WGC
+        // indicator is kept.
+        assert!(!claims_wgc_indicator(&lines), "{lines:?}");
     }
 
     #[test]
     fn a_share_overlay_closes_when_exclusion_fails_while_live_or_for_a_display() {
         // While live, a display stream would show a capturable window
-        // share's overlay.
-        assert_eq!(
-            settle_with_failed_exclusion(TargetKind::Window, false, true),
-            (OverlayExclusion::Closed, true)
-        );
-        // A display or region share's own capture would show its overlay,
-        // live or not.
+        // share's overlay. A display or region share's own capture would
+        // show its overlay, live or not.
+        let mut cases = vec![(TargetKind::Window, false, true)];
         for live in [false, true] {
             for region_share in [false, true] {
-                assert_eq!(
-                    settle_with_failed_exclusion(TargetKind::Display, region_share, live),
-                    (OverlayExclusion::Closed, true),
-                    "display share, region={region_share}, live={live}"
-                );
+                cases.push((TargetKind::Display, region_share, live));
             }
         }
-        // An excluded overlay always stays.
-        let mut closed = false;
+        for (kind, region_share, live) in cases {
+            let case = format!("{kind:?} share, region={region_share}, live={live}");
+            let (outcome, closed, lines) = settle_with_failed_exclusion(kind, region_share, live);
+            assert_eq!((outcome, closed), (OverlayExclusion::Closed, true), "{case}");
+            // The first line only says the exclusion failed, and only the
+            // closed overlay's line says the WGC indicator is kept.
+            assert_eq!(
+                lines.first(),
+                Some(&(log::Level::Warn, EXCLUSION_UNAVAILABLE.to_string())),
+                "{case}"
+            );
+            assert!(!claims_wgc_indicator(&lines[..1]), "{case}: {lines:?}");
+            assert!(claims_wgc_indicator(&lines[1..]), "{case}: {lines:?}");
+        }
+        // An excluded overlay always stays, and nothing is logged.
         assert_eq!(
-            settle_overlay_exclusion(7, TargetKind::Display, false, || true, || true, || closed = true),
-            OverlayExclusion::Excluded
+            settle(TargetKind::Display, false, true, true),
+            (OverlayExclusion::Excluded, false, Vec::new())
         );
-        assert!(!closed);
     }
 
     #[test]

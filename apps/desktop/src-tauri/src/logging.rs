@@ -5624,6 +5624,18 @@ pub(crate) fn write_shutdown_marker(logger: &dyn log::Log, line: &str) {
     logger.flush();
 }
 
+/// Logs one line to `logger` under `target`, so a test can pass its own
+/// logger and read what was logged. Like `log::log!`, it skips a level the
+/// logger filters out, but not on `log::max_level()`, which stays off in
+/// tests.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by windows_share_overlay
+pub(crate) fn log_to(logger: &dyn log::Log, level: log::Level, target: &str, args: std::fmt::Arguments<'_>) {
+    let metadata = log::Metadata::builder().level(level).target(target).build();
+    if logger.enabled(&metadata) {
+        logger.log(&log::Record::builder().args(args).metadata(metadata).build());
+    }
+}
+
 const VANISHED_SESSION_SHUTDOWN_MARKERS: &[&str] = &[
     "left room",
     "quit: quit_app",
