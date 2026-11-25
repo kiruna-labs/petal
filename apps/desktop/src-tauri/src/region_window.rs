@@ -14,6 +14,8 @@ use crate::sync_ext::MutexExt;
 pub const REGION_WINDOW_LABEL_PREFIX: &str = "region-window-";
 pub const REGION_WINDOW_TITLE_PREFIX: &str = "Petal View";
 pub const REGION_WINDOW_ROUTE: &str = "region-window.html";
+/// The selector's minimum size, logical pixels (points on macOS).
+pub(crate) const MIN_SIZE: (i32, i32) = (160, 120);
 
 static NEXT_REGION_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CAPTURE_EXCLUSION_LEASE_ID: AtomicU64 = AtomicU64::new(1);
@@ -93,6 +95,7 @@ pub async fn open_region_window(
     follow_cursor: Option<bool>,
 ) -> Result<String, String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
+    use crate::streaming::streamer_mode::BuildPetalWindow;
 
     let id = NEXT_REGION_WINDOW_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let label = format!("{REGION_WINDOW_LABEL_PREFIX}{id}");
@@ -121,7 +124,7 @@ pub async fn open_region_window(
         .always_on_top(true)
         .resizable(true)
         .inner_size(640.0, 400.0)
-        .min_inner_size(160.0, 120.0)
+        .min_inner_size(f64::from(MIN_SIZE.0), f64::from(MIN_SIZE.1))
         .position(
             120.0 + (id % 5) as f64 * 24.0,
             120.0 + (id % 5) as f64 * 24.0,
@@ -133,7 +136,7 @@ pub async fn open_region_window(
     // 0x8007139F and no selector appears.
     #[cfg(target_os = "windows")]
     let builder = builder.additional_browser_args(crate::webview2_args::WEBVIEW2_ACCEL_ARGS);
-    let window = builder.build().map_err(|error| {
+    let window = builder.build_petal().map_err(|error| {
         clear_placement_state(&label);
         format!("region window: create failed: {error}")
     })?;
@@ -445,6 +448,15 @@ fn register_macos_region_window(
             frame.height as f64,
         ),
     ));
+    // A shared selector's sharer overlay follows every move and resize
+    // (placement, snap, the live aspect lock, user drags); nothing else moves
+    // it for a region share.
+    let follow_app = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        crate::share_overlay::sync_frame_for_window_on_main(&follow_app, token, frame)
+    }) {
+        log::warn!("region window: overlay follow dispatch failed: {error}");
+    }
     log::info!(
         "region window: registered native identity label={title:?} CGWindowID={token} frame=({},{} {}x{})",
         frame.x,
@@ -698,7 +710,7 @@ pub(crate) fn emit_region_control_state_for_status(
     }
 }
 
-fn ensure_region_token(app: &tauri::AppHandle, window_label: &str) -> Result<u32, String> {
+pub(crate) fn ensure_region_token(app: &tauri::AppHandle, window_label: &str) -> Result<u32, String> {
     if !window_label.starts_with(REGION_WINDOW_LABEL_PREFIX) {
         return Err("region window: invalid window label".to_string());
     }
@@ -1050,6 +1062,12 @@ impl SelectorCaptureExclusionLease {
             );
             return;
         }
+        // While this computer is live, streamer mode keeps every Petal window
+        // out of captures, this selector included (#487).
+        if crate::streaming::streamer_mode::adopt_selector_exclusion(raw.0 as isize) {
+            owners.remove(&self.window_label);
+            return;
+        }
         let hwnd = windows::Win32::Foundation::HWND(raw.0 as *mut core::ffi::c_void);
         if !crate::platform::windows::clear_capture_exclusion(hwnd) {
             log::warn!(
@@ -1068,6 +1086,19 @@ impl Drop for SelectorCaptureExclusionLease {
     fn drop(&mut self) {
         self.restore_captureability();
     }
+}
+
+/// The selectors whose share holds an exclusion lease right now: streamer
+/// mode leaves them excluded when a stream stops.
+#[cfg(target_os = "windows")]
+pub(crate) fn leased_selector_hwnds(app: &tauri::AppHandle) -> Vec<isize> {
+    use tauri::Manager;
+    let labels: Vec<String> = capture_exclusion_owners().lock_unpoisoned().keys().cloned().collect();
+    labels
+        .into_iter()
+        .filter_map(|label| app.get_webview_window(&label))
+        .filter_map(|window| window.hwnd().ok().map(|hwnd| hwnd.0 as isize))
+        .collect()
 }
 
 /// Acquire exclusion for an active Petal View share. Returning `None` keeps

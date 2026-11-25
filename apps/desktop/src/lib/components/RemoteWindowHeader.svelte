@@ -41,6 +41,8 @@
     /** e.g. "main.rs — vscode" */
     sourceTitle: string;
     mediaPaused?: boolean;
+    /** This window is being live streamed. */
+    live?: boolean;
     sourceUrl?: string | null;
     /** The spotlighted/full-rate window (SPEC.md §4.7) stays revealed, with
      * no separate focused visual treatment in the decoded header design. */
@@ -145,6 +147,7 @@
     identity,
     sourceTitle,
     mediaPaused = false,
+    live = false,
     sourceUrl = null,
     focused = false,
     autoHide = true,
@@ -608,6 +611,10 @@
       {/if}
     {/if}
 
+    {#if live}
+      <span class="live-chip" role="status" title="This window is being live streamed">LIVE</span>
+    {/if}
+
     {#if statusText}
       <span
         class="status-chip"
@@ -960,6 +967,16 @@
   .title-cluster {
     min-width: 0;
     gap: 9px;
+  }
+
+  .live-chip {
+    flex: none;
+    padding: 2px 7px;
+    border-radius: var(--radius-pill);
+    background: var(--danger);
+    color: var(--text-primary);
+    font: 700 11px / 1.3 var(--font-ui);
+    letter-spacing: 0.04em;
   }
 
   .title {

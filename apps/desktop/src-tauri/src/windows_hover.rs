@@ -1733,6 +1733,7 @@ fn primary_scale(app: &AppHandle) -> f64 {
 /// thread only positions/shows/hides this pre-created window.
 pub fn create_pill_window(app: &AppHandle) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
+    use crate::streaming::streamer_mode::BuildPetalWindow;
     let (width, height) = hover_tab_panel_logical_size();
     match WebviewWindowBuilder::new(
         app,
@@ -1760,7 +1761,7 @@ pub fn create_pill_window(app: &AppHandle) -> Result<(), String> {
     .focused(false)
     .visible(false)
     .inner_size(width, height)
-    .build()
+    .build_petal()
     {
         Ok(window) => {
             // Pre-position off-screen so a brief visible flash cannot occur

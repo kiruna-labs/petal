@@ -28,6 +28,7 @@
 
 <script lang="ts">
   import { onDestroy } from 'svelte';
+  import { roomCodeCopy } from '#lib/data/liveStream.js';
   import Avatar from './Avatar.svelte';
   import type { IdentityColor } from './Avatar.svelte';
   import { participantNamesSummary } from '#lib/data/participantNames.js';
@@ -66,6 +67,8 @@
     onJoin?: () => void;
     /** Canonical letter code; technical room credentials are never accepted. */
     accessCode?: string | null;
+    /** Streamer mode: the code is never shown; the button still copies. */
+    codeHidden?: boolean;
     onToggleFavorite?: () => void;
     onCopyInvite?: () => boolean | void | Promise<boolean | void>;
     onRemove?: () => void;
@@ -79,12 +82,15 @@
     roster = [],
     current = false,
     accessCode = null,
+    codeHidden = false,
     favorite = false,
     onJoin,
     onToggleFavorite,
     onCopyInvite,
     onRemove
   }: Props = $props();
+
+  const code = $derived(accessCode ? roomCodeCopy(name, accessCode, codeHidden) : null);
 
   // A headcount without a roster (status lookup for a room we're not in).
   const headcount = $derived(participants.length === 0 && !current && (occupancy ?? 0) > 0 ? occupancy! : 0);
@@ -226,17 +232,17 @@
         {#if current}
           <span class="room-status live-status">{headline}</span>
         {/if}
-        {#if accessCode}
+        {#if code}
           {#if onCopyInvite}
             <button
               type="button"
               class="room-access-code"
               class:copied={copiedAccessCode}
-              aria-label={copiedAccessCode ? `Invite link copied for ${name}, room ID ${accessCode}` : `Room ID ${accessCode}, click to copy invite`}
+              aria-label={copiedAccessCode ? code.copiedLabel : code.label}
               data-testid="room-access-code"
               onclick={copyAccessCode}
-            >{accessCode}</button>
-          {:else}
+            >{code.text}</button>
+          {:else if !codeHidden}
             <span class="room-access-code" title={`Access code: ${accessCode}`} aria-label={`Access code: ${accessCode}`} data-testid="room-access-code">{accessCode}</span>
           {/if}
           {#if copiedAccessCode}
@@ -255,17 +261,17 @@
   {:else}
     <div class="room-row-content">
       <span class="room-name">{name}</span>
-      {#if accessCode}
+      {#if code}
         {#if onCopyInvite}
           <button
             type="button"
             class="room-access-code"
             class:copied={copiedAccessCode}
-            aria-label={copiedAccessCode ? `Invite link copied for ${name}, room ID ${accessCode}` : `Room ID ${accessCode}, click to copy invite`}
+            aria-label={copiedAccessCode ? code.copiedLabel : code.label}
             data-testid="room-access-code"
             onclick={copyAccessCode}
-          >{accessCode}</button>
-        {:else}
+          >{code.text}</button>
+        {:else if !codeHidden}
           <span class="room-access-code" title={`Access code: ${accessCode}`} aria-label={`Access code: ${accessCode}`} data-testid="room-access-code">{accessCode}</span>
         {/if}
         {#if copiedAccessCode}

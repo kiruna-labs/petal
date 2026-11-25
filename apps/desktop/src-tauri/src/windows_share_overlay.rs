@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 
 use crate::sync_ext::MutexExt;
 use crate::windows_capture_target::TargetKind;
@@ -1343,8 +1344,16 @@ pub(crate) fn create_share_overlay(
                 page_loaded_callback.store(true, Ordering::Release);
             }
         });
+    // Every share overlay is built to stay out of every capture for its
+    // whole life:
+    // excluded before it is first shown, and kept so when a stream stops
+    // (#487). Excluding a window share's overlay only while live made
+    // Windows keep a surface the size of the share in Petal's process until
+    // the share ended, even after Stop restored capture. Other capture tools
+    // (OBS, a screen share in another app) don't see the overlay either,
+    // unless Windows refuses the exclusion (`settle_overlay_exclusion`).
     let overlay = builder
-        .build()
+        .build_petal_excluded()
         .map_err(|error| format!("failed to build overlay for window {window_id}: {error}"))?;
     if let Err(error) = overlay.set_ignore_cursor_events(true) {
         let _ = overlay.close();
@@ -1367,30 +1376,31 @@ pub(crate) fn create_share_overlay(
         ));
     }
 
-    let capture_excluded = if target.kind() == TargetKind::Display || region_share {
-        let hwnd = windows::Win32::Foundation::HWND(overlay_hwnd as *mut core::ffi::c_void);
-        let excluded = crate::platform::windows::set_capture_exclusion(hwnd);
-        if !excluded {
-            log::warn!(
-                "windows share overlay: capture exclusion unavailable for window {window_id}; retaining the WGC system indicator"
-            );
+    let capture_excluded = match settle_overlay_exclusion(
+        &crate::logging::LevelCapped(log::logger(), log::max_level()),
+        window_id,
+        target.kind(),
+        region_share,
+        || {
+            crate::platform::windows::set_capture_exclusion(windows::Win32::Foundation::HWND(
+                overlay_hwnd as *mut core::ffi::c_void,
+            ))
+        },
+        crate::streaming::streamer_mode::capture_exclusion_active,
+        || {
+            let _ = overlay.close();
+        },
+    ) {
+        OverlayExclusion::Excluded => true,
+        OverlayExclusion::Capturable => false,
+        OverlayExclusion::Closed => {
+            return Ok(ShareOverlayReadiness {
+                shown: false,
+                capture_excluded: false,
+                custom_indicator_ready: false,
+            });
         }
-        excluded
-    } else {
-        true
     };
-    // A display capture includes every visible pixel on that monitor. If
-    // affinity cannot exclude this process-owned overlay, do not show even
-    // the pointer/draw layer: the system WGC border remains the only trusted
-    // indicator and no local Petal chrome can leak into outgoing pixels.
-    if (target.kind() == TargetKind::Display || region_share) && !capture_excluded {
-        let _ = overlay.close();
-        return Ok(ShareOverlayReadiness {
-            shown: false,
-            capture_excluded: false,
-            custom_indicator_ready: false,
-        });
-    }
 
     // Resolve the initial geometry before exposing the WebView. The same
     // visible-frame source is used for the hidden pre-load position and the
@@ -1510,6 +1520,91 @@ pub(crate) fn create_share_overlay(
     Ok(readiness)
 }
 
+/// What became of a share overlay after its capture exclusion was tried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayExclusion {
+    Excluded,
+    /// The exclusion failed, and the overlay stays capturable.
+    Capturable,
+    /// The exclusion failed, and the overlay was closed.
+    Closed,
+}
+
+/// Try to keep a share overlay out of capture (`exclude`), and close it
+/// (`close`) when that fails and capture could show it.
+///
+/// A display capture includes every visible pixel on that monitor, so a
+/// display or region share's overlay that can't be excluded is closed, so no
+/// Petal chrome leaks into outgoing pixels. A display share then keeps only
+/// the WGC system border. A window capture never contains its overlay, so a
+/// window share keeps its telepointer and draw layer (Windows before 2004, some RDP
+/// or VM setups) unless this computer is live (`capture_exclusion_active`),
+/// when a display stream would show it. Going live later excludes every
+/// Petal window or keeps the stream's fence shut (`streamer_mode`). Until
+/// then the kept overlay is as capturable as Petal's other windows, so a
+/// display share or another app's capture of the same screen can show it.
+/// A window share keeps the WGC system border today, because
+/// `session_stub.rs` never requests borderless access for one, but the kept
+/// overlay's log line doesn't rely on that: `custom_indicator_is_ready`
+/// doesn't check `capture_excluded` for a window. So only a closed display or
+/// window overlay's line says the WGC system indicator is kept. A region
+/// share's indicator is Petal View's selector or the WGC border, depending on
+/// borderless consent and the selector's own exclusion (`session_stub.rs`), so
+/// its line names neither.
+fn settle_overlay_exclusion(
+    logger: &dyn log::Log,
+    window_id: u32,
+    target_kind: TargetKind,
+    region_share: bool,
+    exclude: impl FnOnce() -> bool,
+    capture_exclusion_active: impl FnOnce() -> bool,
+    close: impl FnOnce(),
+) -> OverlayExclusion {
+    if exclude() {
+        return OverlayExclusion::Excluded;
+    }
+    log_overlay(
+        logger,
+        log::Level::Warn,
+        format_args!(
+            "windows share overlay: WDA_EXCLUDEFROMCAPTURE exclusion unavailable for window {window_id}"
+        ),
+    );
+    if target_kind == TargetKind::Window && !region_share && !capture_exclusion_active() {
+        log_overlay(
+            logger,
+            log::Level::Info,
+            format_args!(
+                "windows share overlay: keeping the capturable overlay for window share {window_id}; nobody is live"
+            ),
+        );
+        return OverlayExclusion::Capturable;
+    }
+    close();
+    if region_share {
+        log_overlay(
+            logger,
+            log::Level::Warn,
+            format_args!("windows share overlay: closed the capturable overlay for region share {window_id}"),
+        );
+    } else {
+        log_overlay(
+            logger,
+            log::Level::Warn,
+            format_args!(
+                "windows share overlay: closed the capturable overlay for window {window_id}; retaining the WGC system indicator"
+            ),
+        );
+    }
+    OverlayExclusion::Closed
+}
+
+/// Logs one line to `logger`, which outside tests is the app's logger capped
+/// at `log::max_level()` (`LevelCapped`).
+fn log_overlay(logger: &dyn log::Log, level: log::Level, args: std::fmt::Arguments<'_>) {
+    crate::logging::log_to(logger, level, module_path!(), args);
+}
+
 /// Tear down the sharer overlay for a locally shared window on share stop.
 pub(crate) fn close_share_overlay(app: &AppHandle, window_id: u32) {
     let _lifecycle_guard = OVERLAY_RECONCILE_LOCK.lock_unpoisoned();
@@ -1592,6 +1687,160 @@ mod tests {
         OVERLAY_LABELS.lock_unpoisoned().clear();
         OVERLAY_DRAW_ACTIVE.lock_unpoisoned().clear();
         OVERLAY_READINESS.lock_unpoisoned().clear();
+    }
+
+    #[test]
+    fn every_share_overlay_is_built_excluded_and_settled_after_its_exclusion() {
+        // Excluding a window share's overlay only while live left Windows
+        // holding a surface the size of the share after Stop (#487), and
+        // what happens when the exclusion fails is decided in one place.
+        // Checked on the source of `create_share_overlay`.
+        let source = include_str!("windows_share_overlay.rs");
+        let start = source.find("pub(crate) fn create_share_overlay(").expect("create_share_overlay");
+        let end = source[start..].find("/// What became of a share overlay").expect("settle_overlay_exclusion docs") + start;
+        let body = &source[start..end];
+        assert!(body.contains(".build_petal_excluded()"), "the overlay must be built excluded from capture");
+        assert!(!body.contains(".build_petal()"), "no share overlay may be built capturable");
+        // The real exclusion call, the live state and the overlay's close go
+        // to settle_overlay_exclusion in that order, before it is shown.
+        let settle = body.find("settle_overlay_exclusion(").expect("create_share_overlay settles the exclusion");
+        let exclude = body.find("crate::platform::windows::set_capture_exclusion(").expect("real exclusion call");
+        let live = body.find("crate::streaming::streamer_mode::capture_exclusion_active,").expect("live state");
+        let after_live: String = body[live..]
+            ["crate::streaming::streamer_mode::capture_exclusion_active,".len()..]
+            .split_whitespace()
+            .collect();
+        assert!(
+            after_live.starts_with("||{let_=overlay.close();},"),
+            "the argument after the live state must close the overlay"
+        );
+        let show = body.find("OverlayPlacementAction::Show").expect("show");
+        assert!(settle < exclude && exclude < live && live < show);
+        // Its lines go to the app's logger, behind the same level cap as
+        // `log::warn!`.
+        let settle_args: String = body[settle..].split_whitespace().collect();
+        assert!(
+            settle_args.starts_with(
+                "settle_overlay_exclusion(&crate::logging::LevelCapped(log::logger(),log::max_level()),"
+            ),
+            "settle_overlay_exclusion must log to the app's logger"
+        );
+    }
+
+    /// Records the level and text of every line `settle_overlay_exclusion`
+    /// logs.
+    #[derive(Default)]
+    struct RecordingLog(std::sync::Mutex<Vec<(log::Level, String)>>);
+
+    impl log::Log for RecordingLog {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            self.0
+                .lock_unpoisoned()
+                .push((record.level(), record.args().to_string()));
+        }
+        fn flush(&self) {}
+    }
+
+    /// What a settled share overlay ended as: its outcome, whether it was
+    /// closed, and the lines logged on the way.
+    type Settled = (OverlayExclusion, bool, Vec<(log::Level, String)>);
+
+    fn settle(kind: TargetKind, region_share: bool, excluded: bool, live: bool) -> Settled {
+        let logger = RecordingLog::default();
+        let mut closed = false;
+        let outcome = settle_overlay_exclusion(
+            &logger,
+            7,
+            kind,
+            region_share,
+            || excluded,
+            || live,
+            || closed = true,
+        );
+        (outcome, closed, logger.0.into_inner().unwrap())
+    }
+
+    /// Runs `settle_overlay_exclusion` with an exclusion call that fails.
+    fn settle_with_failed_exclusion(kind: TargetKind, region_share: bool, live: bool) -> Settled {
+        settle(kind, region_share, false, live)
+    }
+
+    /// The line logged first whenever the exclusion fails, before anything
+    /// is decided. It states only that fact (#487).
+    fn exclusion_unavailable() -> (log::Level, String) {
+        (
+            log::Level::Warn,
+            "windows share overlay: WDA_EXCLUDEFROMCAPTURE exclusion unavailable for window 7".to_string(),
+        )
+    }
+
+    #[test]
+    fn a_window_share_overlay_stays_open_when_exclusion_fails_and_nobody_is_live() {
+        // Windows before 2004 and some RDP or VM setups can't exclude a
+        // window from capture. A window capture never contains the overlay,
+        // so when nobody is live the telepointer and draw layer stay (#487).
+        // Today a window share keeps the WGC border (`session_stub.rs` never
+        // requests borderless access for one), but the kept overlay's line
+        // doesn't rely on that, so no line says the WGC indicator is kept.
+        assert_eq!(
+            settle_with_failed_exclusion(TargetKind::Window, false, false),
+            (
+                OverlayExclusion::Capturable,
+                false,
+                vec![
+                    exclusion_unavailable(),
+                    (
+                        log::Level::Info,
+                        "windows share overlay: keeping the capturable overlay for window share 7; nobody is live"
+                            .to_string(),
+                    ),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn a_share_overlay_closes_when_exclusion_fails_while_live_or_for_a_display() {
+        // While live, a display stream would show a capturable window
+        // share's overlay. A display or region share's own capture would
+        // show its overlay, live or not.
+        //
+        // Only the line about the closed overlay says the WGC indicator is
+        // kept. A region share's indicator comes from Petal View's selector
+        // (`session_stub.rs`), so its line doesn't say so.
+        let wgc_kept = (
+            log::Level::Warn,
+            "windows share overlay: closed the capturable overlay for window 7; retaining the WGC system indicator"
+                .to_string(),
+        );
+        let region_closed = (
+            log::Level::Warn,
+            "windows share overlay: closed the capturable overlay for region share 7".to_string(),
+        );
+        let mut cases = vec![(TargetKind::Window, false, true, wgc_kept.clone())];
+        for live in [false, true] {
+            cases.push((TargetKind::Display, false, live, wgc_kept.clone()));
+            cases.push((TargetKind::Display, true, live, region_closed.clone()));
+        }
+        for (kind, region_share, live, closed_line) in cases {
+            assert_eq!(
+                settle_with_failed_exclusion(kind, region_share, live),
+                (
+                    OverlayExclusion::Closed,
+                    true,
+                    vec![exclusion_unavailable(), closed_line]
+                ),
+                "{kind:?} share, region={region_share}, live={live}"
+            );
+        }
+        // An excluded overlay always stays, and nothing is logged.
+        assert_eq!(
+            settle(TargetKind::Display, false, true, true),
+            (OverlayExclusion::Excluded, false, Vec::new())
+        );
     }
 
     #[test]

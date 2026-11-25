@@ -52,13 +52,23 @@
   } from '#lib/data/launchLocation.js';
   import { openPrivacySettings } from '#lib/data/permissions.js';
   import { shareErrorDisplay } from '#lib/data/shareErrors.js';
+  import { streamEndedMessage } from '#lib/data/liveStream.js';
   import { clearUpdateStatus, updateStatus } from '#lib/stores/updateStatus.svelte.js';
   import { setToastHostVisible } from '#lib/stores/toastHost.svelte.js';
   import { updateAudioDevices } from '#lib/stores/session.svelte.js';
   import { SILENT_MIC_OFFER_ACTION, silentMicNote, silentMicOffer } from '#lib/data/audioDeviceSelection.js';
   import { switchFromSilentMic } from '#lib/data/audioDevices.js';
-  import { EVENTS } from '#lib/ipc.js';
-  import type { ResilienceEvent, ShareErrorPayload, RemoteControlStatus, RoomLeftEvent } from '#lib/ipc.js';
+  import { invoke } from '@tauri-apps/api/core';
+  import { COMMANDS, EVENTS } from '#lib/ipc.js';
+  import type {
+    ResilienceEvent,
+    ShareErrorPayload,
+    RemoteControlStatus,
+    RoomLeftEvent,
+    StreamLiveState,
+    StreamSessionEnded,
+    StreamSessionSnapshot
+  } from '#lib/ipc.js';
   import { connectionLossNeedsToast } from '#lib/stores/meetingRoute.js';
   import Toast from '@petal/shared/ui/components/Toast.svelte';
   import type { ToastVariant } from '@petal/shared/ui/components/Toast.svelte';
@@ -306,6 +316,29 @@
     }
   }
 
+  // Live streaming: tell everyone once when the room goes live (or when they
+  // join a room that already is), except the person streaming it.
+  let roomWasLive = false;
+  async function handleStreamLive(state: StreamLiveState) {
+    const wasLive = roomWasLive;
+    roomWasLive = state.live;
+    if (!state.live || wasLive) return;
+    const own = await invoke<StreamSessionSnapshot | null>(COMMANDS.streamSessionState).catch(
+      () => null
+    );
+    if (own) return;
+    show({ variant: 'info', message: 'This meeting is being live streamed', autoDismiss: true });
+  }
+
+  function handleStreamEnded(event: StreamSessionEnded) {
+    if (event.reason === 'user') return;
+    show({
+      variant: event.reason === 'failed' || event.reason === 'slate-timeout' ? 'degraded' : 'info',
+      message: streamEndedMessage(event.reason, event.error),
+      autoDismiss: true
+    });
+  }
+
   function dismissUpdateToast() {
     clearTimeout(updateDismissTimer);
     updateToastVisible = false;
@@ -383,7 +416,25 @@
         handleEvent({ kind: 'disconnected', reason: 'connectionLost' });
       }
     });
+    const unStreamLive = listen<StreamLiveState>(
+      EVENTS.streamLiveChanged,
+      (e) => void handleStreamLive(e.payload)
+    );
+    const unStreamEnded = listen<StreamSessionEnded>(
+      EVENTS.streamSessionEnded,
+      (e) => handleStreamEnded(e.payload)
+    );
+    const unStreamSaveFailed = listen<string>(EVENTS.streamDestinationSaveFailed, (e) =>
+      show({
+        variant: 'degraded',
+        message: `You're live, but the destination couldn't be saved: ${e.payload}`,
+        autoDismiss: true
+      })
+    );
     return () => {
+      unStreamLive.then((u) => u()).catch(() => {});
+      unStreamEnded.then((u) => u()).catch(() => {});
+      unStreamSaveFailed.then((u) => u()).catch(() => {});
       un.then((u) => u()).catch(() => {});
       unRoomLeft.then((u) => u()).catch(() => {});
       unShareError.then((u) => u()).catch(() => {});

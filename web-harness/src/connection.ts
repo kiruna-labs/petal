@@ -44,6 +44,7 @@ import { registerMeetingAliases, sensitiveStringRegistry, type SensitiveStringRe
 import { createSfuSenderIdentityResolver } from './sfuSenderIdentity.ts';
 import type { FeedbackReportController } from './feedbackReport.ts';
 import { startAudioReceiverTelemetry } from './audioReceiverTelemetry.ts';
+import { attachLiveStream, createLiveStreamBanner, type LiveStreamController } from './liveStream.ts';
 import {
   consumeLeaveRequested,
   deviceChanged,
@@ -174,6 +175,31 @@ export function setupConnection(
   localParticipantMetadata.setLogger((line, kind) => logEvent(line, kind));
 
   let audioPlaybackPrompt: HTMLButtonElement | null = null;
+  // The live-stream banner and opt-out (liveStream.ts) for the joined room.
+  let liveStream: LiveStreamController | null = null;
+
+  function stopLiveStream() {
+    liveStream?.detach();
+    liveStream = null;
+  }
+
+  function startLiveStream(room: Room) {
+    stopLiveStream();
+    const topbar = dom.meetingScreen?.querySelector('.topbar');
+    if (!topbar || !room.localParticipant) return;
+    let storage: Storage | null = null;
+    try {
+      storage = localStorage;
+    } catch {
+      // Storage disabled: the opt-out lasts this session only.
+    }
+    liveStream = attachLiveStream(room, {
+      storage,
+      createView: (onToggle) => createLiveStreamBanner(document, topbar, onToggle),
+      log: (line, kind) => logEvent(line, kind),
+    });
+  }
+
   // Counts connectToMeeting calls, so a deferred registry reset never wipes a
   // newer join's registrations.
   let joinCount = 0;
@@ -307,6 +333,7 @@ export function setupConnection(
     localParticipantMetadata.detach();
     ctx.hook?.plugins?.roomDisconnected();
     ctx.hook?.chat?.roomDisconnected();
+    stopLiveStream();
     state.sharing = false;
     state.screenSharing = false;
     setShareState('not sharing', false);
@@ -852,6 +879,7 @@ export function setupConnection(
       localParticipantMetadata.detach();
       ctx.hook?.plugins?.roomDisconnected();
       ctx.hook?.chat?.roomDisconnected();
+      stopLiveStream();
       ctx.hook.pipelineStats?.resetSession();
       cb.stopViewerDemandHeartbeat();
       cb.stopLatencyProbe();
@@ -951,6 +979,7 @@ export function setupConnection(
       joined = true;
       // `Room.connect()` recreates a closed engine; re-attach (idempotent).
       sfuSender.attach(newRoom.engine);
+      startLiveStream(newRoom);
       // #709: `ParticipantConnected` only fires for participants who join
       // AFTER us -- anyone already in the room when `connect()` resolves is
       // reachable via `remoteParticipants` but was never registered with the

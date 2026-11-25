@@ -2,7 +2,7 @@ import { LogicalPosition } from '@tauri-apps/api/dpi';
 import { CheckMenuItem, Menu, MenuItem, PredefinedMenuItem } from '@tauri-apps/api/menu';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { ShareOptionsMenuEntry, ControlMode, HoverTabPosition } from '#lib/data/shareOptionsMenu.js';
-import type { SharePriority } from '#lib/ipc.js';
+import type { LiveMenuAction, SharePriority } from '#lib/ipc.js';
 
 export interface ShareOptionsMenuPopupOptions {
   position?: LogicalPosition;
@@ -24,6 +24,8 @@ export interface ShareOptionsMenuActions {
   onFps?(fps: number): void;
   /** Flip whether the next share captures the system cursor (Windows). */
   onCursorInVideo?(enabled: boolean): void;
+  /** Go live, stop, or resume the live stream on this share. */
+  onLiveStream?(action: LiveMenuAction): void;
 }
 
 /**
@@ -60,6 +62,8 @@ export function dispatchShareOptionsMenuEntry(
       return entry.enabled && actions.onCursorInVideo
         ? () => actions.onCursorInVideo?.(!entry.checked)
         : undefined;
+    case 'live-stream':
+      return actions.onLiveStream ? () => actions.onLiveStream?.(entry.action) : undefined;
     case 'debug':
       return () => actions.onDebug();
     case 'section-label':
@@ -135,6 +139,7 @@ export async function popupShareOptionsMenu(
         case 'separator':
           return PredefinedMenuItem.new({ item: 'Separator' });
         case 'debug':
+        case 'live-stream':
           return MenuItem.new({
             id: entry.id,
             text: entry.text,

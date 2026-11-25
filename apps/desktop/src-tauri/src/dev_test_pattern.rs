@@ -14,6 +14,7 @@ use std::{
 };
 
 use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 #[cfg(feature = "cockpit-privileged")]
 use tauri::WebviewWindow;
 
@@ -221,7 +222,7 @@ pub fn set_cockpit_test_pattern_phase(
     .always_on_top(true)
     // This companion must not steal focus from the captured 960x600 source.
     .focused(false)
-    .build()
+    .build_petal()
     .map_err(|error| error.to_string())?;
     if let Some(window) = app.get_webview_window(TEST_PATTERN_STATUS_LABEL) {
         window
@@ -354,7 +355,7 @@ fn open_test_pattern_window_with_phase(app: AppHandle) -> Result<(), String> {
     // drawing at full framerate. (#254 fps ceiling, native sender side.)
     .always_on_top(true)
     .focused(true)
-    .build()
+    .build_petal()
     .map_err(|e| e.to_string())?;
 
     Ok(())

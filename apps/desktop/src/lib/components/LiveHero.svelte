@@ -17,6 +17,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import type { IdentityColor } from './Avatar.svelte';
+  import { roomCodeCopy } from '#lib/data/liveStream.js';
 
   interface RoomParticipant {
     name: string;
@@ -29,11 +30,22 @@
     participants?: RoomParticipant[];
     /** Canonical letter code (#123): shown under the name, never on hover. */
     accessCode?: string | null;
+    /** Streamer mode: the code is never shown; the button still copies. */
+    codeHidden?: boolean;
     onJoin?: () => void;
     onCopyInvite?: () => boolean | void | Promise<boolean | void>;
   }
 
-  let { roomName, participants = [], accessCode = null, onJoin, onCopyInvite }: Props = $props();
+  let {
+    roomName,
+    participants = [],
+    accessCode = null,
+    codeHidden = false,
+    onJoin,
+    onCopyInvite
+  }: Props = $props();
+
+  const code = $derived(accessCode ? roomCodeCopy(roomName, accessCode, codeHidden) : null);
 
   const visibleParticipants = $derived(participants.slice(0, 4));
   const overflowCount = $derived(Math.max(0, participants.length - visibleParticipants.length));
@@ -72,19 +84,19 @@
   <div class="bloom" aria-hidden="true"></div>
   <span class="eyebrow"><span class="dot" aria-hidden="true"></span>LIVE NOW</span>
   <span class="title" title={roomName}>{roomName}</span>
-  {#if accessCode}
+  {#if code}
     <div class="code-line">
       {#if onCopyInvite}
         <button
           type="button"
           class="room-access-code"
           class:copied={copiedAccessCode}
-          aria-label={copiedAccessCode ? `Invite link copied for ${roomName}, room ID ${accessCode}` : `Room ID ${accessCode}, click to copy invite`}
+          aria-label={copiedAccessCode ? code.copiedLabel : code.label}
           data-testid="hero-access-code"
           onclick={copyAccessCode}
-        >{accessCode}</button>
-      {:else}
-        <span class="room-access-code" aria-label={`Room ID ${accessCode}`} data-testid="hero-access-code">{accessCode}</span>
+        >{code.text}</button>
+      {:else if !codeHidden}
+        <span class="room-access-code" aria-label={code.staticLabel} data-testid="hero-access-code">{code.text}</span>
       {/if}
       {#if copiedAccessCode}
         <span class="room-access-code-status" role="status" aria-live="polite">Copied</span>

@@ -33,6 +33,7 @@
 //! module's `start_receiver_for_room` doc comment.
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use crate::streaming::streamer_mode::BuildPetalWindow;
 
 pub const TELEPOINTER_DEV_LABEL: &str = "dev-telepointer";
 
@@ -57,7 +58,7 @@ pub fn open_dev_telepointer_window(app: AppHandle) -> Result<(), String> {
     )
     .title("Petal — Telepointer (dev)")
     .inner_size(720.0, 480.0)
-    .build()
+    .build_petal()
     .map_err(|e| e.to_string())?;
 
     Ok(())

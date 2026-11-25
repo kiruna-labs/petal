@@ -5624,6 +5624,38 @@ pub(crate) fn write_shutdown_marker(logger: &dyn log::Log, line: &str) {
     logger.flush();
 }
 
+/// Logs one line to `logger` under `target`, so a test can pass its own
+/// logger and read what was logged. It logs only when `logger.enabled()`
+/// admits the level. Unlike `log::log!`, it doesn't check
+/// `log::max_level()`, which stays off in tests, so pass the app's logger as
+/// `LevelCapped(log::logger(), log::max_level())` to keep that check.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by windows_share_overlay
+pub(crate) fn log_to(logger: &dyn log::Log, level: log::Level, target: &str, args: std::fmt::Arguments<'_>) {
+    let metadata = log::Metadata::builder().level(level).target(target).build();
+    if logger.enabled(&metadata) {
+        logger.log(&log::Record::builder().args(args).metadata(metadata).build());
+    }
+}
+
+/// A logger that drops every level above its cap, as `log::log!` drops a
+/// level above `log::max_level()` before any logger sees it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by windows_share_overlay
+pub(crate) struct LevelCapped<'a>(pub &'a dyn log::Log, pub log::LevelFilter);
+
+impl log::Log for LevelCapped<'_> {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= self.1 && self.0.enabled(metadata)
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if record.level() <= self.1 {
+            self.0.log(record);
+        }
+    }
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+
 const VANISHED_SESSION_SHUTDOWN_MARKERS: &[&str] = &[
     "left room",
     "quit: quit_app",
@@ -9401,6 +9433,30 @@ mod tests {
                 .push(record.args().to_string());
         }
         fn flush(&self) {}
+    }
+
+    /// `log::warn!` and friends drop a level above `log::max_level()` before
+    /// any logger sees it. A line logged through `log_to` and `LevelCapped`
+    /// must be dropped the same way, or Sentry, whose `enabled` admits Info
+    /// and Warn whatever `RUST_LOG` says, would get breadcrumbs the macros
+    /// never sent (#487).
+    #[test]
+    fn a_level_capped_logger_drops_a_level_above_its_cap() {
+        let recorder = RecordingLog::new();
+        let capped = LevelCapped(&recorder, log::LevelFilter::Warn);
+        let at = |level| log::Metadata::builder().level(level).target("desktop_lib::test").build();
+        assert!(!capped.enabled(&at(log::Level::Info)));
+        assert!(capped.enabled(&at(log::Level::Warn)));
+        log_to(&capped, log::Level::Info, "desktop_lib::test", format_args!("info via log_to"));
+        log_to(&capped, log::Level::Warn, "desktop_lib::test", format_args!("warn via log_to"));
+        capped.log(
+            &log::Record::builder()
+                .args(format_args!("info logged directly"))
+                .level(log::Level::Info)
+                .target("desktop_lib::test")
+                .build(),
+        );
+        assert_eq!(*recorder.lines.lock().unwrap(), vec!["warn via log_to".to_string()]);
     }
 
     fn log_via(wrapped: &RepeatSuppressingLog<RecordingLog>, target: &str, level: log::Level, msg: &str) {
