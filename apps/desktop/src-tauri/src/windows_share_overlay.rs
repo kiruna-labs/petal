@@ -1549,7 +1549,8 @@ enum OverlayExclusion {
 /// doesn't check `capture_excluded` for a window. So only a closed display or
 /// window overlay's line says the WGC system indicator is kept. A region
 /// share's indicator is Petal View's selector or the WGC border, depending on
-/// the selector's own exclusion (`session_stub.rs`), so its line names neither.
+/// borderless consent and the selector's own exclusion (`session_stub.rs`), so
+/// its line names neither.
 fn settle_overlay_exclusion(
     logger: &dyn log::Log,
     window_id: u32,
