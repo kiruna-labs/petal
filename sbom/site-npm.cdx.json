@@ -3,17 +3,17 @@
   "bomFormat": "CycloneDX",
   "components": [
     {
-      "bom-ref": "@astrojs/compiler-binding@0.5.1",
+      "bom-ref": "@astrojs/compiler-binding@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding/-/compiler-binding-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding/-/compiler-binding-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "a1ccf2a252d497d98daedb81b8d8eebe7e6d8691eb14b5c01c05864d18342431d0f1c195b157857a43aedae4a840681a8a72488be037ffd9b40f2630cf73659f"
+          "content": "7c71ba7962af9d2955d757543194a2e00ca73868d56cd06065973bd381e2f435bc59e2ad6ec4bb7c9413de89b3d4d6dafb999c70b41018058e43ae5c9ee34bb6"
         }
       ],
       "licenses": [
@@ -24,23 +24,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding",
-      "purl": "pkg:npm/%40astrojs/compiler-binding@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-binding@0.5.3",
       "scope": "required",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-android-arm64@0.5.1",
+      "bom-ref": "@astrojs/compiler-binding-android-arm64@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-android-arm64/-/compiler-binding-android-arm64-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-android-arm64/-/compiler-binding-android-arm64-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "9cc6f69cc209b5c58b347f9f57be449e68be8e9e2d20e60e7ecbf85eda6074e5a4a9cf4fe2e49274ae6ed716f7e34033ad7a39575f12c4b97f9dcdef72ab5a99"
+          "content": "4e1ca80aab6b769e94c2632f49c96e0e5978bef8f8917c143ca1d8a332db5c928f1f9ceb27cb2be7140954e93462f801ac2bc6040fe53d554bc84a7568bb8162"
         }
       ],
       "licenses": [
@@ -51,23 +51,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-android-arm64",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-android-arm64@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-android-arm64@0.5.3",
       "scope": "optional",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-darwin-arm64@0.5.1",
+      "bom-ref": "@astrojs/compiler-binding-darwin-arm64@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-darwin-arm64/-/compiler-binding-darwin-arm64-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-darwin-arm64/-/compiler-binding-darwin-arm64-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e64e3e9d9fd646df9d715a30e33eeb06e23b8aff40e7c87fb90f756097b53eb4e2bdb70292adeed989f1fc0649c082380ac65ac0109e1a9a239058eeb5906105"
+          "content": "ccc2389dd09509dd16b2b9bcb1755c224eaebe22ac8277452e7c6a35de90c76e8b20d4a46f4950ed22fc80ac86713bb484945307097b63559ca4c937eda79a29"
         }
       ],
       "licenses": [
@@ -78,23 +78,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-darwin-arm64",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-darwin-arm64@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-darwin-arm64@0.5.3",
       "scope": "optional",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-darwin-x64@0.5.1",
+      "bom-ref": "@astrojs/compiler-binding-darwin-x64@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-darwin-x64/-/compiler-binding-darwin-x64-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-darwin-x64/-/compiler-binding-darwin-x64-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d01bb0f98493f457f612a432851310ba3b85abf7628cbc37cd75a1b2f234749da91ab4f7f22568c5311c6b67815ff3df865c2455649124428ee6032a287c9e1e"
+          "content": "09ee75a06943801030a153b2e58e05788a859176d2fef2642003cde695c861c867ff78b3178736b7ffcab94649a29c330fa29b963e3a90a8aa9b1454b7f98026"
         }
       ],
       "licenses": [
@@ -105,23 +105,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-darwin-x64",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-darwin-x64@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-darwin-x64@0.5.3",
       "scope": "optional",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-linux-arm64-gnu@0.5.1",
+      "bom-ref": "@astrojs/compiler-binding-linux-arm64-gnu@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-arm64-gnu/-/compiler-binding-linux-arm64-gnu-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-arm64-gnu/-/compiler-binding-linux-arm64-gnu-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c792d1a720a830abaedc836bd7c727e36621c1239a469a7d6f9372dde249fec59579e8c2d7a65eb21bb5265be54a61190022de5b153924cd115fa4fa9c8f98c8"
+          "content": "582046829994a9bb965b7280b0d38a4570de40801e40b7ed66167e08dca5dde83826d91f6515c76afdaa22dcd583a383cb3992d9ef9092982c42ec0c4889c680"
         }
       ],
       "licenses": [
@@ -132,23 +132,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-linux-arm64-gnu",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-arm64-gnu@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-arm64-gnu@0.5.3",
       "scope": "optional",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-linux-arm64-musl@0.5.1",
+      "bom-ref": "@astrojs/compiler-binding-linux-arm64-musl@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-arm64-musl/-/compiler-binding-linux-arm64-musl-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-arm64-musl/-/compiler-binding-linux-arm64-musl-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "98beed404b83937ac67da2a6aceeb79f0e96072d533d58a8406995ca3700afe0be6bf937495318072b4d48ca87f6664f4ff4b08f7d09699d8df38d99d4d9ce11"
+          "content": "0d172310e15670c6da693b1b3847dead8a33af6cc351ffeba03cdc17a5b11d24ada3eaea67537cef1c63fe98cea73d09b53065677579f6764638d70d8905125b"
         }
       ],
       "licenses": [
@@ -159,23 +159,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-linux-arm64-musl",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-arm64-musl@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-arm64-musl@0.5.3",
       "scope": "optional",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-linux-x64-gnu@0.5.1",
+      "bom-ref": "@astrojs/compiler-binding-linux-x64-gnu@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-x64-gnu/-/compiler-binding-linux-x64-gnu-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-x64-gnu/-/compiler-binding-linux-x64-gnu-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b8b19cf63b71c220dee1c43284d3d08a6e040a207f6336d6957b2c7cb02ff2bdfbe2402b7d3c011e3c11dbe8fe5d5c85ef5c82c79985f5835172546a74d0607a"
+          "content": "f2b20c98416db957b998cbf0051e7db921d92fb09a27f08f9b91e1debdc177924ba123e405b975c64f24c1490d289d1049b18415d5a4527c7bdc9459ab8ea2d8"
         }
       ],
       "licenses": [
@@ -186,23 +186,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-linux-x64-gnu",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-x64-gnu@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-x64-gnu@0.5.3",
       "scope": "optional",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-linux-x64-musl@0.5.1",
+      "bom-ref": "@astrojs/compiler-binding-linux-x64-musl@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-x64-musl/-/compiler-binding-linux-x64-musl-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-x64-musl/-/compiler-binding-linux-x64-musl-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "1b4732c229da41473cbf532bcadbd82945fbb2f4c332662d38265fc63c0a3db262e7dcc8a8cf8b974ad680ed064162d91f75e83d8a35f59c253f75edf5ea7d60"
+          "content": "fac642b085eafcf40189e9802c8afe19b1112906d0f369875b689b2549420edb23c8503ff14766f16199852ec01a36f63fd7a44388fb67c75bc5bd1fdc4d2867"
         }
       ],
       "licenses": [
@@ -213,23 +213,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-linux-x64-musl",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-x64-musl@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-x64-musl@0.5.3",
       "scope": "optional",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-wasm32-wasi@0.5.1",
+      "bom-ref": "@astrojs/compiler-binding-wasm32-wasi@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-wasm32-wasi/-/compiler-binding-wasm32-wasi-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-wasm32-wasi/-/compiler-binding-wasm32-wasi-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c8c84b2fc6ac98bc9da00767119c40c3a78b7cd0ecdd8265ea3aa7d298cfb7aceb6f6539a880cb9e28b8fedc138692053832a443a603a414533b3fef49f642c7"
+          "content": "704859ed70286587df25d3586f730359c8b550a8521233cdf8331a2c407c5f5b4a961958370f5e5565323594ded606f79ebec92415577570e2a2a134d1dc952d"
         }
       ],
       "licenses": [
@@ -240,23 +240,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-wasm32-wasi",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-wasm32-wasi@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-wasm32-wasi@0.5.3",
       "scope": "optional",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-win32-arm64-msvc@0.5.1",
+      "bom-ref": "@astrojs/compiler-binding-win32-arm64-msvc@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-win32-arm64-msvc/-/compiler-binding-win32-arm64-msvc-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-win32-arm64-msvc/-/compiler-binding-win32-arm64-msvc-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "6829481baa6816ddd67ff6d9ca4ac4017da70272af0475ba45788a51aebd42306d587d3f14e94e0239c573144d9617a3d80316358171d28f8b1a3c0c707f0fed"
+          "content": "55c83af8d954d923a6546c1e4049ae7eee34307b83b9147cd1da7dc4d2eeb415867491b51cfd178af8c658a1a4c7fd842b71cde6bc01d8dc0f8013439212ac9d"
         }
       ],
       "licenses": [
@@ -267,23 +267,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-win32-arm64-msvc",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-win32-arm64-msvc@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-win32-arm64-msvc@0.5.3",
       "scope": "optional",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-win32-x64-msvc@0.5.1",
+      "bom-ref": "@astrojs/compiler-binding-win32-x64-msvc@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-win32-x64-msvc/-/compiler-binding-win32-x64-msvc-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-win32-x64-msvc/-/compiler-binding-win32-x64-msvc-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "fc4eae0426a063bd18a56aacb010befc5ba788d4a5a1e40f4608fb9772c35a2aa3c48c932e72205f5b13b75f0553b8eb8a07ada529c2f5c1c033a6fa2314a03f"
+          "content": "32de5b2b897965c51d35c57127b555b76c790a4e3a7178310a62214fcb15c94493d38141458a9c6135d02efcb53f2e1e8e095c591c404bacfe8c1547b372cf7e"
         }
       ],
       "licenses": [
@@ -294,23 +294,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-win32-x64-msvc",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-win32-x64-msvc@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-win32-x64-msvc@0.5.3",
       "scope": "optional",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
-      "bom-ref": "@astrojs/compiler-rs@0.5.1",
+      "bom-ref": "@astrojs/compiler-rs@0.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-rs/-/compiler-rs-0.5.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-rs/-/compiler-rs-0.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d64d5a7275fb0dea4889e6bd53dfd8f9dd6174015fca5bb56504249188114b004e040b17227a25c99ba1ff6b5ac7ef37beefc0fa13983fa3f7fb6eb946f313bf"
+          "content": "acd480626e4871124ca4d9be71231a68f3429b309721d8b3ebb91c0700b5a8df1e4e63b8f30109ea165d946abad3ed07207c1496771f68cc6d8b5164dae26eef"
         }
       ],
       "licenses": [
@@ -321,10 +321,10 @@
         }
       ],
       "name": "@astrojs/compiler-rs",
-      "purl": "pkg:npm/%40astrojs/compiler-rs@0.5.1",
+      "purl": "pkg:npm/%40astrojs/compiler-rs@0.5.3",
       "scope": "required",
       "type": "library",
-      "version": "0.5.1"
+      "version": "0.5.3"
     },
     {
       "bom-ref": "@astrojs/internal-helpers@0.11.0",
@@ -624,6 +624,33 @@
       "version": "7.29.8"
     },
     {
+      "bom-ref": "@bruits/satteri-android-arm64@0.11.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@bruits/satteri-android-arm64/-/satteri-android-arm64-0.11.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7a3fb5ac82acfb26fafceb5c21ed523b6d8e5e3255d2aa94a2997954d645f12a9cfcf8f89b50d7a2a050b0fc56e4e5186220d4ca6232ea19e79fc33bf15624db"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@bruits/satteri-android-arm64",
+      "purl": "pkg:npm/%40bruits/satteri-android-arm64@0.11.7",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.11.7"
+    },
+    {
       "bom-ref": "@bruits/satteri-darwin-arm64@0.10.5",
       "externalReferences": [
         {
@@ -676,6 +703,33 @@
       "scope": "optional",
       "type": "library",
       "version": "0.10.5"
+    },
+    {
+      "bom-ref": "@bruits/satteri-freebsd-x64@0.11.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@bruits/satteri-freebsd-x64/-/satteri-freebsd-x64-0.11.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "10596ac3e443468df061dcb565247f74d6217d68ee64bf3a3d8c117292d658466c9237e93678487714b5dd7c364091358528d3195ab8699695be5523a23f29e4"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@bruits/satteri-freebsd-x64",
+      "purl": "pkg:npm/%40bruits/satteri-freebsd-x64@0.11.7",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.11.7"
     },
     {
       "bom-ref": "@bruits/satteri-linux-arm64-gnu@0.10.5",
@@ -1993,17 +2047,17 @@
       "version": "1.6.0"
     },
     {
-      "bom-ref": "@napi-rs/wasm-runtime@1.2.4",
+      "bom-ref": "@napi-rs/wasm-runtime@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@napi-rs/wasm-runtime/-/wasm-runtime-1.2.4.tgz"
+          "url": "https://registry.npmjs.org/@napi-rs/wasm-runtime/-/wasm-runtime-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "009c68503dbfd791121dbbe97328d4dbbe27b003cbb8eb4f1c2934bca24ce698fffc583f0751573568cf9d74d3f4fca60986221e8e333e3d19a265c12a1a32ee"
+          "content": "cc971cc2994e01b81f663bbde485076b32e7c7d4403ed3cdd981895c8e946eb81e691f507cf8c6ad02fa11191202d9d5080e10fbcdc0a46c9a5f9cdda4268a91"
         }
       ],
       "licenses": [
@@ -2014,10 +2068,10 @@
         }
       ],
       "name": "@napi-rs/wasm-runtime",
-      "purl": "pkg:npm/%40napi-rs/wasm-runtime@1.2.4",
+      "purl": "pkg:npm/%40napi-rs/wasm-runtime@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.4"
+      "version": "1.2.7"
     },
     {
       "bom-ref": "@oslojs/encoding@1.1.0",
@@ -3484,17 +3538,17 @@
       "version": "5.3.2"
     },
     {
-      "bom-ref": "astro@7.4.4",
+      "bom-ref": "astro@7.4.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/astro/-/astro-7.4.4.tgz"
+          "url": "https://registry.npmjs.org/astro/-/astro-7.4.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "7be07384609a218fc7d6d57f0503d36ce3d9559f30baeebe6dba5cfb7a12307d9482807597da5e48601293a9ecc2d62b6bd3cef4ea0c44486574ab50919e5357"
+          "content": "7c7e7820e682919635a5a123ca02a7f023dfb89df0f27b3b3e8bab70f30be40a2e26442e4c1a8143645b6c86c186eb596e0daa9f9b1ee9897d0d8c9bcea8c2d1"
         }
       ],
       "licenses": [
@@ -3505,10 +3559,10 @@
         }
       ],
       "name": "astro",
-      "purl": "pkg:npm/astro@7.4.4",
+      "purl": "pkg:npm/astro@7.4.7",
       "scope": "required",
       "type": "library",
-      "version": "7.4.4"
+      "version": "7.4.7"
     },
     {
       "bom-ref": "astro-expressive-code@0.44.2",
@@ -3538,17 +3592,17 @@
       "version": "0.44.2"
     },
     {
-      "bom-ref": "@astrojs/internal-helpers@0.13.0",
+      "bom-ref": "@astrojs/internal-helpers@0.13.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/internal-helpers/-/internal-helpers-0.13.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/internal-helpers/-/internal-helpers-0.13.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "db48f142a9d29a9b24706c9a77b37997a5dfd60cf45026ba94d75ee386c405d6971a99dc1187c0649d78dabd9983305a1b8754cb31a686a656bf520d5367a21d"
+          "content": "2e018b1b3a02d30093de68c362bc73fa172dfedc2cd1e9e95ac2c95b76ecc074773ca82eb29fc7f714484fcad376ccaf2ccd13711861bd12f7d09da869935ca8"
         }
       ],
       "licenses": [
@@ -3559,23 +3613,23 @@
         }
       ],
       "name": "@astrojs/internal-helpers",
-      "purl": "pkg:npm/%40astrojs/internal-helpers@0.13.0",
+      "purl": "pkg:npm/%40astrojs/internal-helpers@0.13.1",
       "scope": "required",
       "type": "library",
-      "version": "0.13.0"
+      "version": "0.13.1"
     },
     {
-      "bom-ref": "@astrojs/markdown-satteri@0.4.6",
+      "bom-ref": "@astrojs/markdown-satteri@0.4.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/markdown-satteri/-/markdown-satteri-0.4.6.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/markdown-satteri/-/markdown-satteri-0.4.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e9b88aa76944018c9c1778e1bfdd5bafe3adc9fe04803164175a112fd92cd2efe6fd8446988ed790643632068cdf90ec953d377fb36da332ad96a7c1364a7a6f"
+          "content": "319be779cffcf7c1861874197e402b55b91d6662f58a68c833c456926cdb026b1eef7ef3afc0fd8a7523150e5e2c15d5def3e86ce52cfd9455fc3e8fa3f6d50e"
         }
       ],
       "licenses": [
@@ -3586,10 +3640,10 @@
         }
       ],
       "name": "@astrojs/markdown-satteri",
-      "purl": "pkg:npm/%40astrojs/markdown-satteri@0.4.6",
+      "purl": "pkg:npm/%40astrojs/markdown-satteri@0.4.7",
       "scope": "required",
       "type": "library",
-      "version": "0.4.6"
+      "version": "0.4.7"
     },
     {
       "bom-ref": "@astrojs/prism@4.1.2",
@@ -3619,17 +3673,260 @@
       "version": "4.1.2"
     },
     {
-      "bom-ref": "es-module-lexer@3.0.3",
+      "bom-ref": "@bruits/satteri-darwin-arm64@0.11.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/es-module-lexer/-/es-module-lexer-3.0.3.tgz"
+          "url": "https://registry.npmjs.org/@bruits/satteri-darwin-arm64/-/satteri-darwin-arm64-0.11.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c9619ed4efe3f9a9669d5e21398ae6668f2ee7c25d9e65c43277914006245ada92893f3aca830810a178ae9a840e3e76b5b625df171e043dc340807072c0bd3f"
+          "content": "ca5950397d64556af0a8beed6a6425a7834fd25a086f82ae69d8ee36b01ee0910e7ab1e98182123d10dbf03a8b8a982f3fb2ace1ef3b2f2759a5d6a4311d6b85"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@bruits/satteri-darwin-arm64",
+      "purl": "pkg:npm/%40bruits/satteri-darwin-arm64@0.11.7",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.11.7"
+    },
+    {
+      "bom-ref": "@bruits/satteri-darwin-x64@0.11.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@bruits/satteri-darwin-x64/-/satteri-darwin-x64-0.11.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "44c42b2b31194594a26322c589f892ba4d27047eae018d5354c351fe1fda138aebd8e4ba97cd9ee0c253a42e87feda9232813edc2c1b9142814062c723079896"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@bruits/satteri-darwin-x64",
+      "purl": "pkg:npm/%40bruits/satteri-darwin-x64@0.11.7",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.11.7"
+    },
+    {
+      "bom-ref": "@bruits/satteri-linux-arm64-gnu@0.11.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@bruits/satteri-linux-arm64-gnu/-/satteri-linux-arm64-gnu-0.11.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "69e1f7eb91876aabf4d70452887686525a4bdbc53c7bd52757d2f18c817a04ec938fbd7f3396e8a781caa26722b385711598ddebc7c3a8dc94db6c85905fe1ec"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@bruits/satteri-linux-arm64-gnu",
+      "purl": "pkg:npm/%40bruits/satteri-linux-arm64-gnu@0.11.7",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.11.7"
+    },
+    {
+      "bom-ref": "@bruits/satteri-linux-arm64-musl@0.11.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@bruits/satteri-linux-arm64-musl/-/satteri-linux-arm64-musl-0.11.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "ef65a5061bb03879bed8dbf841fd56cdf4bbe4f1ce2f3f35b189032679a3d119b60b85dac797da4a24c3b7bbd6a3521c2baac3964b910cd9d6230f2e20a5ae55"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@bruits/satteri-linux-arm64-musl",
+      "purl": "pkg:npm/%40bruits/satteri-linux-arm64-musl@0.11.7",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.11.7"
+    },
+    {
+      "bom-ref": "@bruits/satteri-linux-x64-gnu@0.11.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@bruits/satteri-linux-x64-gnu/-/satteri-linux-x64-gnu-0.11.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "803a78bf58e372478d09eb4bb6b3147c357808a1982fa7dac833dda1a42ad3d9e40c24ab725c4414aee402646e1e1a1a960b1aa386d9305a90af71d0b4dd8d11"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@bruits/satteri-linux-x64-gnu",
+      "purl": "pkg:npm/%40bruits/satteri-linux-x64-gnu@0.11.7",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.11.7"
+    },
+    {
+      "bom-ref": "@bruits/satteri-linux-x64-musl@0.11.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@bruits/satteri-linux-x64-musl/-/satteri-linux-x64-musl-0.11.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "ceacd2a502c0e95dc9fd33b6563b9cd554503c84107684989b328a14bfb71b01a56d788540fd9950348bc3dc659b4b5329790233d00daf88cc88301267e24653"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@bruits/satteri-linux-x64-musl",
+      "purl": "pkg:npm/%40bruits/satteri-linux-x64-musl@0.11.7",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.11.7"
+    },
+    {
+      "bom-ref": "@bruits/satteri-wasm32-wasi@0.11.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@bruits/satteri-wasm32-wasi/-/satteri-wasm32-wasi-0.11.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2f8e9feabb656814787ec4d61824c5717b5bb646b61b233797d4ec984d05813c635c6abeb277588395f787396158390dbc9a51b421c29a04d1279f9c222e28dc"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@bruits/satteri-wasm32-wasi",
+      "purl": "pkg:npm/%40bruits/satteri-wasm32-wasi@0.11.7",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.11.7"
+    },
+    {
+      "bom-ref": "@bruits/satteri-win32-arm64-msvc@0.11.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@bruits/satteri-win32-arm64-msvc/-/satteri-win32-arm64-msvc-0.11.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "476fa8e846c92b8a6a6ddd3ce87f4119455803267917a1674a17e8c9122ed19bbd0d31371fa114fd9fae6bba7d76661fe894106c4f430b0c1abe2e3189a18085"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@bruits/satteri-win32-arm64-msvc",
+      "purl": "pkg:npm/%40bruits/satteri-win32-arm64-msvc@0.11.7",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.11.7"
+    },
+    {
+      "bom-ref": "@bruits/satteri-win32-x64-msvc@0.11.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@bruits/satteri-win32-x64-msvc/-/satteri-win32-x64-msvc-0.11.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "388c81149df9b8cbb9087e515a7211ddb2ac67049c299eef5e6842a2167eaa89d3d529319870847f81fc6115938512f61177550e392385f3ac6a20383b6e15bf"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@bruits/satteri-win32-x64-msvc",
+      "purl": "pkg:npm/%40bruits/satteri-win32-x64-msvc@0.11.7",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.11.7"
+    },
+    {
+      "bom-ref": "es-module-lexer@3.0.5",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/es-module-lexer/-/es-module-lexer-3.0.5.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "44dab694a270e7773bcfd4111de88a780e84cf4a2290eaa2046766c5084a0f1122397d60e50251e08a0557089c9fcb8265c45636b5c2dcd65a2628602bb6846e"
         }
       ],
       "licenses": [
@@ -3640,10 +3937,37 @@
         }
       ],
       "name": "es-module-lexer",
-      "purl": "pkg:npm/es-module-lexer@3.0.3",
+      "purl": "pkg:npm/es-module-lexer@3.0.5",
       "scope": "required",
       "type": "library",
-      "version": "3.0.3"
+      "version": "3.0.5"
+    },
+    {
+      "bom-ref": "satteri@0.11.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/satteri/-/satteri-0.11.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c43392c647357b0df3dc8a2f2239aca896951d15d31982643efc742cbfd4ea8f74926f24494fa99ab655be759de5cade25e134527bcc1227a79643ee61074968"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "satteri",
+      "purl": "pkg:npm/satteri@0.11.7",
+      "scope": "required",
+      "type": "library",
+      "version": "0.11.7"
     },
     {
       "bom-ref": "axobject-query@4.1.0",
@@ -4898,33 +5222,6 @@
       "scope": "required",
       "type": "library",
       "version": "2.3.2"
-    },
-    {
-      "bom-ref": "eventemitter3@5.0.4",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/eventemitter3/-/eventemitter3-5.0.4.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "9a5b1347219a3c18cf79d93a06fc3e6aa6ec5c3b680320339b930eec9814fb2551c8c4393bc6c3e0a71c8bb052f397fddef79e81e08f90bf11e062c29678cb17"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "eventemitter3",
-      "purl": "pkg:npm/eventemitter3@5.0.4",
-      "scope": "required",
-      "type": "library",
-      "version": "5.0.4"
     },
     {
       "bom-ref": "expressive-code@0.44.2",
@@ -6571,17 +6868,17 @@
       "version": "3.1.0"
     },
     {
-      "bom-ref": "lru-cache@11.5.2",
+      "bom-ref": "lru-cache@11.5.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/lru-cache/-/lru-cache-11.5.2.tgz"
+          "url": "https://registry.npmjs.org/lru-cache/-/lru-cache-11.5.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e297ccd457f4c79d28d2d4306f9b9cc3f4733720f4fd824c13a215712b5a959b8c5b176ddec47786e4ad4edc73e0f526bd97d182ebc37a36acbd0da489f475d6"
+          "content": "53837c160ce65b173c935547f0aafa950835f14ec58ef6f2eb05c75515ff659ec8c166d1320ad16cfd16adbe6ae4d5629ebca9e1241a9a91ca76fb5e708b7152"
         }
       ],
       "licenses": [
@@ -6592,23 +6889,23 @@
         }
       ],
       "name": "lru-cache",
-      "purl": "pkg:npm/lru-cache@11.5.2",
+      "purl": "pkg:npm/lru-cache@11.5.3",
       "scope": "required",
       "type": "library",
-      "version": "11.5.2"
+      "version": "11.5.3"
     },
     {
-      "bom-ref": "magic-string@1.4.3",
+      "bom-ref": "magic-string@1.4.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.3.tgz"
+          "url": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "cf5d8ec6668f184d05e3196919d8ee0147248a92e94254c0b809b21a13680fb383a58533bc37efb7151b8ccfe3c339f23f5efca23bbf2837728b6db4c0d27445"
+          "content": "a0b2c2dbe62f4147c06bebf1a2e7c4ff273589c6fceccf625c846a02847fd84844ffc71bdd217ff868b4736072d41fb9573d9edaf42d52f1e2bb5fbadd99e1fb"
         }
       ],
       "licenses": [
@@ -6619,10 +6916,10 @@
         }
       ],
       "name": "magic-string",
-      "purl": "pkg:npm/magic-string@1.4.3",
+      "purl": "pkg:npm/magic-string@1.4.5",
       "scope": "required",
       "type": "library",
-      "version": "1.4.3"
+      "version": "1.4.5"
     },
     {
       "bom-ref": "magicast@0.5.5",
@@ -7846,17 +8143,17 @@
       "version": "7.3.3"
     },
     {
-      "bom-ref": "p-queue@9.3.5",
+      "bom-ref": "p-queue@10.0.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/p-queue/-/p-queue-9.3.5.tgz"
+          "url": "https://registry.npmjs.org/p-queue/-/p-queue-10.0.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "2e48bfce15c55660e17ac0549ffc8744b5bd06d7bb984ef1a051f34d1f2c228995edadb3f8bc5800f906bdd7e274d8aee1f2927e3b5ac22c71487719722e5071"
+          "content": "3f6c2b0ab8b76e118b3e8de45fba985576e8ff91af6950135340e93b6e026de4f9dd8e33df9b7c2545a4bb4e044695c7518079acf322dd39161377e6260c79ac"
         }
       ],
       "licenses": [
@@ -7867,37 +8164,10 @@
         }
       ],
       "name": "p-queue",
-      "purl": "pkg:npm/p-queue@9.3.5",
+      "purl": "pkg:npm/p-queue@10.0.0",
       "scope": "required",
       "type": "library",
-      "version": "9.3.5"
-    },
-    {
-      "bom-ref": "p-timeout@7.0.2",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/p-timeout/-/p-timeout-7.0.2.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "a6b6d7e19dd8b33ac53601fe316e59a1eab76da5eb32d3ff3109c57844fdd1407f1ad19c18343952c83d382cba1138d34e7b4ec3548bdb3f5f30f529a4ddc6bb"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "p-timeout",
-      "purl": "pkg:npm/p-timeout@7.0.2",
-      "scope": "required",
-      "type": "library",
-      "version": "7.0.2"
+      "version": "10.0.0"
     },
     {
       "bom-ref": "package-manager-detector@1.9.0",
@@ -9145,17 +9415,17 @@
       "version": "0.2.17"
     },
     {
-      "bom-ref": "tinyps@0.5.0",
+      "bom-ref": "tinyps@0.5.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/tinyps/-/tinyps-0.5.0.tgz"
+          "url": "https://registry.npmjs.org/tinyps/-/tinyps-0.5.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "2e5bbb9c4b553861e1ee3a24df697afae765bbee0da79bec61507bcde4caeb5e1ca12b2ba36aa3c2d7bb305b7fa2e2ccfe1e245ea6c65e4b5230cbccb2db520f"
+          "content": "b1886f75ba6ea36ac613bbbf8cf50c899cf81f62c268ea1d52d443f68b780cb34541bafcf3883dce8ce8267c4b23ed6be215ea5a499d1d497c622836465971c7"
         }
       ],
       "licenses": [
@@ -9166,10 +9436,10 @@
         }
       ],
       "name": "tinyps",
-      "purl": "pkg:npm/tinyps@0.5.0",
+      "purl": "pkg:npm/tinyps@0.5.2",
       "scope": "required",
       "type": "library",
-      "version": "0.5.0"
+      "version": "0.5.2"
     },
     {
       "bom-ref": "trim-lines@3.0.1",
@@ -9604,17 +9874,17 @@
       "version": "6.0.2"
     },
     {
-      "bom-ref": "unstorage@1.17.5",
+      "bom-ref": "unstorage@1.17.6",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/unstorage/-/unstorage-1.17.5.tgz"
+          "url": "https://registry.npmjs.org/unstorage/-/unstorage-1.17.6.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d22de2aaf45fc76f6190d9ed1f242f253a5fe56f5d43d65a752a1153cfb1565855b53ee3017e7b7dacd83bd107bdc4427c10b28b9611c9aed70833ac6d38243e"
+          "content": "8232ad7269ff2b066e2593bda36b1cd1eb004278664f0d0bbe20c7c1ebd35db24c62cd1d453a7c6441165c7534bd3a736cdddc034cb19537b25ecb0ca77cc3ab"
         }
       ],
       "licenses": [
@@ -9625,10 +9895,10 @@
         }
       ],
       "name": "unstorage",
-      "purl": "pkg:npm/unstorage@1.17.5",
+      "purl": "pkg:npm/unstorage@1.17.6",
       "scope": "required",
       "type": "library",
-      "version": "1.17.5"
+      "version": "1.17.6"
     },
     {
       "bom-ref": "url-extras@0.1.0",
@@ -10052,7 +10322,7 @@
     {
       "dependsOn": [
         "@astrojs/starlight@0.42.8",
-        "astro@7.4.4",
+        "astro@7.4.7",
         "sharp@0.35.5",
         "starlight-links-validator@0.27.0"
       ],
@@ -10060,68 +10330,68 @@
     },
     {
       "dependsOn": [
-        "@astrojs/compiler-binding-android-arm64@0.5.1",
-        "@astrojs/compiler-binding-darwin-arm64@0.5.1",
-        "@astrojs/compiler-binding-darwin-x64@0.5.1",
-        "@astrojs/compiler-binding-linux-arm64-gnu@0.5.1",
-        "@astrojs/compiler-binding-linux-arm64-musl@0.5.1",
-        "@astrojs/compiler-binding-linux-x64-gnu@0.5.1",
-        "@astrojs/compiler-binding-linux-x64-musl@0.5.1",
-        "@astrojs/compiler-binding-wasm32-wasi@0.5.1",
-        "@astrojs/compiler-binding-win32-arm64-msvc@0.5.1",
-        "@astrojs/compiler-binding-win32-x64-msvc@0.5.1"
+        "@astrojs/compiler-binding-android-arm64@0.5.3",
+        "@astrojs/compiler-binding-darwin-arm64@0.5.3",
+        "@astrojs/compiler-binding-darwin-x64@0.5.3",
+        "@astrojs/compiler-binding-linux-arm64-gnu@0.5.3",
+        "@astrojs/compiler-binding-linux-arm64-musl@0.5.3",
+        "@astrojs/compiler-binding-linux-x64-gnu@0.5.3",
+        "@astrojs/compiler-binding-linux-x64-musl@0.5.3",
+        "@astrojs/compiler-binding-wasm32-wasi@0.5.3",
+        "@astrojs/compiler-binding-win32-arm64-msvc@0.5.3",
+        "@astrojs/compiler-binding-win32-x64-msvc@0.5.3"
       ],
-      "ref": "@astrojs/compiler-binding@0.5.1"
+      "ref": "@astrojs/compiler-binding@0.5.3"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-android-arm64@0.5.1"
+      "ref": "@astrojs/compiler-binding-android-arm64@0.5.3"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-darwin-arm64@0.5.1"
+      "ref": "@astrojs/compiler-binding-darwin-arm64@0.5.3"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-darwin-x64@0.5.1"
+      "ref": "@astrojs/compiler-binding-darwin-x64@0.5.3"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-linux-arm64-gnu@0.5.1"
+      "ref": "@astrojs/compiler-binding-linux-arm64-gnu@0.5.3"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-linux-arm64-musl@0.5.1"
+      "ref": "@astrojs/compiler-binding-linux-arm64-musl@0.5.3"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-linux-x64-gnu@0.5.1"
+      "ref": "@astrojs/compiler-binding-linux-x64-gnu@0.5.3"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-linux-x64-musl@0.5.1"
+      "ref": "@astrojs/compiler-binding-linux-x64-musl@0.5.3"
     },
     {
       "dependsOn": [
         "@emnapi/core@1.11.3",
         "@emnapi/runtime@1.11.3",
-        "@napi-rs/wasm-runtime@1.2.4"
+        "@napi-rs/wasm-runtime@1.2.7"
       ],
-      "ref": "@astrojs/compiler-binding-wasm32-wasi@0.5.1"
+      "ref": "@astrojs/compiler-binding-wasm32-wasi@0.5.3"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-win32-arm64-msvc@0.5.1"
+      "ref": "@astrojs/compiler-binding-win32-arm64-msvc@0.5.3"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-win32-x64-msvc@0.5.1"
+      "ref": "@astrojs/compiler-binding-win32-x64-msvc@0.5.3"
     },
     {
       "dependsOn": [
-        "@astrojs/compiler-binding@0.5.1"
+        "@astrojs/compiler-binding@0.5.3"
       ],
-      "ref": "@astrojs/compiler-rs@0.5.1"
+      "ref": "@astrojs/compiler-rs@0.5.3"
     },
     {
       "dependsOn": [
@@ -10147,7 +10417,7 @@
     },
     {
       "dependsOn": [
-        "astro@7.4.4",
+        "astro@7.4.7",
         "@astrojs/internal-helpers@0.11.0",
         "@astrojs/markdown-satteri@0.4.0",
         "es-module-lexer@2.3.2"
@@ -10169,7 +10439,7 @@
     },
     {
       "dependsOn": [
-        "astro@7.4.4",
+        "astro@7.4.7",
         "@astrojs/markdown-satteri@0.4.0",
         "@astrojs/mdx@8.0.0",
         "@astrojs/sitemap@3.7.4",
@@ -10187,7 +10457,7 @@
         "i18next@26.4.2",
         "js-yaml@4.3.2",
         "klona@2.0.6",
-        "magic-string@1.4.3",
+        "magic-string@1.4.5",
         "mdast-util-directive@3.1.0",
         "mdast-util-to-markdown@2.1.2",
         "mdast-util-to-string@4.0.0",
@@ -10233,11 +10503,19 @@
     },
     {
       "dependsOn": [],
+      "ref": "@bruits/satteri-android-arm64@0.11.7"
+    },
+    {
+      "dependsOn": [],
       "ref": "@bruits/satteri-darwin-arm64@0.10.5"
     },
     {
       "dependsOn": [],
       "ref": "@bruits/satteri-darwin-x64@0.10.5"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@bruits/satteri-freebsd-x64@0.11.7"
     },
     {
       "dependsOn": [],
@@ -10259,7 +10537,7 @@
       "dependsOn": [
         "@emnapi/core@1.11.1",
         "@emnapi/runtime@1.11.1",
-        "@napi-rs/wasm-runtime@1.2.4"
+        "@napi-rs/wasm-runtime@1.2.7"
       ],
       "ref": "@bruits/satteri-wasm32-wasi@0.10.5"
     },
@@ -10512,7 +10790,7 @@
         "@emnapi/runtime@1.11.3",
         "@tybys/wasm-util@0.10.3"
       ],
-      "ref": "@napi-rs/wasm-runtime@1.2.4"
+      "ref": "@napi-rs/wasm-runtime@1.2.7"
     },
     {
       "dependsOn": [],
@@ -10779,9 +11057,9 @@
     },
     {
       "dependsOn": [
-        "@astrojs/compiler-rs@0.5.1",
-        "@astrojs/internal-helpers@0.13.0",
-        "@astrojs/markdown-satteri@0.4.6",
+        "@astrojs/compiler-rs@0.5.3",
+        "@astrojs/internal-helpers@0.13.1",
+        "@astrojs/markdown-satteri@0.4.7",
         "@astrojs/telemetry@3.4.2",
         "@capsizecss/unpack@4.0.1",
         "@clack/prompts@1.8.1",
@@ -10796,7 +11074,7 @@
         "devalue@6.0.3",
         "diff@9.0.0",
         "dset@3.1.4",
-        "es-module-lexer@3.0.3",
+        "es-module-lexer@3.0.5",
         "flattie@1.1.1",
         "fontace@0.4.1",
         "get-tsconfig@5.0.0-beta.6",
@@ -10804,13 +11082,13 @@
         "html-escaper@3.0.3",
         "http-cache-semantics@4.3.0",
         "jsonc-parser@3.3.1",
-        "magic-string@1.4.3",
+        "magic-string@1.4.5",
         "magicast@0.5.5",
         "mrmime@2.0.1",
         "neotraverse@1.0.1",
         "obug@3.0.0",
         "p-limit@7.3.3",
-        "p-queue@9.3.5",
+        "p-queue@10.0.0",
         "package-manager-detector@1.9.0",
         "piccolore@0.1.3",
         "picomatch@4.0.7",
@@ -10821,10 +11099,10 @@
         "tinyclip@1.0.3",
         "tinyexec@1.3.1",
         "tinyglobby@0.2.17",
-        "tinyps@0.5.0",
+        "tinyps@0.5.2",
         "ultrahtml@1.7.0",
         "unifont@1.0.3",
-        "unstorage@1.17.5",
+        "unstorage@1.17.6",
         "verkit@0.5.0",
         "vite@8.3.5",
         "vitefu@1.1.3",
@@ -10833,11 +11111,11 @@
         "zod@4.6.7",
         "sharp@0.35.5"
       ],
-      "ref": "astro@7.4.4"
+      "ref": "astro@7.4.7"
     },
     {
       "dependsOn": [
-        "astro@7.4.4",
+        "astro@7.4.7",
         "rehype-expressive-code@0.44.2",
         "url-extras@0.1.0"
       ],
@@ -10854,16 +11132,16 @@
         "unified@11.0.5",
         "yaml@2.9.1"
       ],
-      "ref": "@astrojs/internal-helpers@0.13.0"
+      "ref": "@astrojs/internal-helpers@0.13.1"
     },
     {
       "dependsOn": [
-        "@astrojs/internal-helpers@0.13.0",
+        "@astrojs/internal-helpers@0.13.1",
         "@astrojs/prism@4.1.2",
         "github-slugger@2.0.0",
-        "satteri@0.10.5"
+        "satteri@0.11.7"
       ],
-      "ref": "@astrojs/markdown-satteri@0.4.6"
+      "ref": "@astrojs/markdown-satteri@0.4.7"
     },
     {
       "dependsOn": [
@@ -10873,7 +11151,67 @@
     },
     {
       "dependsOn": [],
-      "ref": "es-module-lexer@3.0.3"
+      "ref": "@bruits/satteri-darwin-arm64@0.11.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@bruits/satteri-darwin-x64@0.11.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@bruits/satteri-linux-arm64-gnu@0.11.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@bruits/satteri-linux-arm64-musl@0.11.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@bruits/satteri-linux-x64-gnu@0.11.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@bruits/satteri-linux-x64-musl@0.11.7"
+    },
+    {
+      "dependsOn": [
+        "@emnapi/core@1.11.1",
+        "@emnapi/runtime@1.11.1",
+        "@napi-rs/wasm-runtime@1.2.7"
+      ],
+      "ref": "@bruits/satteri-wasm32-wasi@0.11.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@bruits/satteri-win32-arm64-msvc@0.11.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@bruits/satteri-win32-x64-msvc@0.11.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "es-module-lexer@3.0.5"
+    },
+    {
+      "dependsOn": [
+        "@types/estree-jsx@1.0.5",
+        "@types/hast@3.0.5",
+        "@types/mdast@4.0.4",
+        "@types/unist@3.0.3",
+        "@bruits/satteri-android-arm64@0.11.7",
+        "@bruits/satteri-darwin-arm64@0.11.7",
+        "@bruits/satteri-darwin-x64@0.11.7",
+        "@bruits/satteri-freebsd-x64@0.11.7",
+        "@bruits/satteri-linux-arm64-gnu@0.11.7",
+        "@bruits/satteri-linux-arm64-musl@0.11.7",
+        "@bruits/satteri-linux-x64-gnu@0.11.7",
+        "@bruits/satteri-linux-x64-musl@0.11.7",
+        "@bruits/satteri-wasm32-wasi@0.11.7",
+        "@bruits/satteri-win32-arm64-msvc@0.11.7",
+        "@bruits/satteri-win32-x64-msvc@0.11.7"
+      ],
+      "ref": "satteri@0.11.7"
     },
     {
       "dependsOn": [],
@@ -11096,10 +11434,6 @@
     {
       "dependsOn": [],
       "ref": "es-module-lexer@2.3.2"
-    },
-    {
-      "dependsOn": [],
-      "ref": "eventemitter3@5.0.4"
     },
     {
       "dependsOn": [
@@ -11478,13 +11812,13 @@
     },
     {
       "dependsOn": [],
-      "ref": "lru-cache@11.5.2"
+      "ref": "lru-cache@11.5.3"
     },
     {
       "dependsOn": [
         "@jridgewell/sourcemap-codec@1.6.0"
       ],
-      "ref": "magic-string@1.4.3"
+      "ref": "magic-string@1.4.5"
     },
     {
       "dependsOn": [
@@ -11843,15 +12177,8 @@
       "ref": "p-limit@7.3.3"
     },
     {
-      "dependsOn": [
-        "eventemitter3@5.0.4",
-        "p-timeout@7.0.2"
-      ],
-      "ref": "p-queue@9.3.5"
-    },
-    {
       "dependsOn": [],
-      "ref": "p-timeout@7.0.2"
+      "ref": "p-queue@10.0.0"
     },
     {
       "dependsOn": [],
@@ -12110,7 +12437,7 @@
     {
       "dependsOn": [
         "@astrojs/starlight@0.42.8",
-        "astro@7.4.4",
+        "astro@7.4.7",
         "@astrojs/markdown-satteri@0.4.0",
         "github-slugger@2.0.0",
         "hast-util-from-html@2.0.3",
@@ -12187,7 +12514,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "tinyps@0.5.0"
+      "ref": "tinyps@0.5.2"
     },
     {
       "dependsOn": [],
@@ -12288,12 +12615,12 @@
         "chokidar@5.0.0",
         "destr@2.0.5",
         "h3@1.15.11",
-        "lru-cache@11.5.2",
+        "lru-cache@11.5.3",
         "node-fetch-native@1.6.7",
         "ofetch@1.5.1",
         "ufo@1.6.4"
       ],
-      "ref": "unstorage@1.17.5"
+      "ref": "unstorage@1.17.6"
     },
     {
       "dependsOn": [],
